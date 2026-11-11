@@ -4,6 +4,11 @@ param(
     [string]$TestwinPath=(Join-Path $env:LOCALAPPDATA 'moon-dev\testwin.exe'),
     [string]$SettingsPath=(Join-Path $env:ProgramFiles 'PowerToys\WinUI3Apps\PowerToys.Settings.exe'),
     [string]$ReportPath=(Join-Path $env:LOCALAPPDATA 'moon-dev\application-integration-results.json'),
+    [string]$OwnedSettingsRecordPath=(Join-Path $env:LOCALAPPDATA 'moon-dev\owned-settings-recovery.json'),
+    [switch]$SignedInstallation,
+    [switch]$ElevatedCoordinator,
+    [string]$OwnerSid,
+    [long]$PreviousForeground=0,
     [switch]$CompileOnly
 )
 . (Join-Path $PSScriptRoot 'install-common.ps1')
@@ -23,6 +28,10 @@ public static class MoonApplicationNative {
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window,out uint process);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
     [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr window,uint attribute,out uint value,uint size);
+    [DllImport("kernel32.dll",SetLastError=true)] static extern IntPtr OpenProcess(uint access,bool inherit,uint process);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+    [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool QueryFullProcessImageName(IntPtr process,uint flags,StringBuilder name,ref uint size);
+    [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetProcessTimes(IntPtr process,out long created,out long exited,out long kernel,out long user);
     public static Window[] Windows() {
         var result=new List<Window>();
         EnumWindows((h,p)=>{if(!IsWindowVisible(h))return true;uint id;GetWindowThreadProcessId(h,out id);var name=new StringBuilder(256);var title=new StringBuilder(2048);GetClassName(h,name,256);GetWindowText(h,title,2048);result.Add(new Window{Id=h.ToInt64(),ProcessId=id,Class=name.ToString(),Title=title.ToString()});return true;},IntPtr.Zero);
@@ -30,6 +39,8 @@ public static class MoonApplicationNative {
     }
     public static uint ProcessId(long window) {uint process;GetWindowThreadProcessId(new IntPtr(window),out process);return process;}
     public static uint Cloaked(long window) {uint value;Marshal.ThrowExceptionForHR(DwmGetWindowAttribute(new IntPtr(window),14,out value,4));return value;}
+    public static string ImagePath(uint process) {var handle=OpenProcess(0x1000,false,process);if(handle==IntPtr.Zero)throw new System.ComponentModel.Win32Exception();try{var name=new StringBuilder(32768);uint size=(uint)name.Capacity;if(!QueryFullProcessImageName(handle,0,name,ref size))throw new System.ComponentModel.Win32Exception();return name.ToString();}finally{CloseHandle(handle);}}
+    public static long Birth(uint process) {var handle=OpenProcess(0x1000,false,process);if(handle==IntPtr.Zero)throw new System.ComponentModel.Win32Exception();try{long created,exited,kernel,user;if(!GetProcessTimes(handle,out created,out exited,out kernel,out user))throw new System.ComponentModel.Win32Exception();return created;}finally{CloseHandle(handle);}}
 }
 '@
 if ($CompileOnly) {
@@ -39,12 +50,40 @@ if ($CompileOnly) {
 $MoonPath=(Resolve-Path -LiteralPath $MoonPath).ProviderPath
 $TestwinPath=(Resolve-Path -LiteralPath $TestwinPath).ProviderPath
 $SettingsPath=(Resolve-Path -LiteralPath $SettingsPath).ProviderPath
-if ((Test-MoonAdministrator) -or [MoonInstallNative]::Integrity() -ne 8192) {throw 'Run this application test with an ordinary medium-integrity Windows token.'}
-if (@(Get-Process -Name moon,testwin,winver,PowerToys.Settings,glazewm -ErrorAction SilentlyContinue).Count) {throw 'The isolated test requires no existing moon, testwin, winver, PowerToys Settings or GlazeWM process.'}
+$identity=[Security.Principal.WindowsIdentity]::GetCurrent()
+try {$currentSid=$identity.User.Value} finally {$identity.Dispose()}
+if (!$OwnerSid) {$OwnerSid=$currentSid}
+if ($OwnerSid -ne $currentSid) {throw 'The test coordinator must use the same Windows account.'}
+if ($SignedInstallation) {
+    $target=Join-Path (Get-MoonInstallDirectory) 'moon.exe'
+    if (![string]::Equals($MoonPath,$target,[StringComparison]::OrdinalIgnoreCase) -or (Get-AuthenticodeSignature -LiteralPath $target).Status -ne 'Valid') {throw 'Signed application testing requires the installed, validly signed moon.exe.'}
+    if (!$PreviousForeground) {$PreviousForeground=[MoonElevatedNative]::GetForegroundWindow().ToInt64()}
+    if (!(Test-MoonAdministrator)) {
+        if ($ElevatedCoordinator) {throw 'Windows did not grant the requested elevated test coordinator.'}
+        $arguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$PSCommandPath,'-MoonPath',$MoonPath,'-TestwinPath',$TestwinPath,'-SettingsPath',$SettingsPath,'-ReportPath',$ReportPath,'-OwnedSettingsRecordPath',$OwnedSettingsRecordPath,'-OwnerSid',$OwnerSid,'-PreviousForeground',([string]$PreviousForeground),'-SignedInstallation','-ElevatedCoordinator')
+        $process=Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -Verb RunAs -WindowStyle Hidden -ArgumentList (($arguments | ForEach-Object {ConvertTo-MoonArgument $_}) -join ' ') -PassThru -Wait
+        try {if($process.ExitCode -ne 0){throw 'The elevated application test failed; inspect its report.'}} finally {$process.Dispose()}
+        Get-Content -Raw -LiteralPath $ReportPath
+        return
+    }
+    if ([MoonInstallNative]::Integrity() -lt 12288) {throw 'The signed application test needs a real high-integrity coordinator for input over elevated Settings.'}
+} elseif ((Test-MoonAdministrator) -or [MoonInstallNative]::Integrity() -ne 8192) {throw 'Run development application tests with an ordinary medium-integrity Windows token.'}
+if (!$SignedInstallation) {
+    foreach ($runner in @(Get-Process -Name PowerToys -ErrorAction SilentlyContinue)) {
+        if ([MoonElevatedNative]::Integrity([uint32]$runner.Id) -gt 8192) {throw 'PowerToys runs elevated; use the signed installation scenario before opening its Settings window.'}
+    }
+}
+if (@(Get-Process -Name moon,testwin,winver,glazewm -ErrorAction SilentlyContinue).Count) {throw 'Stop and restore the installed daemon before this isolated test; no moon, testwin, winver or GlazeWM process may be active.'}
+$existingSettings=@(Get-Process -Name PowerToys.Settings -ErrorAction SilentlyContinue)
+if ($existingSettings.Count) {
+    if (!$SignedInstallation -or !(Test-Path -LiteralPath $OwnedSettingsRecordPath)) {throw 'An existing PowerToys Settings process is not owned by this test.'}
+    $savedSettings=Get-Content -Raw -LiteralPath $OwnedSettingsRecordPath | ConvertFrom-Json
+    if ($existingSettings.Count -ne 1 -or $existingSettings[0].Id -ne $savedSettings.process_id -or [MoonApplicationNative]::Birth([uint32]$existingSettings[0].Id) -ne $savedSettings.process_birth -or ![string]::Equals([MoonApplicationNative]::ImagePath([uint32]$existingSettings[0].Id),$SettingsPath,[StringComparison]::OrdinalIgnoreCase)) {throw 'The prior test Settings process identity changed.'}
+}
 $journal=Join-Path $env:LOCALAPPDATA ('moon\journal-v1-session'+[Diagnostics.Process]::GetCurrentProcess().SessionId+'.json')
 if (Test-Path -LiteralPath $journal) {throw 'A recovery journal already exists; it belongs to an earlier run.'}
 $runnerBefore=@(Get-Process -Name PowerToys -ErrorAction SilentlyContinue | ForEach-Object {[pscustomobject]@{id=$_.Id;started=$_.StartTime.ToUniversalTime().ToString('o')}})
-$previousForeground=[MoonElevatedNative]::GetForegroundWindow().ToInt64()
+if (!$PreviousForeground) {$PreviousForeground=[MoonElevatedNative]::GetForegroundWindow().ToInt64()}
 [void][MoonElevatedNative]::SetThreadDpiAwarenessContext([IntPtr](-4))
 $temporary=Join-Path ([IO.Path]::GetTempPath()) ('moon-applications-'+[guid]::NewGuid().ToString('N'))
 [void][IO.Directory]::CreateDirectory($temporary)
@@ -80,12 +119,19 @@ function Start-OwnedProcess([string]$Path,[string]$Arguments='') {
     $start=[Diagnostics.ProcessStartInfo]::new(); $start.FileName=$Path; $start.Arguments=$Arguments; $start.UseShellExecute=$false; $start.CreateNoWindow=$true
     $process=[Diagnostics.Process]::Start($start); $processes.Add($process); return $process
 }
+function Invoke-SignedMoon([string[]]$Words,[int]$Seconds=20) {
+    $launcher=Start-Process -FilePath $MoonPath -ArgumentList (($Words | ForEach-Object {ConvertTo-MoonArgument $_}) -join ' ') -WindowStyle Hidden -PassThru
+    try {
+        if (!$launcher.WaitForExit($Seconds*1000)) {$launcher.Kill();$launcher.WaitForExit();throw 'The signed moon operation timed out.'}
+        if ($launcher.ExitCode -ne 0) {throw ('The signed moon operation failed: '+($Words -join ' '))}
+    } finally {$launcher.Dispose()}
+}
 function Add-OwnedWindow([string]$Name,[int]$Workspace,[string]$ExpectedPath) {
     $script:found=$null
     Wait-MoonCondition -Description ('new '+$Name+' window') -Seconds 20 -Condition {
         $matching=@([MoonApplicationNative]::Windows() | Where-Object {
             $process=Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue
-            if ($process -and $process.ProcessName -eq $Name -and [string]::Equals($process.Path,$ExpectedPath,[StringComparison]::OrdinalIgnoreCase) -and @($processes | Where-Object Id -eq $process.Id).Count -eq 0) {
+            if ($process -and $process.ProcessName -eq $Name -and [string]::Equals([MoonApplicationNative]::ImagePath([uint32]$process.Id),$ExpectedPath,[StringComparison]::OrdinalIgnoreCase) -and @($processes | Where-Object Id -eq $process.Id).Count -eq 0) {
                 # All three application names were absent before this run. Keep
                 # the actual delegated Settings process for failure cleanup too.
                 $processes.Add($process)
@@ -96,15 +142,17 @@ function Add-OwnedWindow([string]$Name,[int]$Workspace,[string]$ExpectedPath) {
         $script:found=$matching[0]; return $true
     }
     $process=Get-Process -Id $script:found.ProcessId
-    if (![string]::Equals($process.Path,$ExpectedPath,[StringComparison]::OrdinalIgnoreCase)) {throw 'The newly opened application is running from an unexpected path.'}
-    $item=[pscustomobject]@{name=$Name;workspace=$Workspace;id=$script:found.Id;process_id=$process.Id;started=$process.StartTime.ToUniversalTime().ToString('o');class=$script:found.Class;title=$script:found.Title;original=[MoonElevatedNative]::Frame($script:found.Id);path=$process.Path;version=$process.MainModule.FileVersionInfo.FileVersion;integrity_rid=[MoonElevatedNative]::Integrity([uint32]$process.Id)}
+    $image=[MoonApplicationNative]::ImagePath([uint32]$process.Id)
+    if (![string]::Equals($image,$ExpectedPath,[StringComparison]::OrdinalIgnoreCase)) {throw 'The newly opened application is running from an unexpected path.'}
+    $birth=[MoonApplicationNative]::Birth([uint32]$process.Id)
+    $item=[pscustomobject]@{name=$Name;workspace=$Workspace;id=$script:found.Id;process_id=$process.Id;birth=$birth;started=[DateTime]::FromFileTimeUtc($birth).ToString('o');class=$script:found.Class;title=$script:found.Title;original=[MoonElevatedNative]::Frame($script:found.Id);path=$image;version=[Diagnostics.FileVersionInfo]::GetVersionInfo($image).FileVersion;integrity_rid=[MoonElevatedNative]::Integrity([uint32]$process.Id)}
     if ([MoonApplicationNative]::Cloaked($item.id) -ne 0) {throw 'A newly opened test window is unexpectedly cloaked.'}
     $owned.Add($item)
 }
 function Test-OwnedIdentity($Item) {
     if (![MoonElevatedNative]::IsWindow([IntPtr][long]$Item.id) -or [MoonApplicationNative]::ProcessId([long]$Item.id) -ne $Item.process_id) {return $false}
     $process=Get-Process -Id $Item.process_id -ErrorAction SilentlyContinue
-    return $process -and $process.StartTime.ToUniversalTime().ToString('o') -eq $Item.started
+    return $process -and [MoonApplicationNative]::Birth([uint32]$process.Id) -eq $Item.birth
 }
 function Test-Frame($Item,$Rectangle) {
     $frame=[MoonElevatedNative]::Frame([long]$Item.id)
@@ -129,7 +177,8 @@ function Switch-OwnedWorkspace($From,$To,[int]$Trial=-1) {
     if ($Trial -ge 0) {$transitions.Add([pscustomobject]@{trial=$Trial;from=$From.name;to=$To.name;from_pid=$From.process_id;to_pid=$To.process_id;foreground=$To.id;elapsed_ms=$clock.Elapsed.TotalMilliseconds;passed=$true})}
 }
 try {
-    Invoke-MoonNative $MoonPath @('config','validate','--config',$config) | Out-Null
+    if ($SignedInstallation) {Invoke-SignedMoon @('config','validate','--config',$config)}
+    else {Invoke-MoonNative $MoonPath @('config','validate','--config',$config) | Out-Null}
     Start-OwnedProcess $TestwinPath '1' | Out-Null
     Add-OwnedWindow 'testwin' 1 $TestwinPath
     $winver=Join-Path $env:SystemRoot 'System32\winver.exe'
@@ -141,8 +190,17 @@ try {
     Add-OwnedWindow 'PowerToys.Settings' 3 $SettingsPath
     if (@($owned.process_id | Select-Object -Unique).Count -ne 3) {throw 'The focus test did not obtain three distinct application processes.'}
     try {
-        $start=(Invoke-MoonNative $MoonPath @('start','--background','--no-surfaces','--config',$config) -TimeoutSeconds 20).Output | ConvertFrom-Json
-        $daemonId=[int]$start.process_id
+        if ($SignedInstallation) {
+            Invoke-SignedMoon @('start','--background','--no-surfaces','--config',$config)
+            Wait-MoonCondition -Description 'the signed isolated UIAccess daemon' -Condition {
+                $running=Get-MoonDaemon
+                if ($running -and $running.token.ui_access -and [string]::Equals($running.executable,$MoonPath,[StringComparison]::OrdinalIgnoreCase)) {$script:daemonId=[int]$running.process_id;return $true}
+                return $false
+            }
+        } else {
+            $start=(Invoke-MoonNative $MoonPath @('start','--background','--no-surfaces','--config',$config) -TimeoutSeconds 20).Output | ConvertFrom-Json
+            $daemonId=[int]$start.process_id
+        }
     } finally {
         if (!$daemonId) {
             $newDaemon=@(Get-CimInstance Win32_Process -Filter "Name='moon.exe'" | Where-Object {
@@ -210,7 +268,7 @@ finally {
     }
     foreach ($item in $owned) {
         $process=Get-Process -Id $item.process_id -ErrorAction SilentlyContinue
-        if ($process -and $process.StartTime.ToUniversalTime().ToString('o') -eq $item.started) {
+        if ($process -and [MoonApplicationNative]::Birth([uint32]$process.Id) -eq $item.birth) {
             try {if (!$process.WaitForExit(3000)) {$process.Kill();$process.WaitForExit()}} catch {if(!$failure){$failure=$_}} finally {$process.Dispose()}
         }
     }
@@ -221,14 +279,16 @@ finally {
         $current=Get-Process -Id $runner.id -ErrorAction SilentlyContinue
         if ((!$current -or $current.StartTime.ToUniversalTime().ToString('o') -ne $runner.started) -and !$failure) {$failure='The existing PowerToys runner did not survive the test.'}
     }
-    if ([MoonElevatedNative]::IsWindow([IntPtr]$previousForeground)) {
-        [void][MoonElevatedNative]::SetForegroundWindow([IntPtr]$previousForeground)
-        try {Wait-MoonCondition -Description 'the previous user foreground window' -Seconds 3 -Condition {[MoonElevatedNative]::GetForegroundWindow().ToInt64() -eq $previousForeground}}
+    if ([MoonElevatedNative]::IsWindow([IntPtr]$PreviousForeground)) {
+        [void][MoonElevatedNative]::SetForegroundWindow([IntPtr]$PreviousForeground)
+        try {Wait-MoonCondition -Description 'the previous user foreground window' -Seconds 3 -Condition {[MoonElevatedNative]::GetForegroundWindow().ToInt64() -eq $PreviousForeground}}
         catch {if(!$failure){$failure=$_}}
     }
     $report=[pscustomobject]@{recorded_at=[DateTime]::UtcNow.ToString('o');passed=(!$failure);error=if($failure){[string]$failure}else{$null};moon_sha256=(Get-FileHash -LiteralPath $MoonPath -Algorithm SHA256).Hash;applications=$owned.ToArray();checks=$checks.ToArray();focus_transitions=$transitions.ToArray();hook_stats=$hookStats;original_frames_restored=$restored;existing_powertoys_runners=$runnerBefore;input_scope='Alt workspace chords only while a proven newly owned test HWND is foreground';evidence_directory=$temporary}
     [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($ReportPath)))
-    Write-MoonJsonFile $ReportPath $report
+    # Evidence may live on a WSL share, which does not support Windows ACL APIs.
+    # This report carries no installation authority and needs no protected ACL.
+    [IO.File]::WriteAllText($ReportPath,($report | ConvertTo-Json -Depth 12),[Text.UTF8Encoding]::new($false))
 }
 if ($failure) {throw $failure}
 $report | ConvertTo-Json -Depth 12

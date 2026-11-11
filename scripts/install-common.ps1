@@ -142,7 +142,7 @@ function Invoke-MoonNative {
     } finally { $process.Dispose() }
 }
 function Invoke-MoonRpc {
-    param([ValidateSet('query','command')][string]$Method,[string]$Query,[string[]]$Commands)
+    param([ValidateSet('query','command')][string]$Method,[string]$Query,[string[]]$Commands,[long]$ExpectedFocus)
     $pipe = [IO.Pipes.NamedPipeClientStream]::new('.', [MoonInstallNative]::PipeName(), [IO.Pipes.PipeDirection]::InOut, [IO.Pipes.PipeOptions]::Asynchronous)
     try {
         $pipe.Connect(1500)
@@ -152,6 +152,10 @@ function Invoke-MoonRpc {
         try {
             $request = @{version=1;id='installation';method=$Method}
             if ($Method -eq 'query') { $request.query=$Query } else { $request.commands=$Commands }
+            if ($PSBoundParameters.ContainsKey('ExpectedFocus')) {
+                if ($Method -ne 'command') {throw 'ExpectedFocus applies only to command requests.'}
+                $request.expected_focus=$ExpectedFocus
+            }
             $writer.AutoFlush=$true; $writer.NewLine="`n"; $writer.WriteLine(($request | ConvertTo-Json -Compress))
             $read=$reader.ReadLineAsync()
             if (!$read.Wait(10000)) { throw 'moon IPC response timed out' }

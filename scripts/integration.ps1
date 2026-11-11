@@ -4,7 +4,8 @@ param(
     [string]$ExtensionPath = (Join-Path $PSScriptRoot '..\examples\workspace-state.ps1'),
     [string]$MoonPath = (Join-Path $env:LOCALAPPDATA 'moon-dev\moon.exe'),
     [string]$TestwinPath = (Join-Path $env:LOCALAPPDATA 'moon-dev\testwin.exe'),
-    [string]$ReportPath = (Join-Path $env:LOCALAPPDATA 'moon-dev\integration-results.json')
+    [string]$ReportPath = (Join-Path $env:LOCALAPPDATA 'moon-dev\integration-results.json'),
+    [switch]$GuardOnly
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -156,6 +157,25 @@ function Read-Recovery {
     $bytes = Read-RecoveryBytes
     return [Text.Encoding]::UTF8.GetString($bytes) | ConvertFrom-Json
 }
+function Invoke-PublicRequest([hashtable]$Request) {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    try { $pipeName = [MoonExtensionIdentity]::PipeName($identity.Token) } finally { $identity.Dispose() }
+    $pipe = New-Object IO.Pipes.NamedPipeClientStream('.', $pipeName, [IO.Pipes.PipeDirection]::InOut, [IO.Pipes.PipeOptions]::Asynchronous)
+    try {
+        $pipe.Connect(5000)
+        $reader = New-Object IO.StreamReader($pipe, $utf8, $false, 4096, $true)
+        $writer = New-Object IO.StreamWriter($pipe, $utf8, 4096, $true)
+        try {
+            $writer.NewLine = "`n"
+            $writer.AutoFlush = $true
+            $writer.WriteLine(($Request | ConvertTo-Json -Compress))
+            $response = $reader.ReadLineAsync()
+            if (!$response.Wait(5000)) { throw 'Public IPC request timed out' }
+            if ($null -eq $response.Result) { throw 'Public IPC response ended before a complete frame' }
+            return $response.Result | ConvertFrom-Json
+        } finally { $reader.Dispose(); try { $writer.Dispose() } catch [IO.IOException] { } }
+    } finally { $pipe.Dispose() }
+}
 
 try {
     # Existing daemons and helper windows belong to the user or another test run.
@@ -185,7 +205,19 @@ try {
     Record-Pass 'four native windows tile exactly'
     $extension = (& $ExtensionPath -Once) | ConvertFrom-Json
     if (@($extension.workspaces).Count -ne 10) { throw 'The standalone IPC extension could not query all workspaces' }
-    Record-Pass 'standalone public IPC extension'
+    $guardState = Invoke-Moon query world
+    $guardWindows = @($guardState.windows.PSObject.Properties.Name | Sort-Object)
+    $wrongFocus = [long](@($guardWindows | Where-Object { [long]$_ -ne [long]$guardState.focused })[0])
+    $guardResponse = Invoke-PublicRequest @{ version=1; id='guard-regression'; method='command'; commands=@('close'); expected_focus=$wrongFocus }
+    [IO.File]::WriteAllText((Join-Path $testDirectory 'guard-rejection.json'), ($guardResponse | ConvertTo-Json -Depth 8), $utf8)
+    if ($guardResponse.ok -or $guardResponse.error -ne 'focus changed; guarded commands were not executed') { throw 'Mismatched focus guard did not explicitly reject close' }
+    Start-Sleep -Milliseconds 100
+    $afterGuard = @((Invoke-Moon query world).windows.PSObject.Properties.Name | Sort-Object)
+    if (($afterGuard -join ',') -ne ($guardWindows -join ',')) { throw 'Rejected close changed the managed window set' }
+    foreach ($id in $guardWindows) { if (![MoonIntegrationNative]::IsWindow([IntPtr][long]$id)) { throw 'Rejected close destroyed a native helper HWND' } }
+    if (@([MoonIntegrationNative]::Windows([uint32]$helper.Id)).Count -ne 4) { throw 'Rejected close changed the native helper window set' }
+    Record-Pass 'standalone public IPC extension and guarded close rejection'
+    if ($GuardOnly) { return }
     $beforeMinimize = (Invoke-Moon query world).workspaces[0].tree | ConvertTo-Json -Depth 64 -Compress
     $minimizeId = (Invoke-Moon query world).focused
     [void][MoonIntegrationNative]::ShowWindowAsync([IntPtr][long]$minimizeId, 6)
@@ -198,7 +230,15 @@ try {
     Record-Pass 'minimize restores the same tree slot'
 
 
-    foreach ($command in @(@('focus','left'),@('move','right'),@('resize','width','+2%'),@('toggle-direction'))) { $null = Invoke-Moon @command; Assert-Placements }
+    foreach ($command in @(@('focus','left'),@('move','right'),@('resize','width','+2%'),@('toggle-direction'))) {
+        $null = Invoke-Moon @command
+        Assert-Placements
+        if ($command[0] -eq 'focus') {
+            Wait-Until -Description 'focus command activates the owned helper' -Seconds 5 -Condition {
+                [MoonIntegrationNative]::GetForegroundWindow().ToInt64() -eq [long](Invoke-Moon query world).focused
+            }
+        }
+    }
     Record-Pass 'focus move resize and direction commands'
     $null = Invoke-Moon toggle-floating
     if (!(@(Invoke-Moon query windows | Where-Object floating).Count -eq 1)) { throw 'Floating toggle did not change exactly one window' }
@@ -215,6 +255,9 @@ try {
     $state = Invoke-Moon query world
     $nativeId = [long]$state.focused
     $nativeHandle = [IntPtr]$nativeId
+    Wait-Until -Description "native fullscreen fixture foreground must be owned helper $nativeId" -Seconds 5 -Condition {
+        [MoonIntegrationNative]::GetForegroundWindow().ToInt64() -eq $nativeId
+    }
     $originalStyle = [MoonIntegrationNative]::GetWindowStyle($nativeHandle, -16)
     $nativeMonitor = @($state.monitors | Where-Object { $_.id -eq $state.active_monitor })[0]
     $beforeNative = [MoonIntegrationNative]::Frame($nativeId)

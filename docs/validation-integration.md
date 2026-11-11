@@ -25,7 +25,7 @@ intentionally excluded from source control.
 |---|---|
 | Background launch | The launcher exits, both redirected output streams close, and its independent child reports ready. The configuration path contains spaces. |
 | Four windows tile | DWM visible-frame rectangles equal committed placements within one physical pixel. |
-| Standalone extension | `examples/workspace-state.ps1` queries all ten workspaces using the documented named pipe and NDJSON protocol, without invoking the moon CLI. |
+| Standalone extension | `examples/workspace-state.ps1` queries all ten workspaces using the documented named pipe and NDJSON protocol, without invoking the moon CLI. A close request with the wrong expected focus is rejected, preserving all four native HWNDs and the managed set. |
 | Minimize and restore | A minimized window stops receiving placement effects, retains its persistent tree slot, and returns to tiling after restore. |
 | Focus, move, resize and direction | Commands complete and their resulting native rectangles match the committed layout. |
 | Float and fullscreen | State transitions and native rectangles agree, including return to tiling. |
@@ -38,9 +38,29 @@ intentionally excluded from source control.
 | Background resume | `start --background --resume` adopts a saved journal with identical trees, focus and target rectangles, then restores original frames on clean exit. |
 | Startup failure | A deliberately conflicting named pipe makes resumed startup fail before the main loop. An inherited recovery journal restores an owned window parked offscreen and is removed after successful recovery. |
 
-All fourteen passed in the complete local run. The test closes only its own helper
-process and daemon; recovery runs in its cleanup path even after an assertion
-failure.
+All fourteen passed in the complete local run using candidate
+`300A014A860C530C328947947C671828EB360A6749D888D08054AB47E278C06B`,
+started at `2026-11-11T22:23:21.5908320Z` (12 November local time). The test closes
+only its own helper process and daemon; recovery runs in its cleanup path even
+after an assertion failure.
+
+A later candidate's rerun stopped at the native fullscreen scenario because an
+elevated Settings window retained foreground. The owned helper had the correct
+borderless monitor bounds, but was not the actual foreground window; moon
+correctly did not classify it as foreground fullscreen. That failed run remains
+under `target/integration-regressions/elevated-foreground`. The harness now checks
+native foreground separately after its focus command and before fullscreen
+mutation. A complete rerun of the final candidate remains required after that
+owned elevated window is cleared.
+
+The focused `-GuardOnly` run also passed on 12 November using candidate
+`DC3B2A25CEEA758939C8EA07387AE6440BB817F780A502784C82C54DA7096594`.
+It exercised actual named-pipe command rejection with a different live managed
+HWND as `expected_focus`, checked the error response and independently verified
+that no native helper or managed entry disappeared. Its three-case result and
+raw response are retained in `target/guard-results.json` and the associated
+integration evidence directory. This shorter mode exits through the same
+recovery and owned-process cleanup as the full suite.
 
 ## Defects found and verified during integration
 

@@ -19,3 +19,11 @@ Each UTF-8 JSON frame ends in a newline. Requests are at most 64 KiB; responses 
 Replies contain `version`, the same `id`, `ok`, `result`, `error`, and the committed `revision`. Queries accept `world`, `windows` (desired placements), `monitors`, `config`, `transactions`, and `stats`. Command arrays execute in order and stop on an error; earlier successful commands remain committed. The grammar is shared with bindings, rules, aliases and widget clicks.
 
 `moon protocol schema` prints the generated request/response schema. The integration suite runs this extension as a separate protocol client. Windows titles are available to explicitly connected clients through the world; raw keys are never exposed.
+
+## Guarded commands
+
+Automation can include `expected_focus` on a command request, for example
+`{"version":1,"id":2,"method":"command","commands":["close"],"expected_focus":12345}`.
+The daemon rejects the entire request if its focused window differs when the
+request executes. This prevents an inspection followed by `close` from acting
+on a different window after focus changes. Omit the field for ordinary commands.

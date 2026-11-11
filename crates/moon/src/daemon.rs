@@ -977,8 +977,9 @@ impl Daemon {
         let result = (|| -> Result<Value> {
             let parsed = moon_core::protocol::Request::parse(&message.to_string())
                 .map_err(anyhow::Error::msg)?;
+            parsed.check_focus(self.world.focused).map_err(anyhow::Error::msg)?;
             match parsed.action {
-                moon_core::protocol::RequestAction::Command { commands } => {
+                moon_core::protocol::RequestAction::Command { commands, .. } => {
                     self.commands(commands)?;
                     Ok(json!({"revision":self.world.revision}))
                 }

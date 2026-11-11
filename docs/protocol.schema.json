@@ -1,5 +1,13 @@
 {
   "request": {
+    "$defs": {
+      "WindowId": {
+        "description": "A top-level window. On Windows this is the numeric value of the `HWND`.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "oneOf": [
       {
@@ -25,6 +33,17 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "expected_focus": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WindowId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Reject the command if focus changed since an automation inspected it."
           },
           "method": {
             "const": "command",

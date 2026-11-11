@@ -49,7 +49,7 @@ impl Graphics {
             let mut device = None;
             let create = |driver, device: &mut Option<ID3D11Device>| {
                 let flags = if driver == D3D_DRIVER_TYPE_WARP
-                    && std::env::var("MOON_WARP_SERIAL").as_deref() == Ok("1")
+                    && std::env::var("MOON_WARP_SERIAL").as_deref() != Ok("0")
                 {
                     D3D11_CREATE_DEVICE_BGRA_SUPPORT
                         | D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS
@@ -68,13 +68,15 @@ impl Graphics {
                     None,
                 )
             };
-            let force_warp = std::env::var("MOON_GRAPHICS_DRIVER").as_deref() == Ok("warp");
-            let backend = if !force_warp && create(D3D_DRIVER_TYPE_HARDWARE, &mut device).is_ok() {
-                "hardware"
-            } else {
-                create(D3D_DRIVER_TYPE_WARP, &mut device)?;
-                "warp"
-            };
+            let prefer_hardware =
+                std::env::var("MOON_GRAPHICS_DRIVER").as_deref() == Ok("hardware");
+            let backend =
+                if prefer_hardware && create(D3D_DRIVER_TYPE_HARDWARE, &mut device).is_ok() {
+                    "hardware"
+                } else {
+                    create(D3D_DRIVER_TYPE_WARP, &mut device)?;
+                    "warp"
+                };
             let d3d = device.ok_or_else(|| windows::core::Error::from_hresult(E_FAIL))?;
             let dxgi_device: IDXGIDevice = d3d.cast()?;
             let factory: ID2D1Factory1 =
@@ -998,7 +1000,7 @@ impl Surfaces {
         if self.previous.as_ref() != Some(&scene) {
             unsafe {
                 self.graphics.composition.Commit()?;
-                if std::env::var("MOON_COMPOSITION_WAIT").as_deref() == Ok("1") {
+                if std::env::var("MOON_COMPOSITION_WAIT").as_deref() != Ok("0") {
                     self.graphics.composition.WaitForCommitCompletion()?;
                 }
             }

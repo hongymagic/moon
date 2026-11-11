@@ -1,6 +1,6 @@
 # moon: build plan
 
-Status: draft 2 for review, 2026-11-11. Nothing is built yet and the repo has no commits.
+Status: implementation and Windows acceptance in progress, 2026-11-12. Source is committed on `codex/moon-v1`; measured results and remaining acceptance conditions are tracked in `docs/acceptance-status.md`. M5 and the seven-day sole-manager soak are not complete.
 
 ## Intent
 

@@ -19,6 +19,9 @@ pub enum RequestAction {
     },
     Command {
         commands: Vec<String>,
+        /// Reject the command if focus changed since an automation inspected it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_focus: Option<crate::ids::WindowId>,
     },
     Subscribe {},
 }
@@ -44,7 +47,7 @@ impl Request {
         let object = object.as_object().ok_or("request must be an object")?;
         let allowed: &[&str] = match object.get("method").and_then(|m| m.as_str()) {
             Some("query") => &["version", "id", "method", "query"],
-            Some("command") => &["version", "id", "method", "commands"],
+            Some("command") => &["version", "id", "method", "commands", "expected_focus"],
             Some("subscribe") => &["version", "id", "method"],
             _ => return Err("method must be query, command or subscribe".into()),
         };
@@ -58,12 +61,21 @@ impl Request {
         if !request.id.is_null() && !request.id.is_string() && !request.id.is_number() {
             return Err("id must be a string, number or null".into());
         }
-        if let RequestAction::Command { commands } = &request.action
+        if let RequestAction::Command { commands, .. } = &request.action
             && (commands.is_empty() || commands.len() > 128)
         {
             return Err("request must contain 1–128 commands".into());
         }
         Ok(request)
+    }
+
+    pub fn check_focus(&self, focused: Option<crate::ids::WindowId>) -> Result<(), String> {
+        if let RequestAction::Command { expected_focus: Some(expected), .. } = self.action
+            && focused != Some(expected)
+        {
+            return Err("focus changed; guarded commands were not executed".into());
+        }
+        Ok(())
     }
 }
 impl Response {
@@ -95,5 +107,20 @@ mod tests {
             Request::parse(r#"{"version":1,"id":1,"method":"command","commands":[]}"#).is_err()
         );
         assert!(Request::parse(r#"{"version":1,"id":1,"method":"query","extra":true}"#).is_err());
+    }
+
+    #[test]
+    fn guarded_command_rejects_stale_focus_without_affecting_ordinary_clients() {
+        let guarded = Request::parse(
+            r#"{"version":1,"id":1,"method":"command","commands":["close"],"expected_focus":42}"#,
+        )
+        .unwrap();
+        assert!(guarded.check_focus(Some(crate::ids::WindowId(42))).is_ok());
+        assert!(guarded.check_focus(Some(crate::ids::WindowId(43))).is_err());
+        assert!(guarded.check_focus(None).is_err());
+        let ordinary =
+            Request::parse(r#"{"version":1,"id":1,"method":"command","commands":["close"]}"#)
+                .unwrap();
+        assert!(ordinary.check_focus(None).is_ok());
     }
 }
