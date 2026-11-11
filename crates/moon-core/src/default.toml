@@ -1,0 +1,177 @@
+# moon defaults. User bindings merge by chord, rules append, other lists replace.
+config-version = 1
+theme = "dark"
+cursor-jump = true
+focus-follows-cursor = false
+monitors = []
+workspaces = [{name="1"}, {name="2"}, {name="3"}, {name="4"}, {name="5"}, {name="6"}, {name="7"}, {name="8"}, {name="9"}, {name="10"}]
+
+[gaps]
+inner = 16
+outer = 32
+
+[bindings]
+"alt+h" = ["focus left"]
+"alt+shift+h" = ["move left"]
+"alt+left" = ["focus left"]
+"alt+shift+left" = ["move left"]
+"alt+ctrl+h" = ["move-to-monitor left"]
+"alt+l" = ["focus right"]
+"alt+shift+l" = ["move right"]
+"alt+right" = ["focus right"]
+"alt+shift+right" = ["move right"]
+"alt+ctrl+l" = ["move-to-monitor right"]
+"alt+k" = ["focus up"]
+"alt+shift+k" = ["move up"]
+"alt+up" = ["focus up"]
+"alt+shift+up" = ["move up"]
+"alt+ctrl+k" = ["move-to-monitor up"]
+"alt+j" = ["focus down"]
+"alt+shift+j" = ["move down"]
+"alt+down" = ["focus down"]
+"alt+shift+down" = ["move down"]
+"alt+ctrl+j" = ["move-to-monitor down"]
+"alt+1" = ["workspace 1"]
+"alt+shift+1" = ["move-to-workspace 1 --follow"]
+"alt+2" = ["workspace 2"]
+"alt+shift+2" = ["move-to-workspace 2 --follow"]
+"alt+3" = ["workspace 3"]
+"alt+shift+3" = ["move-to-workspace 3 --follow"]
+"alt+4" = ["workspace 4"]
+"alt+shift+4" = ["move-to-workspace 4 --follow"]
+"alt+5" = ["workspace 5"]
+"alt+shift+5" = ["move-to-workspace 5 --follow"]
+"alt+6" = ["workspace 6"]
+"alt+shift+6" = ["move-to-workspace 6 --follow"]
+"alt+7" = ["workspace 7"]
+"alt+shift+7" = ["move-to-workspace 7 --follow"]
+"alt+8" = ["workspace 8"]
+"alt+shift+8" = ["move-to-workspace 8 --follow"]
+"alt+9" = ["workspace 9"]
+"alt+shift+9" = ["move-to-workspace 9 --follow"]
+"alt+0" = ["workspace 10"]
+"alt+shift+0" = ["move-to-workspace 10 --follow"]
+"alt+f" = ["toggle-fullscreen"]
+"alt+shift+oem_minus" = ["resize width -2%", "resize height -2%"]
+"alt+shift+oem_plus" = ["resize width +2%", "resize height +2%"]
+"alt+oem_question" = ["toggle-direction"]
+"alt+shift+space" = ["toggle-floating"]
+"alt+tab" = ["recent-workspace"]
+"alt+shift+tab" = ["move-workspace right"]
+"alt+shift+r" = ["reload"]
+"alt+shift+e" = ["exit"]
+"alt+shift+q" = ["close"]
+"alt+shift+p" = ["pause"]
+"alt+shift+oem_question" = ["cheatsheet"]
+
+[bar]
+enabled = true
+height = 40
+font = "JetBrainsMono Nerd Font"
+font-size = 14.0
+background = "base"
+foreground = "text"
+opacity = 1.0
+backdrop = "none"
+widgets = [
+  {id="logo", format="☾", color="terracotta", click="cheatsheet"},
+  {id="workspaces", format="{workspaces}"},
+  {id="clock", format="{clock}", align="center", background="surface0"},
+  {id="title", format="{title}", align="center", background="surface0", color="subtext0", max-width=420},
+  {id="state", format="{paused}{mode}{direction}", color="terracotta", background="surface0", click="toggle-direction"},
+  {id="media", icon="", icon-color="rose-dust", background="surface0", format="{media}", align="right", max-width=220},
+  {id="keyboard", icon="", icon-color="clay", background="surface0", format="{keyboard}", align="right"},
+  {id="network", icon="", icon-color="terracotta", background="surface0", format="{network}", align="right"},
+  {id="memory", icon="", icon-color="olive", background="surface0", format="{memory}", align="right"},
+  {id="cpu", icon="", icon-color="amber", background="surface0", format="{cpu}", align="right"},
+  {id="battery", icon="", icon-color="gold", background="surface0", format="{battery}", align="right"},
+  {id="volume", icon="", icon-color="amber", background="surface0", format="{volume}", align="right"},
+  {id="weather", icon="", icon-color="steel", background="surface0", format="{weather}", align="right"},
+]
+
+[borders]
+enabled = true
+width = 4
+radius = 8
+focused = "terracotta"
+focused-end = "rust"
+unfocused = "surface1"
+
+[palette]
+linen = "#ece2d0"
+rose-dust = "#c98a83"
+rosewood = "#b96b7a"
+terracotta = "#d17a4f"
+ember = "#c1443c"
+brick = "#a8453a"
+amber = "#dba658"
+gold = "#c9a876"
+olive = "#9a9257"
+slate = "#6f7d78"
+steel = "#8b95a1"
+denim = "#5f7387"
+rust = "#a8613f"
+clay = "#b5754f"
+text = "#f0ebe0"
+subtext1 = "#d3cfc4"
+subtext0 = "#b3b0a8"
+overlay2 = "#93939a"
+overlay1 = "#75757d"
+overlay0 = "#57575f"
+surface2 = "#38383f"
+surface1 = "#29292e"
+surface0 = "#1e1e22"
+base = "#141417"
+mantle = "#0f0f12"
+crust = "#08080a"
+
+# Used only by theme="light" or theme="system" when Windows selects light mode.
+[light-palette]
+text = "#262326"
+subtext1 = "#454047"
+subtext0 = "#625b64"
+overlay2 = "#746b74"
+overlay1 = "#8c818c"
+overlay0 = "#a397a2"
+surface2 = "#c8bdae"
+surface1 = "#d7cfc3"
+surface0 = "#e6dfd4"
+base = "#f1ede5"
+mantle = "#e9e2d7"
+crust = "#ded5c8"
+terracotta = "#9d4b28"
+rust = "#873e20"
+olive = "#686130"
+slate = "#4f625b"
+denim = "#49637c"
+steel = "#596c83"
+
+[[rules]]
+commands = ["ignore"]
+matches = [
+  {process={equals="Arc"}, title={regex="[Pp]icture in [Pp]icture"}},
+  {process={regex="^(zebar|tacky-borders|moon)$"}},
+  {title={regex="[Pp]icture.in.[Pp]icture|Mini Player"}, class={regex="Chrome_WidgetWin_1|MozillaDialogClass"}},
+  {class={equals="OperationStatusWindow"}},
+  {process={regex="ScreenClippingHost|SnippingTool"}},
+  {process={equals="PowerToys"}, class={regex='HwndWrapper\[PowerToys\.PowerAccent.*?\]'}},
+  {process={equals="PowerToys"}, title={regex=".*? - Peek"}},
+  {process={equals="Lively"}, class={regex="HwndWrapper"}},
+  {process={equals="EXCEL"}, class={not-regex="XLMAIN"}},
+  {process={equals="WINWORD"}, class={not-regex="OpusApp"}},
+  {process={equals="POWERPNT"}, class={not-regex="PPTFrameClass"}},
+]
+
+[[rules]]
+commands = ["set-floating"]
+matches = [
+  {class={regex="(#32770|SunAwtDialog)"}},
+  {process={regex="[Ii]nstall.*|[Ss]etup.*|[Mm]siexec|[Uu]nins.*"}},
+  {class={regex="TWizardForm|MsiDialogCloseClass"}},
+  {process={equals="Taskmgr"}},
+  {process={equals="CalculatorApp"}},
+  {process={equals="steam"}, title={regex="Steam|Friends"}},
+  {process={regex='Battle\.net|EpicGamesLauncher|EADesktop|RiotClientUx'}},
+  {process={regex="Discord|Teams|Zoom"}, title={regex="Microsoft Teams Notification|Call in progress|Zoom Meeting"}},
+  {process={regex="1Password|Bitwarden"}},
+]

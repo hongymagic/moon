@@ -1,0 +1,22 @@
+[package]
+name = "moon"
+description = "A tiling window manager for Windows 11 with a built-in bar and borders"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+moon-core.workspace = true
+anyhow = "=1.0.104"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+
+[features]
+uiaccess = []
+
+[target.'cfg(windows)'.dependencies]
+moon-win.workspace = true

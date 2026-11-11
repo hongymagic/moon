@@ -1,0 +1,10 @@
+/target
+*.pdb
+/fuzz/target
+/fuzz/corpus
+/fuzz/artifacts
+
+# Fuzz products are local test evidence, not source.
+**/fuzz/target/
+**/fuzz/corpus/
+**/fuzz/artifacts/

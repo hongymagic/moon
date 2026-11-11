@@ -1,0 +1,57 @@
+name: Check
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  core:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt,clippy
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+      - name: Generated reference matches the current schema
+        run: |
+          cargo run --locked -q -p moon -- config schema > docs/config.schema.json
+          cargo run --locked -q -p moon -- config reference > docs/config-reference.md
+          cargo run --locked -q -p moon -- protocol schema > docs/protocol.schema.json
+          git diff --exit-code -- docs/config.schema.json docs/config-reference.md docs/protocol.schema.json
+      - run: cargo bench -p moon-core --bench reducer --locked
+      - run: cargo install --locked cargo-deny --version 0.20.2
+      - run: cargo install --locked cargo-audit --version 0.23.0
+      - run: cargo deny check
+      - run: cargo audit
+  windows:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install 1.99.1 --profile minimal --component clippy
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+      - run: cargo build --workspace --release --locked
+      - name: Real window integration
+        shell: pwsh
+        run: ./scripts/integration.ps1 -BuildDirectory "$PWD/target/release"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: windows-build-and-evidence
+          path: |
+            target/release/moon.exe
+            target/release/testwin.exe
+            target/integration-results.json
+            target/integration-logs/
+          if-no-files-found: error
+  fuzz:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        parser: [config, protocol]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install nightly-2026-11-10 --profile minimal
+      - run: cargo install --locked cargo-fuzz --version 0.13.2
+      - run: cargo +nightly-2026-11-10 fuzz run --fuzz-dir crates/moon-core/fuzz ${{ matrix.parser }} -- -max_total_time=30 -max_len=65536

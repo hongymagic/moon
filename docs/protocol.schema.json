@@ -1,0 +1,103 @@
+{
+  "request": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "oneOf": [
+      {
+        "properties": {
+          "method": {
+            "const": "query",
+            "type": "string"
+          },
+          "query": {
+            "default": "world",
+            "type": "string"
+          }
+        },
+        "required": [
+          "method"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "commands": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "method": {
+            "const": "command",
+            "type": "string"
+          }
+        },
+        "required": [
+          "method",
+          "commands"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "method": {
+            "const": "subscribe",
+            "type": "string"
+          }
+        },
+        "required": [
+          "method"
+        ],
+        "type": "object"
+      }
+    ],
+    "properties": {
+      "id": true,
+      "version": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "version",
+      "id"
+    ],
+    "title": "Request",
+    "type": "object"
+  },
+  "response": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "error": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "id": true,
+      "ok": {
+        "type": "boolean"
+      },
+      "result": true,
+      "revision": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "version": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "version",
+      "id",
+      "ok",
+      "result",
+      "revision"
+    ],
+    "title": "Response",
+    "type": "object"
+  }
+}

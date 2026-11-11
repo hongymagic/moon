@@ -1,0 +1,587 @@
+{
+  "$defs": {
+    "BarConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "backdrop": {
+          "type": "string"
+        },
+        "background": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "font": {
+          "type": "string"
+        },
+        "font-size": {
+          "format": "float",
+          "type": "number"
+        },
+        "foreground": {
+          "type": "string"
+        },
+        "height": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "opacity": {
+          "format": "float",
+          "type": "number"
+        },
+        "widgets": {
+          "items": {
+            "$ref": "#/$defs/WidgetConfig"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "enabled",
+        "height",
+        "font",
+        "font-size",
+        "background",
+        "foreground",
+        "opacity",
+        "backdrop",
+        "widgets"
+      ],
+      "type": "object"
+    },
+    "BarConfigOverride": {
+      "additionalProperties": false,
+      "properties": {
+        "backdrop": {
+          "type": "string"
+        },
+        "background": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "font": {
+          "type": "string"
+        },
+        "font-size": {
+          "format": "float",
+          "type": "number"
+        },
+        "foreground": {
+          "type": "string"
+        },
+        "height": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "opacity": {
+          "format": "float",
+          "type": "number"
+        },
+        "widgets": {
+          "items": {
+            "$ref": "#/$defs/WidgetConfig"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "BorderConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "focused": {
+          "type": "string"
+        },
+        "focused-end": {
+          "type": "string"
+        },
+        "radius": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "unfocused": {
+          "type": "string"
+        },
+        "width": {
+          "format": "int32",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "enabled",
+        "width",
+        "radius",
+        "focused",
+        "focused-end",
+        "unfocused"
+      ],
+      "type": "object"
+    },
+    "BorderConfigOverride": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "focused": {
+          "type": "string"
+        },
+        "focused-end": {
+          "type": "string"
+        },
+        "radius": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "unfocused": {
+          "type": "string"
+        },
+        "width": {
+          "format": "int32",
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "Gaps": {
+      "additionalProperties": false,
+      "properties": {
+        "inner": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "outer": {
+          "format": "int32",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "inner",
+        "outer"
+      ],
+      "type": "object"
+    },
+    "GapsOverride": {
+      "additionalProperties": false,
+      "properties": {
+        "inner": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "outer": {
+          "format": "int32",
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "Hooks": {
+      "additionalProperties": false,
+      "properties": {
+        "reload": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "shutdown": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "startup": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "Matcher": {
+      "additionalProperties": false,
+      "properties": {
+        "equals": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "not-regex": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "regex": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "MonitorConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "bar-enabled": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "bar-height": {
+          "default": null,
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "gaps": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Gaps"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "Rule": {
+      "additionalProperties": false,
+      "properties": {
+        "commands": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "matches": {
+          "items": {
+            "$ref": "#/$defs/WindowMatch"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "commands",
+        "matches"
+      ],
+      "type": "object"
+    },
+    "WeatherConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "interval-seconds": {
+          "default": 900,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "latitude": {
+          "format": "double",
+          "type": "number"
+        },
+        "longitude": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "latitude",
+        "longitude"
+      ],
+      "type": "object"
+    },
+    "WidgetConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "align": {
+          "default": "left",
+          "type": "string"
+        },
+        "background": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "click": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "color": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "exec": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "format": {
+          "type": "string"
+        },
+        "icon": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "icon-color": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "interval-seconds": {
+          "default": 5,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max-width": {
+          "default": 300,
+          "format": "int32",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "format"
+      ],
+      "type": "object"
+    },
+    "WindowMatch": {
+      "additionalProperties": false,
+      "properties": {
+        "class": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Matcher"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "process": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Matcher"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "title": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Matcher"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "WorkspaceConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "color": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "gaps": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Gaps"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "icon": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "monitor": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "aliases": {
+      "additionalProperties": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "default": {},
+      "type": "object"
+    },
+    "bar": {
+      "$ref": "#/$defs/BarConfigOverride"
+    },
+    "bindings": {
+      "additionalProperties": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "type": "object"
+    },
+    "borders": {
+      "$ref": "#/$defs/BorderConfigOverride"
+    },
+    "config-version": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "cursor-jump": {
+      "type": "boolean"
+    },
+    "focus-follows-cursor": {
+      "type": "boolean"
+    },
+    "gaps": {
+      "$ref": "#/$defs/GapsOverride"
+    },
+    "hooks": {
+      "$ref": "#/$defs/Hooks",
+      "default": {
+        "reload": [],
+        "shutdown": [],
+        "startup": []
+      }
+    },
+    "light-palette": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "default": {},
+      "type": "object"
+    },
+    "modes": {
+      "additionalProperties": {
+        "additionalProperties": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "type": "object"
+      },
+      "default": {},
+      "type": "object"
+    },
+    "monitors": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/MonitorConfig"
+      },
+      "type": "array"
+    },
+    "palette": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "type": "object"
+    },
+    "rules": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Rule"
+      },
+      "type": "array"
+    },
+    "theme": {
+      "default": "dark",
+      "type": "string"
+    },
+    "weather": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/WeatherConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "workspaces": {
+      "items": {
+        "$ref": "#/$defs/WorkspaceConfig"
+      },
+      "type": "array"
+    }
+  },
+  "title": "Config",
+  "type": "object"
+}
