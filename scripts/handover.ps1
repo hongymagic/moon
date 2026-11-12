@@ -9,14 +9,30 @@ param(
     [string]$OperationId
 )
 . (Join-Path $PSScriptRoot 'install-common.ps1')
+if (!$OperationId) {$OperationId=[guid]::NewGuid().ToString('N')}
 trap {
-    $current=if(Test-Path -LiteralPath $StatePath){Get-Content -Raw -LiteralPath $StatePath|ConvertFrom-Json}else{$null}
-    $restored=$current -and $current.status -eq 'rolled_back'
+    $failure=$_
+    $current=$null
+    try {if(Test-Path -LiteralPath $StatePath){$current=Get-Content -Raw -LiteralPath $StatePath|ConvertFrom-Json}} catch { }
+    $currentStatus=if($current -and $current.PSObject.Properties['status']){$current.status}else{''}
+    $restored=$currentStatus -eq 'rolled_back'
     $operationState=$null
-    if ($OperationId) {try {$operationState=Read-MoonSetupStatus $OperationId} catch { }}
-    $cancelled=$restored -and ($_.Exception -is [OperationCanceledException] -or ($operationState -and $operationState.status -eq 'cancelled'))
-    Write-MoonSetupStatus $OperationId $(if($cancelled){'cancelled'}elseif($current -and $current.status -eq 'recovery_required'){'recovery_required'}else{'failed'}) $(if($restored){'Your previous desktop has been restored.'}else{'Setup could not finish. Open details before trying again.'}) ($_|Out-String)
-    Write-Error $_ -ErrorAction Continue;exit $(if($cancelled){1223}else{1})
+    try {$operationState=Read-MoonSetupStatus $OperationId} catch { }
+    # The elevated installer publishes its full error before its parent receives
+    # only an exit code. Retain that cause when handover reports its own failure.
+    $priorStatus='';$priorDetail=''
+    if($operationState -and $operationState.PSObject.Properties['operation'] -and $operationState.operation -eq $OperationId){
+        if($operationState.PSObject.Properties['status']){$priorStatus=[string]$operationState.status}
+        if($operationState.PSObject.Properties['detail'] -and $operationState.detail -is [string]){$priorDetail=$operationState.detail}
+    }
+    $detail=($failure|Out-String).TrimEnd()
+    if(![string]::IsNullOrWhiteSpace($priorDetail)){$detail=$priorDetail+"`r`n`r`nHandover failure:`r`n"+$detail}
+    $detail+="`r`n`r`nSetup operation: $OperationId"
+    try {$detail+="`r`nDiagnostic status: $((Get-MoonSetupFiles $OperationId).status)"} catch { }
+    $cancelled=$restored -and ($failure.Exception -is [OperationCanceledException] -or $priorStatus -eq 'cancelled')
+    Write-MoonSetupStatus $OperationId $(if($cancelled){'cancelled'}elseif($currentStatus -eq 'recovery_required'){'recovery_required'}else{'failed'}) $(if($restored){'Your previous desktop has been restored.'}else{'Setup could not finish. Open details before trying again.'}) $detail
+    Write-Error -Message $detail -ErrorAction Continue
+    exit $(if($cancelled){1223}else{1})
 }
 if ((Test-MoonAdministrator) -or [MoonInstallNative]::Integrity() -ne 8192) {
     throw 'Run handover from ordinary PowerShell so restored desktop applications keep ordinary privileges. The installer requests its own elevation.'
@@ -153,7 +169,7 @@ foreach ($relative in @('.glzr\glazewm\config.yaml','.glzr\zebar\settings.json',
         $configs+=[pscustomobject]@{original=$original;backup=$backup;sha256=(Get-FileHash -LiteralPath $backup -Algorithm SHA256).Hash}
     }
 }
-$saved=[pscustomobject]@{version=1;owner_sid=$owner;session=$session;handover_id=[guid]::NewGuid().ToString('N');installation_id=$null;started_at=[DateTime]::UtcNow.ToString('o');finished_at=$null;status='prepared';source_sha256=(Get-FileHash -LiteralPath $Binary -Algorithm SHA256).Hash;processes=$processes;startup_links=$links;config_backups=$configs;glaze_inventory=$glazeInventoryPath;glaze_owned_handles=$glazeHandles;glaze_recovery=$null;installed_stats=$null;uiaccess_report=$null}
+$saved=[pscustomobject]@{version=1;operation_id=$OperationId;owner_sid=$owner;session=$session;handover_id=[guid]::NewGuid().ToString('N');installation_id=$null;started_at=[DateTime]::UtcNow.ToString('o');finished_at=$null;status='prepared';source_sha256=(Get-FileHash -LiteralPath $Binary -Algorithm SHA256).Hash;processes=$processes;startup_links=$links;config_backups=$configs;glaze_inventory=$glazeInventoryPath;glaze_owned_handles=$glazeHandles;glaze_recovery=$null;installed_stats=$null;uiaccess_report=$null}
 [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($StatePath)))
 Write-MoonJsonFile $StatePath $saved
 try {

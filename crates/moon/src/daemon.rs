@@ -21,6 +21,7 @@ use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs,
+    io::Write,
     path::PathBuf,
     process::{self, Stdio},
     sync::mpsc::{self, Receiver, Sender, SyncSender},
@@ -157,21 +158,34 @@ pub fn background(options: Options) -> Result<()> {
         }
         fs::rename(&path, previous)?;
     }
-    let output = fs::OpenOptions::new().create(true).append(true).open(&path)?;
-    let mut command = runtime::internal_command()?;
-    command.arg("start");
-    add_options(&mut command, &options);
-    if options.resume {
-        command.arg("--resume");
-    }
-    if let Some(parent) = options.wait_parent {
-        command.arg("--wait-parent").arg(parent.to_string());
-    }
-    if options.takeover {
-        command.arg("--takeover");
-    }
-    let mut child =
-        command.stdin(Stdio::null()).stdout(output.try_clone()?).stderr(output).spawn()?;
+    let mut output = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .context("open background Moon log")?;
+    let launch = (|| {
+        let mut command = runtime::internal_command().context("prepare background Moon command")?;
+        command.arg("start");
+        add_options(&mut command, &options);
+        if options.resume {
+            command.arg("--resume");
+        }
+        if let Some(parent) = options.wait_parent {
+            command.arg("--wait-parent").arg(parent.to_string());
+        }
+        if options.takeover {
+            command.arg("--takeover");
+        }
+        let stdout = output.try_clone().context("duplicate Moon log for background stdout")?;
+        let stderr = output.try_clone().context("duplicate Moon log for background stderr")?;
+        command
+            .stdin(Stdio::null())
+            .stdout(stdout)
+            .stderr(stderr)
+            .spawn()
+            .context("spawn background Moon process")
+    })();
+    let mut child = record_background_launch(&mut output, launch)?;
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if let Some(status) = child.try_wait()? {
@@ -192,6 +206,15 @@ pub fn background(options: Options) -> Result<()> {
         }
         thread::sleep(Duration::from_millis(50));
     }
+}
+
+fn record_background_launch<T>(output: &mut impl Write, result: Result<T>) -> Result<T> {
+    if let Err(error) = &result {
+        // This runs in the short-lived launcher, before the child's redirected
+        // stderr exists. Logging must never replace the original Windows error.
+        let _ = writeln!(output, "moon: background launch failed: {error:#}");
+    }
+    result
 }
 
 pub fn run(options: Options) -> Result<()> {
@@ -1347,4 +1370,37 @@ pub fn doctor(options: &Options, words: &[String]) -> Result<()> {
         return Ok(());
     }
     bail!("unknown doctor arguments: {}", words.join(" "))
+}
+
+#[cfg(test)]
+mod background_tests {
+    use super::*;
+
+    #[test]
+    fn launch_failure_logs_context_and_preserves_windows_error() {
+        let mut log = Vec::new();
+        let failure: Result<()> =
+            Err(std::io::Error::from_raw_os_error(740)).context("spawn background Moon process");
+        let error = record_background_launch(&mut log, failure).unwrap_err();
+        assert_eq!(error.downcast_ref::<std::io::Error>().unwrap().raw_os_error(), Some(740));
+        let text = String::from_utf8(log).unwrap();
+        assert!(text.contains("background launch failed: spawn background Moon process"));
+        assert!(text.contains("740"));
+    }
+
+    #[test]
+    fn unavailable_log_does_not_replace_launch_failure() {
+        struct Unavailable;
+        impl Write for Unavailable {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let failure: Result<()> = Err(std::io::Error::from_raw_os_error(740).into());
+        let error = record_background_launch(&mut Unavailable, failure).unwrap_err();
+        assert_eq!(error.downcast_ref::<std::io::Error>().unwrap().raw_os_error(), Some(740));
+    }
 }
