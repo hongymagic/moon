@@ -7,7 +7,9 @@ use moon_core::{
     world::World,
 };
 use std::{
+    cell::RefCell,
     collections::BTreeMap,
+    rc::Rc,
     sync::{Arc, Mutex},
     time::Instant,
 };
@@ -47,6 +49,83 @@ const APPBAR_MESSAGE: u32 = WM_APP + 41;
 const TRAY_MESSAGE: u32 = WM_APP + 42;
 const FONT: &[u8] = include_bytes!("../assets/SymbolsNerdFont-Regular.ttf");
 
+/// Sizes observed on temporary BeginDraw surfaces, not allocation sizes or
+/// simultaneously live buffers. DirectComposition may return shared backing.
+#[derive(Clone, Default, serde::Serialize)]
+pub struct SurfaceSizeObservation {
+    width: u32,
+    height: u32,
+    sample_count: u32,
+    observations: u64,
+}
+
+#[derive(Clone, Default, serde::Serialize)]
+pub struct SurfaceDrawDiagnostics {
+    begin_draw_calls: u64,
+    begin_draw_failures: u64,
+    descriptor_failures: u64,
+    max_requested_pixels: u64,
+    max_observed_backing_pixels: u64,
+    sizes: Vec<SurfaceSizeObservation>,
+    unlisted_size_observations: u64,
+}
+impl SurfaceDrawDiagnostics {
+    fn observe(&mut self, width: u32, height: u32, sample_count: u32) {
+        const SIZE_LIMIT: usize = 16;
+        self.max_observed_backing_pixels =
+            self.max_observed_backing_pixels.max(u64::from(width) * u64::from(height));
+        if let Some(size) = self.sizes.iter_mut().find(|size| {
+            size.width == width && size.height == height && size.sample_count == sample_count
+        }) {
+            size.observations = size.observations.saturating_add(1);
+        } else if self.sizes.len() < SIZE_LIMIT {
+            self.sizes.push(SurfaceSizeObservation {
+                width,
+                height,
+                sample_count,
+                observations: 1,
+            });
+        } else {
+            self.unlisted_size_observations = self.unlisted_size_observations.saturating_add(1);
+        }
+    }
+}
+
+/// Bounded lifetime counters. Size observations cannot be summed into resident
+/// memory or a live-buffer count; no graphics pointers or contents are retained.
+#[derive(Clone, Default, serde::Serialize)]
+pub struct RendererDiagnostics {
+    render_calls: u64,
+    changed_scenes: u64,
+    commits: u64,
+    devices_created: u64,
+    device_recreation_attempts: u64,
+    bar_canvases_created: u64,
+    border_canvases_created: u64,
+    border_atlases_created: u64,
+    text_formats_created: u64,
+    text_layouts_created: u64,
+    gradient_brushes_created: u64,
+    bar: SurfaceDrawDiagnostics,
+    border: SurfaceDrawDiagnostics,
+    feedback: SurfaceDrawDiagnostics,
+}
+#[derive(Clone, Copy)]
+enum DrawKind {
+    Bar,
+    Border,
+    Feedback,
+}
+impl RendererDiagnostics {
+    fn draw(&mut self, kind: DrawKind) -> &mut SurfaceDrawDiagnostics {
+        match kind {
+            DrawKind::Bar => &mut self.bar,
+            DrawKind::Border => &mut self.border,
+            DrawKind::Feedback => &mut self.feedback,
+        }
+    }
+}
+
 struct Graphics {
     backend: &'static str,
     context: ID2D1DeviceContext,
@@ -54,10 +133,11 @@ struct Graphics {
     write: IDWriteFactory5,
     symbols: IDWriteFontCollection,
     loader: IDWriteInMemoryFontFileLoader,
+    diagnostics: Rc<RefCell<RendererDiagnostics>>,
 }
 
 impl Graphics {
-    fn new() -> Result<Self> {
+    fn new(diagnostics: Rc<RefCell<RendererDiagnostics>>) -> Result<Self> {
         unsafe {
             let mut device = None;
             let create = |driver, device: &mut Option<ID3D11Device>| {
@@ -120,7 +200,10 @@ impl Graphics {
             builder.AddFontFaceReference2(&reference)?;
             let symbols =
                 factory3.CreateFontCollectionFromFontSet(&builder.CreateFontSet()?)?.cast()?;
-            Ok(Self { backend, context, composition, write, symbols, loader })
+            let mut counters = diagnostics.borrow_mut();
+            counters.devices_created = counters.devices_created.saturating_add(1);
+            drop(counters);
+            Ok(Self { backend, context, composition, write, symbols, loader, diagnostics })
         }
     }
 }
@@ -564,8 +647,12 @@ impl Feedback {
             let rgb = parse_color(background, 1.0);
             let color = if rgb.r + rgb.g + rgb.b > 1.5 { "#000000" } else { "#ffffff" };
             if self.color != color {
-                let drawing =
-                    Drawing::begin(&graphics.context, &self.surface, Rect::new(0, 0, 1, 1))?;
+                let drawing = Drawing::begin(
+                    graphics,
+                    &self.surface,
+                    Rect::new(0, 0, 1, 1),
+                    DrawKind::Feedback,
+                )?;
                 graphics.context.Clear(Some(&parse_color(color, 1.0)));
                 drawing.finish()?;
                 self.color = color.into();
@@ -716,6 +803,89 @@ impl Drop for Tooltips {
     }
 }
 
+struct TextFormat {
+    font: String,
+    size: f32,
+    format: IDWriteTextFormat,
+}
+
+fn text_format(
+    graphics: &Graphics,
+    cached: &mut Option<TextFormat>,
+    font: &str,
+    size: f32,
+) -> Result<IDWriteTextFormat> {
+    if cached.as_ref().is_none_or(|cached| cached.font != font || cached.size != size) {
+        unsafe {
+            let family = wide(font);
+            let format = graphics.write.CreateTextFormat(
+                PCWSTR(family.as_ptr()),
+                None,
+                DWRITE_FONT_WEIGHT_NORMAL,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                size,
+                w!("en-us"),
+            )?;
+            format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
+            format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+            let ellipsis = graphics.write.CreateEllipsisTrimmingSign(&format)?;
+            format.SetTrimming(
+                &DWRITE_TRIMMING {
+                    granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER,
+                    ..Default::default()
+                },
+                &ellipsis,
+            )?;
+            *cached = Some(TextFormat { font: font.into(), size, format });
+        }
+        let mut counters = graphics.diagnostics.borrow_mut();
+        counters.text_formats_created = counters.text_formats_created.saturating_add(1);
+    }
+    Ok(cached.as_ref().expect("created text format").format.clone())
+}
+
+struct BorderBrush {
+    colors: [String; 2],
+    brush: ID2D1LinearGradientBrush,
+}
+
+fn border_brush(
+    graphics: &Graphics,
+    cached: &mut Vec<BorderBrush>,
+    index: usize,
+    colors: &[String; 2],
+) -> Result<ID2D1LinearGradientBrush> {
+    if cached.get(index).is_none_or(|cached| cached.colors != *colors) {
+        unsafe {
+            let stops = [
+                D2D1_GRADIENT_STOP { position: 0.0, color: parse_color(&colors[0], 1.0) },
+                D2D1_GRADIENT_STOP { position: 1.0, color: parse_color(&colors[1], 1.0) },
+            ];
+            let target: ID2D1RenderTarget = graphics.context.cast()?;
+            let collection = target.CreateGradientStopCollection(
+                &stops,
+                D2D1_GAMMA_2_2,
+                D2D1_EXTEND_MODE_CLAMP,
+            )?;
+            let brush = target.CreateLinearGradientBrush(
+                &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES::default(),
+                None,
+                &collection,
+            )?;
+            let cached_brush = BorderBrush { colors: colors.clone(), brush };
+            if index == cached.len() {
+                cached.push(cached_brush);
+            } else {
+                cached[index] = cached_brush;
+            }
+        }
+        let mut counters = graphics.diagnostics.borrow_mut();
+        counters.gradient_brushes_created = counters.gradient_brushes_created.saturating_add(1);
+    }
+    Ok(cached[index].brush.clone())
+}
+
 struct Canvas {
     hwnd: HWND,
     data: Box<WindowData>,
@@ -724,6 +894,9 @@ struct Canvas {
     surface: Option<IDCompositionSurface>,
     strips: Vec<IDCompositionVisual>,
     border_atlas: Option<(Rect, IDCompositionSurface)>,
+    // One format per canvas and one brush per current ring: no history cache.
+    text_format: Option<TextFormat>,
+    border_brushes: Vec<BorderBrush>,
     _target: IDCompositionTarget,
     visual: IDCompositionVisual,
     visible: bool,
@@ -890,6 +1063,14 @@ impl Canvas {
                     return Err(error);
                 }
             };
+            let mut counters = graphics.diagnostics.borrow_mut();
+            let count = if border {
+                &mut counters.border_canvases_created
+            } else {
+                &mut counters.bar_canvases_created
+            };
+            *count = count.saturating_add(1);
+            drop(counters);
             Ok(Self {
                 hwnd,
                 data,
@@ -898,6 +1079,8 @@ impl Canvas {
                 surface,
                 strips: Vec::new(),
                 border_atlas: None,
+                text_format: None,
+                border_brushes: Vec::new(),
                 _target: target,
                 visual,
                 visible: false,
@@ -957,7 +1140,7 @@ impl Canvas {
     }
 
     fn text(
-        &self,
+        &mut self,
         graphics: &Graphics,
         text: &str,
         bounds: Rect,
@@ -966,26 +1149,7 @@ impl Canvas {
         color: &str,
     ) -> Result<()> {
         unsafe {
-            let family = wide(font);
-            let format = graphics.write.CreateTextFormat(
-                PCWSTR(family.as_ptr()),
-                None,
-                DWRITE_FONT_WEIGHT_NORMAL,
-                DWRITE_FONT_STYLE_NORMAL,
-                DWRITE_FONT_STRETCH_NORMAL,
-                size,
-                w!("en-us"),
-            )?;
-            format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
-            format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
-            let ellipsis = graphics.write.CreateEllipsisTrimmingSign(&format)?;
-            format.SetTrimming(
-                &DWRITE_TRIMMING {
-                    granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER,
-                    ..Default::default()
-                },
-                &ellipsis,
-            )?;
+            let format = text_format(graphics, &mut self.text_format, font, size)?;
             let utf16: Vec<u16> = text.encode_utf16().collect();
             let layout = graphics.write.CreateTextLayout(
                 &utf16,
@@ -993,6 +1157,10 @@ impl Canvas {
                 bounds.width.max(1) as f32,
                 bounds.height.max(1) as f32,
             )?;
+            {
+                let mut counters = graphics.diagnostics.borrow_mut();
+                counters.text_layouts_created = counters.text_layouts_created.saturating_add(1);
+            }
             let mut offset = 0u32;
             for character in text.chars() {
                 let len = character.len_utf16() as u32;
@@ -1024,9 +1192,10 @@ impl Canvas {
     ) -> Result<()> {
         unsafe {
             let drawing = Drawing::begin(
-                &self.context,
+                graphics,
                 self.surface.as_ref().expect("bar surface"),
                 Rect::new(0, 0, self.rect.width, self.rect.height),
+                DrawKind::Bar,
             )?;
             self.context.Clear(Some(&parse_color(&bar.background, bar.opacity)));
             let targets = bar_targets(bar);
@@ -1138,6 +1307,8 @@ impl Canvas {
                     DXGI_ALPHA_MODE_PREMULTIPLIED,
                 )?;
                 self.border_atlas = Some((needed, surface));
+                let mut counters = graphics.diagnostics.borrow_mut();
+                counters.border_atlases_created = counters.border_atlases_created.saturating_add(1);
             }
             let (capacity, surface) = self.border_atlas.as_ref().expect("created atlas");
             while self.strips.len() > pieces.len() {
@@ -1175,35 +1346,17 @@ impl Canvas {
                 };
                 visual.SetTransform2(&transform)?;
             }
+            self.border_brushes.truncate(borders.len());
             let painted = borders
                 .iter()
-                .map(|border| -> Result<_> {
+                .enumerate()
+                .map(|(index, border)| -> Result<_> {
                     let rect = border.rect.translated(-self.rect.x, -self.rect.y);
-                    let stops = [
-                        D2D1_GRADIENT_STOP {
-                            position: 0.0,
-                            color: parse_color(&border.colors[0], 1.0),
-                        },
-                        D2D1_GRADIENT_STOP {
-                            position: 1.0,
-                            color: parse_color(&border.colors[1], 1.0),
-                        },
-                    ];
-                    let target: ID2D1RenderTarget = self.context.cast()?;
-                    let collection = target.CreateGradientStopCollection(
-                        &stops,
-                        D2D1_GAMMA_2_2,
-                        D2D1_EXTEND_MODE_CLAMP,
-                    )?;
+                    let brush =
+                        border_brush(graphics, &mut self.border_brushes, index, &border.colors)?;
                     let span = (rect.width + rect.height) as f32 / 2.0;
-                    let brush = target.CreateLinearGradientBrush(
-                        &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
-                            startPoint: Vector2 { X: rect.x as f32, Y: rect.y as f32 },
-                            endPoint: Vector2 { X: rect.x as f32 + span, Y: rect.y as f32 + span },
-                        },
-                        None,
-                        &collection,
-                    )?;
+                    brush.SetStartPoint(Vector2 { X: rect.x as f32, Y: rect.y as f32 });
+                    brush.SetEndPoint(Vector2 { X: rect.x as f32 + span, Y: rect.y as f32 + span });
                     let half = border.width / 2.0;
                     let outline = D2D1_ROUNDED_RECT {
                         rect: D2D_RECT_F {
@@ -1218,7 +1371,7 @@ impl Canvas {
                     Ok((rect, outline, brush, border.width))
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let drawing = Drawing::begin(&self.context, surface, *capacity)?;
+            let drawing = Drawing::begin(graphics, surface, *capacity, DrawKind::Border)?;
             self.context.Clear(Some(&D2D1_COLOR_F::default()));
             let mut base = Matrix3x2::default();
             self.context.GetTransform(&mut base);
@@ -1283,11 +1436,21 @@ struct Drawing {
 }
 impl Drawing {
     fn begin(
-        context: &ID2D1DeviceContext,
+        graphics: &Graphics,
         surface: &IDCompositionSurface,
         region: Rect,
+        kind: DrawKind,
     ) -> Result<Self> {
         unsafe {
+            let context = &graphics.context;
+            {
+                let mut counters = graphics.diagnostics.borrow_mut();
+                let draw = counters.draw(kind);
+                draw.begin_draw_calls = draw.begin_draw_calls.saturating_add(1);
+                draw.max_requested_pixels = draw
+                    .max_requested_pixels
+                    .max(region.width.max(0) as u64 * region.height.max(0) as u64);
+            }
             let mut offset = windows::Win32::Foundation::POINT::default();
             let update = windows::Win32::Foundation::RECT {
                 left: region.x,
@@ -1295,7 +1458,23 @@ impl Drawing {
                 right: region.right(),
                 bottom: region.bottom(),
             };
-            let dxgi: IDXGISurface = surface.BeginDraw(Some(&update), &mut offset)?;
+            let dxgi: IDXGISurface = match surface.BeginDraw(Some(&update), &mut offset) {
+                Ok(surface) => surface,
+                Err(error) => {
+                    let mut counters = graphics.diagnostics.borrow_mut();
+                    let draw = counters.draw(kind);
+                    draw.begin_draw_failures = draw.begin_draw_failures.saturating_add(1);
+                    return Err(error);
+                }
+            };
+            {
+                let mut counters = graphics.diagnostics.borrow_mut();
+                let draw = counters.draw(kind);
+                match dxgi.GetDesc() {
+                    Ok(desc) => draw.observe(desc.Width, desc.Height, desc.SampleDesc.Count),
+                    Err(_) => draw.descriptor_failures = draw.descriptor_failures.saturating_add(1),
+                }
+            }
             let bitmap = match context.CreateBitmapFromDxgiSurface(
                 &dxgi,
                 Some(&D2D1_BITMAP_PROPERTIES1 {
@@ -1407,6 +1586,9 @@ pub struct Surfaces {
     preferences: Preferences,
 }
 impl Surfaces {
+    pub fn diagnostics(&self) -> RendererDiagnostics {
+        self.graphics.diagnostics.borrow().clone()
+    }
     /// Nominal RGBA surface pixels, excluding compositor buffers, caches and other process memory.
     pub fn surface_pixel_bytes(&self) -> u64 {
         let pixels = |rect: Rect| rect.width.max(0) as u64 * rect.height.max(0) as u64;
@@ -1428,7 +1610,7 @@ impl Surfaces {
         Ok(Self {
             bars: BTreeMap::new(),
             borders: BTreeMap::new(),
-            graphics: Graphics::new()?,
+            graphics: Graphics::new(Rc::default())?,
             _tray: Tray::new(Arc::clone(&commands))?,
             commands,
             previous: None,
@@ -1469,7 +1651,13 @@ impl Surfaces {
                 self.previous = None;
                 self.bars.clear();
                 self.borders.clear();
-                self.graphics = Graphics::new()?;
+                let diagnostics = self.graphics.diagnostics.clone();
+                {
+                    let mut counters = diagnostics.borrow_mut();
+                    counters.device_recreation_attempts =
+                        counters.device_recreation_attempts.saturating_add(1);
+                }
+                self.graphics = Graphics::new(diagnostics)?;
                 self.render(world, scene)
             }
         }
@@ -1539,6 +1727,10 @@ impl Surfaces {
         }
     }
     fn render(&mut self, world: &World, scene: Scene) -> Result<()> {
+        {
+            let mut counters = self.graphics.diagnostics.borrow_mut();
+            counters.render_calls = counters.render_calls.saturating_add(1);
+        }
         // Border scenes contain absolute ring rectangles, not monitor bounds.
         // A bounds change can require a new canvas even when those rings match.
         let changed = self.previous.as_ref() != Some(&scene)
@@ -1550,6 +1742,10 @@ impl Surfaces {
                         .get(&monitor.id)
                         .is_none_or(|canvas| canvas.rect != monitor.bounds)
             });
+        if changed {
+            let mut counters = self.graphics.diagnostics.borrow_mut();
+            counters.changed_scenes = counters.changed_scenes.saturating_add(1);
+        }
         let wait_mode = std::env::var("MOON_COMPOSITION_WAIT");
         let wait_after = matches!(wait_mode.as_deref(), Ok("after" | "1"));
         let wait_before = !wait_after && wait_mode.as_deref() != Ok("0");
@@ -1646,6 +1842,10 @@ impl Surfaces {
         if changed {
             unsafe {
                 self.graphics.composition.Commit()?;
+                {
+                    let mut counters = self.graphics.diagnostics.borrow_mut();
+                    counters.commits = counters.commits.saturating_add(1);
+                }
                 if wait_after {
                     self.graphics.composition.WaitForCommitCompletion()?;
                 }
@@ -1873,6 +2073,88 @@ fn ring_regions(rect: Rect, thickness: i32, bounds: Rect) -> Vec<Rect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_render_resources_reuse_and_invalidate_without_changing_styles() {
+        let _apartment = crate::platform::Apartment::new().unwrap();
+        let diagnostics = Rc::default();
+        let graphics = Graphics::new(Rc::clone(&diagnostics)).unwrap();
+        let mut format = None;
+        let initial = text_format(&graphics, &mut format, "Segoe UI", 14.0).unwrap();
+        for _ in 0..128 {
+            let reused = text_format(&graphics, &mut format, "Segoe UI", 14.0).unwrap();
+            assert_eq!(reused.as_raw(), initial.as_raw());
+        }
+        assert_eq!(diagnostics.borrow().text_formats_created, 1);
+        let resized = text_format(&graphics, &mut format, "Segoe UI", 18.0).unwrap();
+        assert_ne!(resized.as_raw(), initial.as_raw());
+        let changed_font = text_format(&graphics, &mut format, "Arial", 18.0).unwrap();
+        assert_ne!(changed_font.as_raw(), resized.as_raw());
+        assert_eq!(diagnostics.borrow().text_formats_created, 3);
+        unsafe {
+            assert_eq!(changed_font.GetFontSize(), 18.0);
+            assert_eq!(changed_font.GetWordWrapping(), DWRITE_WORD_WRAPPING_NO_WRAP);
+            assert_eq!(changed_font.GetParagraphAlignment(), DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            let mut trimming = DWRITE_TRIMMING::default();
+            let mut ellipsis = None;
+            changed_font.GetTrimming(&mut trimming, &mut ellipsis).unwrap();
+            assert_eq!(trimming.granularity, DWRITE_TRIMMING_GRANULARITY_CHARACTER);
+            assert!(ellipsis.is_some());
+        }
+
+        let mut brushes = Vec::new();
+        let colors = ["#ff0000".into(), "#0000ff".into()];
+        let first = border_brush(&graphics, &mut brushes, 0, &colors).unwrap();
+        for _ in 0..128 {
+            for index in 0..8 {
+                let reused = border_brush(&graphics, &mut brushes, index, &colors).unwrap();
+                if index == 0 {
+                    assert_eq!(reused.as_raw(), first.as_raw());
+                }
+            }
+        }
+        assert_eq!(diagnostics.borrow().gradient_brushes_created, 8);
+        let recolored =
+            border_brush(&graphics, &mut brushes, 0, &["#00ff00".into(), "#ffffff".into()])
+                .unwrap();
+        assert_ne!(recolored.as_raw(), first.as_raw());
+        assert_eq!(diagnostics.borrow().gradient_brushes_created, 9);
+        unsafe {
+            let stops = recolored.GetGradientStopCollection().unwrap();
+            let mut actual = [D2D1_GRADIENT_STOP::default(); 2];
+            stops.GetGradientStops(&mut actual);
+            assert_eq!(stops.GetColorInterpolationGamma(), D2D1_GAMMA_2_2);
+            assert_eq!(stops.GetExtendMode(), D2D1_EXTEND_MODE_CLAMP);
+            assert_eq!(actual[0].color, parse_color("#00ff00", 1.0));
+            assert_eq!(actual[1].color, parse_color("#ffffff", 1.0));
+        }
+    }
+
+    #[test]
+    fn backing_size_diagnostics_count_reuse_without_retaining_surfaces() {
+        let mut diagnostics = SurfaceDrawDiagnostics::default();
+        diagnostics.observe(1024, 512, 1);
+        diagnostics.observe(1024, 512, 1);
+        diagnostics.observe(1024, 1024, 1);
+        diagnostics.observe(1024, 512, 4);
+        assert_eq!(diagnostics.sizes.len(), 3);
+        assert_eq!(diagnostics.sizes[0].observations, 2);
+        assert_eq!(diagnostics.max_observed_backing_pixels, 1024 * 1024);
+        assert_eq!(diagnostics.unlisted_size_observations, 0);
+    }
+
+    #[test]
+    fn backing_size_diagnostics_remain_bounded_after_many_sizes() {
+        let mut diagnostics = SurfaceDrawDiagnostics::default();
+        for width in 1..=128 {
+            diagnostics.observe(width, 512, 1);
+        }
+        diagnostics.observe(1, 512, 1);
+        assert_eq!(diagnostics.sizes.len(), 16);
+        assert_eq!(diagnostics.sizes[0].observations, 2);
+        assert_eq!(diagnostics.unlisted_size_observations, 112);
+        assert_eq!(diagnostics.max_observed_backing_pixels, 128 * 512);
+    }
 
     fn bar_fixture(items: Vec<moon_core::scene::BarItem>) -> BarScene {
         BarScene {

@@ -80,6 +80,13 @@ executables. The tray uses light/dark variants; it reflects Pause/Resume and ope
 Settings. Bar actions have labels, tooltips, pointer feedback, and release-inside
 activation. A drag outside an action does not trigger it.
 
+Workspace buttons adapt to their displayed name or icon and the configured font
+size, while retaining a minimum hit area and the configured maximum width. The
+larger-font Windows review now shows workspace 10 in full. Border brushes and
+bar text formats are reused within bounded per-canvas storage; changing their
+style replaces the relevant resource, and closing windows releases retired
+border slots.
+
 Native hover/press feedback and entrance effects use bounded DirectComposition
 animations. They introduce no animation polling while idle. Contrast and reduced
 motion apply to these surfaces as well as Settings. Window-manager performance
@@ -88,8 +95,9 @@ claim that a WebView fits the daemon's memory budget.
 
 ## Current polish verification
 
-The following checks cover the current source and frontend bundle. They do not
-replace signed-install, native interaction, performance or soak acceptance.
+The following checks cover the E050 polish baseline and unchanged frontend
+bundle. Renderer and workspace-label follow-up results are listed below. These
+checks do not replace signed-install, performance or soak acceptance.
 
 | Check | Result and scope | Evidence |
 | --- | --- | --- |
@@ -99,7 +107,7 @@ replace signed-install, native interaction, performance or soak acceptance.
 | Windows-target Clippy | Passed; compile/static-analysis check, not native execution | `target/polish-windows-clippy.log` |
 | Windows native units | 22 passed; four separately interactive hook tests excluded | `target/polish-native-unit-results.txt` |
 | Native desktop | 14 integration, four initial-assignment and ten carousel cases passed | `target/polish-final-{integration,startup,carousel}.json` |
-| Native Settings | Eight passed with the current daemon, including save/apply, conflicts and different-file isolation | `target/polish-final-settings/report.json` |
+| Native Settings | Eight passed with the E050 baseline daemon, including save/apply, conflicts and different-file isolation | `target/polish-final-settings/report.json` |
 | Setup | 32 isolated state/handler checks and 14 recovery checks passed; both WPF modes compiled; owned visual preview does not install or remove | `target/setup-polish-validation.json`, `target/setup-polish-recovery-validation.json`, `target/setup-polish-ui/report.json` |
 
 Four focused frontend regressions were reproduced before the fixes; their failed
@@ -114,11 +122,22 @@ does not establish native high-contrast or reduced-motion behavior.
 
 The report records the exact source and generated-asset hashes. The current
 native binary identities and results are recorded in
-[acceptance evidence](acceptance-status.md#current-polish-candidate-13-november-2026).
+[acceptance evidence](acceptance-status.md#current-renderer-refinement-13-november-2026).
 Normal and malformed-config opening checks both reveal the expected UI and close
 cleanly. Immediate native captures may precede compositor drawing; these results
 do not establish a zero-blank-frame presentation, physical accessibility-setting
 transitions, full accessibility conformance or release acceptance.
+
+The later D583 renderer/workspace-label candidate passes 75 core tests, 27 native
+unit tests, 14 lifecycle cases and ten carousel cases. All 13 images from five
+native styling stages passed review at 4K/125%, with the documented inspection
+override exposing all border edges. The larger Arial font displays workspace 10
+without truncation; complete gradients, rounded corners, focus colors and removal
+of old borders were checked. Reports are under `target/workspace-labels-visual/`.
+Separately, Paint's genuine WinUI3 colour dialog passed six ordinary-desktop
+checks on E050, including floating, workspace hide/show, cancellation and retiling.
+Its original desktop and document bytes were preserved. The remaining numerical
+performance limits are reported explicitly in the acceptance ledger.
 
 ## Dependencies and current references
 

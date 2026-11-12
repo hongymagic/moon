@@ -209,7 +209,7 @@ Scene {
                     rect: Rect {
                         x: 551,
                         y: 7,
-                        width: 43,
+                        width: 53,
                         height: 35,
                     },
                     label: "Workspace 10",
@@ -243,9 +243,9 @@ Scene {
                 },
                 BarItem {
                     rect: Rect {
-                        x: 601,
+                        x: 612,
                         y: 7,
-                        width: 134,
+                        width: 133,
                         height: 35,
                     },
                     label: "Layout: horizontal",

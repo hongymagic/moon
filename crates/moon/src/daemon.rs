@@ -1227,7 +1227,7 @@ impl Daemon {
             "config" => serde_json::to_value(&self.world.config)?,
             "transactions" => serde_json::to_value(&self.transactions)?,
             "stats" => {
-                json!({"process_id":process::id(),"executable":std::env::current_exe()?,"config_path":config_path(&self.options),"carousel_active":self.carousel.is_active(),"token":platform::token_capabilities(process::id())?,"uptime_seconds":self.started.elapsed().as_secs_f64(),"ready_us":self.ready_us,"revision":self.world.revision,"managed_windows":self.world.windows.len(),"resources":runtime::resource_stats()?,"surface_pixel_bytes":self.surfaces.as_ref().map_or(0, Surfaces::surface_pixel_bytes),"hooks":hooks::stats(),"key_to_placed_us":self.key_latencies,"key_to_dispatch_us":self.dispatch_latencies,"recent_transactions":self.transactions,"last_error":self.error})
+                json!({"process_id":process::id(),"executable":std::env::current_exe()?,"config_path":config_path(&self.options),"carousel_active":self.carousel.is_active(),"token":platform::token_capabilities(process::id())?,"uptime_seconds":self.started.elapsed().as_secs_f64(),"ready_us":self.ready_us,"revision":self.world.revision,"managed_windows":self.world.windows.len(),"resources":runtime::resource_stats()?,"surface_pixel_bytes":self.surfaces.as_ref().map_or(0, Surfaces::surface_pixel_bytes),"renderer":self.surfaces.as_ref().map(Surfaces::diagnostics),"hooks":hooks::stats(),"key_to_placed_us":self.key_latencies,"key_to_dispatch_us":self.dispatch_latencies,"recent_transactions":self.transactions,"last_error":self.error})
             }
             _ => bail!("unknown query {query:?}"),
         })

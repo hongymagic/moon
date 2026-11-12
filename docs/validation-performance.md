@@ -235,3 +235,173 @@ and readiness delays; Microsoft documents this in
 It does not justify deferring the mask, which previously failed rapid-chord
 language-switching checks, or attributing the remaining memory growth to a
 specific allocation without further evidence.
+
+## Performance investigation, 13 November 2026
+
+The measurements below use eight owned test windows on the development
+3840×2160 display at 125% scaling, with the default WARP renderer, bar and borders.
+They do not establish acceptance of the signed installation or the seven-day
+soak. Each report records the actual daemon's statistics; build manifests retain
+the executable hashes.
+
+### Controlled residency and resource reuse
+
+`daemon_performance.exe moon.exe testwin.exe --memory-control` creates the same
+eight windows as the resize workload, sends no shortcut input, waits its nominal
+18.48-second workload interval, and observes a further ten seconds of idle time.
+It verifies that the layout and native frames remain unchanged. The ordinary
+mode sends 128 real resize chords and requires every resulting placement to
+match. Both modes close their owned processes and restore the previous focus.
+
+The probe classifies committed regions with `VirtualQueryEx` and queries valid
+resident pages in bounded batches with `QueryWorkingSetEx`. It neither reads page
+contents nor records addresses, faults pages in, or trims the working set.
+Region observations are not atomic. The `Shared` bit describes shareable pages,
+not exclusive ownership; their total is diagnostic evidence, not a substitute
+for the process working-set acceptance metric. See Microsoft's
+[VirtualQueryEx](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualqueryex),
+[QueryWorkingSetEx](https://learn.microsoft.com/en-us/windows/win32/api/psapi/nf-psapi-queryworkingsetex)
+and [working-set block](https://learn.microsoft.com/en-us/windows/win32/api/psapi/ns-psapi-psapi_working_set_ex_block)
+documentation.
+
+The diagnostic baseline is
+`FE9DF83994064DF0DBF918C7E2368D4DAF0ACD9DB9AA306897542134E521A387`.
+The resource-reuse candidate is
+`B2ABB4179617CEAD58B5242457B742969D3B0E28C348970B203AE01E3E65810F`.
+The latter retains one text format per canvas and one gradient brush per current
+border slot, invalidating them when their relevant style changes. It retains no
+history of layouts or removed windows.
+
+| Candidate and workload | Working set before / after workload / after idle, bytes | External median / p99 | Gradient brushes created |
+| --- | ---: | ---: | ---: |
+| Baseline, no-input control | 46,051,328 / 51,412,992 / 51,417,088 | No input | 8 |
+| Baseline, resize | 45,981,696 / 51,728,384 / 49,504,256 | 12.190 / 22.841 ms | 1,032 |
+| Reuse, no-input control | 46,006,272 / 51,195,904 / 51,200,000 | No input | 8 |
+| Reuse, resize | 45,846,528 / 56,434,688 / 55,042,048 | 11.789 / 38.915 ms | 8 |
+
+Both resize runs completed 128 exact placements with no daemon error. Each reuse
+run created one text format. All four runs used one graphics device and one
+border atlas, with no recreation or failed draw. The new native resource test
+also verifies font/size/color invalidation, ellipsis, gradient stops and gamma.
+
+The no-input baseline's growth was mainly executable-image residency:
+`moon.exe` rose from 3,141,632 to 8,740,864 resident bytes, while private-region
+residency fell from 8,331,264 to 8,081,408. A snapshot taken about 0.16 seconds
+after startup therefore is not a warmed steady-state baseline.
+
+In the resize runs, the reuse candidate's higher final residency was primarily
+anonymous mapped memory: 13,074,432 bytes versus 7,692,288. Private-region
+residency differed by 172,032 bytes and executable-image residency was similar.
+DirectComposition returned different backing-surface sizes across the runs.
+Those temporary descriptors can refer to shared backing; their sizes cannot be
+added to calculate live allocations or attributed to the eight cached brushes.
+The resource-creation reduction is measured. Lower total memory or latency is
+not established by this pair.
+
+Four additional runs used the same immutable binaries in baseline/reuse/reuse/
+baseline order. Every run completed all 128 exact placements without an error.
+The initial summary wrapper rejected an absent optional field after saving the
+first valid report and restored the ordinary daemon; the remaining three runs
+then continued with fresh test processes.
+
+| Repeat | External median / p99 | Working set after workload / idle, bytes | Brushes created |
+| --- | ---: | ---: | ---: |
+| Baseline 1 | 11.700 / 42.595 ms | 52,027,392 / 49,582,080 | 1,032 |
+| Reuse 1 | 10.973 / 25.053 ms | 52,097,024 / 50,016,256 | 8 |
+| Reuse 2 | 11.600 / 21.979 ms | 50,962,432 / 48,934,912 | 8 |
+| Baseline 2 | 11.428 / 43.313 ms | 51,908,608 / 49,655,808 | 1,032 |
+
+The earlier five-megabyte increase did not recur consistently. These small
+samples support retaining the bounded resource reuse; they do not prove a
+universal memory improvement, eliminate timing variability, or pass the median
+latency budget. Reports are `target/abba-{1-baseline,2-reuse,3-reuse,4-baseline}.json`.
+
+The resize candidates recorded own-hook p99 values of 105 and 97 microseconds,
+respectively. Idle CPU samples were 0% and approximately 0.3125% of one core;
+both no-input controls measured approximately 0.3125%. None establishes a
+universal zero-CPU result. The failed latency and memory budgets remain open.
+
+Local evidence: `target/{memory,reuse-memory}-{control,resize}.json`,
+`target/{performance-diagnostics,render-reuse}-build.json`, corresponding native
+unit logs and cleanup reports. The diagnostic baseline passed 25 native unit
+tests; the reuse candidate passed 26. Four interactive hook cases were excluded
+from these unit runs and retain their separate earlier evidence.
+
+### Alt-mask dispatch attribution
+
+The baseline resize run observed exactly one tagged callback inside every one
+of 128 internal `SendInput` calls, with no absent, multiple or out-of-call tagged
+callbacks. Median/p99 durations were 71/135 microseconds for `SendInput`, 16/38
+before callback entry, 0/1 in the tagged callback handler, and 55/119 after its
+handler returned. These percentiles are separate populations and are not
+additive. The last interval includes diagnostic bookkeeping and Windows call
+completion; it does not prove how much time was spent running versus waiting.
+Existing own/whole-hook measurement boundaries still include this work.
+
+`MOON_PROFILE_INPUT=1` enables optional dispatch profiling on Moon's own hook
+thread, with zero hardware counters. Paired reads around the internal mask
+record cumulative context-switch deltas and the union of interval wait reasons.
+Nested reads are skipped so they do not reset the outer sample's bitmap. Errors
+are visible in `hooks.phases.input_profile`; disabling the option makes no
+profiling API calls. The thread-owned guard disables profiling when it exits.
+Profiling overhead remains inside the existing hook measurements, so an
+instrumented run is diagnostic evidence rather than an uninstrumented budget
+comparison.
+
+The implementation follows Microsoft's
+[EnableThreadProfiling](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-enablethreadprofiling)
+and [PERFORMANCE_DATA](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-performance_data)
+contracts. Context-switch counts are cumulative; the wait-reason bitmap covers
+the interval since the previous read. CPU cycle counts are deliberately unused.
+A separate ordinary-token availability probe successfully enabled, read and
+disabled dispatch profiling without requesting elevation. This establishes
+availability on this host, not the duration or cause of a particular wait.
+
+The opt-in daemon run used ordinary candidate
+`8B7FC844DE555C337ACC2BF5630FF7E00EA90CC46126479DD980259AC326C5CB`.
+All 128 internal masks had at least one context switch: 195 switches in total,
+at most two per call, and aggregate wait-reason bitmap `0x08000000`. Enable and
+read errors were zero; no nested samples were skipped. This establishes that
+these calls yielded the hook thread. It does not measure the wait duration or
+identify a contending thread. The in-handler median/p99 remained 0/1 microsecond;
+the after-handler interval was 56/103 microseconds. All 128 native placements
+matched, and the daemon reported no error. The profiling run's external timing
+is deliberately excluded from the uninstrumented comparison above.
+
+In Microsoft's [WDK 10.0.28000.2526 package](https://www.nuget.org/packages/Microsoft.Windows.WDK.x64/10.0.28000.2526),
+`wdm.h` defines bit 27 as `WrResource`; the package/header hashes and extracted
+values are retained in `target/wdk-kwait-reason.json`. This is the sole reason in
+the observed bitmap, not a measurement of resource-wait duration, its owner or
+subsequent scheduling delay. Higher priority cannot run a thread whose wait is
+still unsatisfied ([Windows context-switch contract](https://learn.microsoft.com/en-us/windows/win32/procthread/context-switches)),
+so this result does not justify changing Moon's thread priority.
+
+Evidence: `target/dispatch-profile.json`, `target/input-profile-build.json` and
+`target/render-profile-cleanup.json`. The cleanup report verifies no owned test
+process or journal remained, the user's configuration hash was unchanged and
+no previous window manager was running before the tested ordinary Moon build
+was restored. This candidate passes 27 native unit tests; the unit command still
+excludes the four explicitly interactive cases. Those four cases subsequently
+passed in a separate isolated run with `MOON_PROFILE_INPUT=1`: 256 trigger
+commands across 128 contiguous chords, all 52 default routes, 22 renewal
+triggers, and key-pair ownership across repeats/modifier changes. Positive
+controls verified that bare Alt+Shift actually changed the helper's keyboard
+layout; consumed shortcuts retained it. Ordinary F24 reached the downstream
+hook, while internal mask events did not leak. Report:
+`target/input-profile-interactive.txt`. Its timing is correctness-test evidence,
+not an uninstrumented performance measurement.
+
+### Final larger-font correction
+
+Visual review subsequently found that a fixed-width workspace button shortened
+workspace 10 to `1…` at Arial 18. The corrected scene sizes workspace buttons for
+their displayed text/icon and font, retaining the existing minimum and configured
+width limit. The resulting ordinary daemon is
+`D5831ED9F4C2DD5676D79EF1CD511D4EC379E582C5C4FFF7DADD6BBE5D006F4A`.
+Its final uninstrumented run again completes all 128 exact placements with no
+renderer or daemon error, one graphics device/atlas, eight gradient brushes and
+one text format. Input profiling is explicitly disabled in the recorded stats.
+The current readiness, latency, CPU and working-set results are tabulated in
+[acceptance evidence](acceptance-status.md#performance-budgets); the failed limits
+remain open. Raw evidence is `target/workspace-labels-performance.json`, alongside
+the native units, lifecycle, carousel and scoped pixel review for that candidate.

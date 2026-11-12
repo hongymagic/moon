@@ -4,7 +4,7 @@
 use crate::platform::{wide, window_id};
 use moon_core::ids::WindowId;
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::HashSet,
     sync::{
         Arc, Mutex,
@@ -17,7 +17,13 @@ use windows::{
     Win32::{
         Foundation::*,
         System::{
-            LibraryLoader::GetModuleHandleW, RemoteDesktop::*, Threading::GetCurrentThreadId,
+            LibraryLoader::GetModuleHandleW,
+            Performance::HardwareCounterProfiling::{
+                DisableThreadProfiling, EnableThreadProfiling, PERFORMANCE_DATA,
+                ReadThreadProfilingData,
+            },
+            RemoteDesktop::*,
+            Threading::{GetCurrentThread, GetCurrentThreadId},
         },
         UI::{Accessibility::*, Input::KeyboardAndMouse::*, WindowsAndMessaging::*},
     },
@@ -197,6 +203,203 @@ static MATCHING_LATENCY: PhaseLatency = PhaseLatency::new();
 static MASK_LATENCY: PhaseLatency = PhaseLatency::new();
 static ENQUEUE_LATENCY: PhaseLatency = PhaseLatency::new();
 
+#[derive(Clone, Copy)]
+struct DispatchSnapshot {
+    switches: u32,
+    wait_reasons: u64,
+}
+#[derive(Default)]
+struct InputProfileCounters {
+    requested: AtomicBool,
+    available: AtomicBool,
+    enable_error: AtomicU64,
+    disable_error: AtomicU64,
+    successful_samples: AtomicU64,
+    read_failures: AtomicU64,
+    last_read_error: AtomicU64,
+    nested_calls_skipped: AtomicU64,
+    calls_with_switches: AtomicU64,
+    total_switches: AtomicU64,
+    max_switches: AtomicU64,
+    wait_reason_bitmap: AtomicU64,
+}
+impl InputProfileCounters {
+    fn record(&self, before: DispatchSnapshot, after: DispatchSnapshot) {
+        let switches = u64::from(after.switches.wrapping_sub(before.switches));
+        self.successful_samples.fetch_add(1, Ordering::Relaxed);
+        self.calls_with_switches.fetch_add(u64::from(switches != 0), Ordering::Relaxed);
+        self.total_switches.fetch_add(switches, Ordering::Relaxed);
+        self.max_switches.fetch_max(switches, Ordering::Relaxed);
+        // Unlike the cumulative switch count, this bitmap covers only the
+        // interval since the previous read. Never subtract the prior bitmap.
+        self.wait_reason_bitmap.fetch_or(after.wait_reasons, Ordering::Relaxed);
+    }
+    fn stats(&self) -> InputProfileStats {
+        InputProfileStats {
+            requested: self.requested.load(Ordering::Relaxed),
+            available: self.available.load(Ordering::Relaxed),
+            enable_error: self.enable_error.load(Ordering::Relaxed) as u32,
+            disable_error: self.disable_error.load(Ordering::Relaxed) as u32,
+            successful_samples: self.successful_samples.load(Ordering::Relaxed),
+            read_failures: self.read_failures.load(Ordering::Relaxed),
+            last_read_error: self.last_read_error.load(Ordering::Relaxed) as u32,
+            nested_calls_skipped: self.nested_calls_skipped.load(Ordering::Relaxed),
+            calls_with_switches: self.calls_with_switches.load(Ordering::Relaxed),
+            total_switches: self.total_switches.load(Ordering::Relaxed),
+            max_switches: self.max_switches.load(Ordering::Relaxed),
+            wait_reason_bitmap: self.wait_reason_bitmap.load(Ordering::Relaxed),
+        }
+    }
+}
+static INPUT_PROFILE: std::sync::LazyLock<InputProfileCounters> =
+    std::sync::LazyLock::new(InputProfileCounters::default);
+thread_local! {
+    static INPUT_PROFILE_HANDLE: Cell<Option<HANDLE>> = const { Cell::new(None) };
+}
+
+struct InputProfiler(HANDLE);
+impl InputProfiler {
+    fn start() -> Option<Self> {
+        if std::env::var("MOON_PROFILE_INPUT").as_deref() != Ok("1") {
+            return None;
+        }
+        INPUT_PROFILE.requested.store(true, Ordering::Relaxed);
+        let mut handle = HANDLE::default();
+        // THREAD_PROFILING_FLAG_DISPATCH = 1. HardwareCounters = 0: no hardware
+        // profiling, driver configuration, or global trace session is requested.
+        let error = unsafe { EnableThreadProfiling(GetCurrentThread(), 1, 0, &mut handle) };
+        INPUT_PROFILE.enable_error.store(u64::from(error), Ordering::Relaxed);
+        if error != 0 {
+            return None;
+        }
+        INPUT_PROFILE.available.store(true, Ordering::Relaxed);
+        INPUT_PROFILE_HANDLE.with(|cell| cell.set(Some(handle)));
+        Some(Self(handle))
+    }
+}
+impl Drop for InputProfiler {
+    fn drop(&mut self) {
+        INPUT_PROFILE_HANDLE.with(|cell| cell.set(None));
+        // This guard is created and dropped inside the owned hook thread,
+        // including every startup failure path, as required by this API.
+        let error = unsafe { DisableThreadProfiling(self.0) };
+        INPUT_PROFILE.disable_error.store(u64::from(error), Ordering::Relaxed);
+    }
+}
+fn read_input_profile(handle: HANDLE) -> Option<DispatchSnapshot> {
+    let mut data = PERFORMANCE_DATA {
+        Size: std::mem::size_of::<PERFORMANCE_DATA>() as u16,
+        Version: 1, // PERFORMANCE_DATA_VERSION
+        ..Default::default()
+    };
+    // READ_THREAD_PROFILING_FLAG_DISPATCHING = 1. CycleTime is intentionally
+    // ignored: CPU cycles cannot be converted portably into elapsed time.
+    let error = unsafe { ReadThreadProfilingData(handle, 1, &mut data) };
+    if error != 0 {
+        INPUT_PROFILE.read_failures.fetch_add(1, Ordering::Relaxed);
+        INPUT_PROFILE.last_read_error.store(u64::from(error), Ordering::Relaxed);
+        None
+    } else {
+        Some(DispatchSnapshot {
+            switches: data.ContextSwitchCount,
+            wait_reasons: data.WaitReasonBitMap,
+        })
+    }
+}
+fn input_profile_before_mask() -> Option<(HANDLE, DispatchSnapshot)> {
+    let handle = INPUT_PROFILE_HANDLE.with(Cell::get)?;
+    if MASK_CALL.with(|cell| cell.get().is_some()) {
+        // A nested read would reset the outer sample's wait-reason bitmap.
+        INPUT_PROFILE.nested_calls_skipped.fetch_add(1, Ordering::Relaxed);
+        return None;
+    }
+    read_input_profile(handle).map(|snapshot| (handle, snapshot))
+}
+
+#[derive(Clone, Copy)]
+struct MaskCallTiming {
+    started: std::time::Instant,
+    callbacks: u64,
+    callback: Option<(std::time::Instant, std::time::Instant)>,
+}
+impl MaskCallTiming {
+    fn observe(&mut self, entered: std::time::Instant, returning: std::time::Instant) {
+        self.callbacks = self.callbacks.saturating_add(1);
+        if self.callbacks == 1 {
+            self.callback = Some((entered, returning));
+        }
+    }
+}
+thread_local! {
+    static MASK_CALL: Cell<Option<MaskCallTiming>> = const { Cell::new(None) };
+}
+struct MaskDispatchLatency {
+    send_input: PhaseLatency,
+    before_callback: PhaseLatency,
+    callback_handler: PhaseLatency,
+    after_callback: PhaseLatency,
+    calls_without_callback: AtomicU64,
+    calls_with_multiple_callbacks: AtomicU64,
+    callbacks_outside_call: AtomicU64,
+}
+impl MaskDispatchLatency {
+    const fn new() -> Self {
+        Self {
+            send_input: PhaseLatency::new(),
+            before_callback: PhaseLatency::new(),
+            callback_handler: PhaseLatency::new(),
+            after_callback: PhaseLatency::new(),
+            calls_without_callback: AtomicU64::new(0),
+            calls_with_multiple_callbacks: AtomicU64::new(0),
+            callbacks_outside_call: AtomicU64::new(0),
+        }
+    }
+    fn record(&self, call: MaskCallTiming, returned: std::time::Instant) {
+        self.send_input.record(returned.duration_since(call.started));
+        match (call.callbacks, call.callback) {
+            (1, Some((entered, returning))) => {
+                self.before_callback.record(entered.duration_since(call.started));
+                self.callback_handler.record(returning.duration_since(entered));
+                self.after_callback.record(returned.duration_since(returning));
+            }
+            (0, _) => {
+                self.calls_without_callback.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {
+                self.calls_with_multiple_callbacks.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+    fn stats(&self) -> MaskDispatchStats {
+        MaskDispatchStats {
+            send_input: self.send_input.stats(),
+            before_callback: self.before_callback.stats(),
+            callback_handler: self.callback_handler.stats(),
+            after_callback: self.after_callback.stats(),
+            calls_without_callback: self.calls_without_callback.load(Ordering::Relaxed),
+            calls_with_multiple_callbacks: self
+                .calls_with_multiple_callbacks
+                .load(Ordering::Relaxed),
+            callbacks_outside_call: self.callbacks_outside_call.load(Ordering::Relaxed),
+        }
+    }
+}
+static MASK_DISPATCH_LATENCY: MaskDispatchLatency = MaskDispatchLatency::new();
+
+fn observe_mask_callback(entered: std::time::Instant) {
+    // This boundary precedes diagnostic bookkeeping and the existing callback
+    // timing destructor; their cost consequently belongs to after_callback.
+    let returning = std::time::Instant::now();
+    MASK_CALL.with(|cell| {
+        if let Some(mut call) = cell.get() {
+            call.observe(entered, returning);
+            cell.set(Some(call));
+        } else {
+            MASK_DISPATCH_LATENCY.callbacks_outside_call.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+}
+
 #[derive(serde::Serialize)]
 pub struct PhaseStats {
     pub samples: u64,
@@ -206,11 +409,51 @@ pub struct PhaseStats {
     pub max_us: u64,
 }
 #[derive(serde::Serialize)]
+pub struct MaskDispatchStats {
+    /// Every SendInput attempt, including failures and nonreentrant delivery.
+    /// Starts immediately before arming thread-local timing; excludes recording
+    /// its histograms after return. The existing alt_mask includes that overhead.
+    pub send_input: PhaseStats,
+    /// These three populations include only calls with exactly one observed
+    /// tagged callback. Their percentiles must not be added or subtracted.
+    pub before_callback: PhaseStats,
+    /// Callback entry through mask recognition, before diagnostic bookkeeping.
+    pub callback_handler: PhaseStats,
+    /// Includes callback metric bookkeeping and Windows call completion.
+    pub after_callback: PhaseStats,
+    pub calls_without_callback: u64,
+    pub calls_with_multiple_callbacks: u64,
+    /// A tagged callback with no active call cannot be causally paired here.
+    pub callbacks_outside_call: u64,
+}
+#[derive(serde::Serialize)]
+pub struct InputProfileStats {
+    pub requested: bool,
+    /// Enable succeeded on the owned hook thread; zero error with requested=false
+    /// means disabled, not tested or supported. All counters are cumulative.
+    pub available: bool,
+    pub enable_error: u32,
+    pub disable_error: u32,
+    pub successful_samples: u64,
+    pub read_failures: u64,
+    pub last_read_error: u32,
+    pub nested_calls_skipped: u64,
+    pub calls_with_switches: u64,
+    pub total_switches: u64,
+    pub max_switches: u64,
+    /// Union of reasons observed between paired reads, not reason frequencies.
+    pub wait_reason_bitmap: u64,
+}
+#[derive(serde::Serialize)]
 pub struct HookPhases {
     /// State lookup, key ownership and binding match, excluding internal masks.
     pub matching: PhaseStats,
     /// The complete synchronous SendInput call, including reentrant dispatch.
     pub alt_mask: PhaseStats,
+    pub alt_mask_dispatch: MaskDispatchStats,
+    /// Opt-in dispatch reads bracket SendInput. Existing alt_mask and own/whole
+    /// callback timing boundaries remain unchanged and include profiling cost.
+    pub input_profile: InputProfileStats,
     /// Event enqueue and consumed-key bookkeeping, including failure reporting.
     pub enqueue: PhaseStats,
 }
@@ -255,6 +498,8 @@ pub fn stats() -> HookStats {
         phases: HookPhases {
             matching: MATCHING_LATENCY.stats(),
             alt_mask: MASK_LATENCY.stats(),
+            alt_mask_dispatch: MASK_DISPATCH_LATENCY.stats(),
+            input_profile: INPUT_PROFILE.stats(),
             enqueue: ENQUEUE_LATENCY.stats(),
         },
     }
@@ -358,6 +603,7 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
         if is_internal_mask(info) {
             // Deliver this internal no-character event to Windows without
             // invoking other remappers. Every other event follows the chain.
+            observe_mask_callback(measure.start);
             return LRESULT(0);
         }
         if !info.flags.contains(LLKHF_LOWER_IL_INJECTED) {
@@ -639,6 +885,7 @@ impl Hooks {
         let thread = thread::Builder::new()
             .name("moon-intake".into())
             .spawn(move || unsafe {
+                let _input_profile = if keyboard_enabled { InputProfiler::start() } else { None };
                 let id = GetCurrentThreadId();
                 let mut message = MSG::default();
                 let _ = PeekMessageW(&mut message, None, 0, 0, PM_NOREMOVE);
@@ -842,7 +1089,22 @@ fn mask_alt_chord() -> bool {
             },
         },
     };
-    unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) == 1 }
+    let profile_before = input_profile_before_mask();
+    let started = std::time::Instant::now();
+    let previous = MASK_CALL
+        .with(|cell| cell.replace(Some(MaskCallTiming { started, callbacks: 0, callback: None })));
+    let sent = unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) == 1 };
+    let returned = std::time::Instant::now();
+    if let Some((handle, before)) = profile_before
+        && let Some(after) = read_input_profile(handle)
+    {
+        INPUT_PROFILE.record(before, after);
+    }
+    // Preserve an outer observation if Windows dispatch reenters a mask call.
+    if let Some(call) = MASK_CALL.with(|cell| cell.replace(previous)) {
+        MASK_DISPATCH_LATENCY.record(call, returned);
+    }
+    sent
 }
 
 #[cfg(test)]
@@ -1505,6 +1767,64 @@ mod tests {
             (two_outliers.samples, two_outliers.p50_us, two_outliers.p99_us, two_outliers.max_us),
             (101, 1, 4096, 6000)
         );
+    }
+
+    #[test]
+    fn dispatch_profile_counts_wrap_and_use_only_the_interval_wait_bitmap() {
+        let counters = InputProfileCounters::default();
+        counters.record(
+            DispatchSnapshot { switches: 10, wait_reasons: 0x80 },
+            DispatchSnapshot { switches: 10, wait_reasons: 0 },
+        );
+        counters.record(
+            DispatchSnapshot { switches: u32::MAX - 1, wait_reasons: 0x80 },
+            DispatchSnapshot { switches: 1, wait_reasons: 0x10 },
+        );
+        counters.record(
+            DispatchSnapshot { switches: 1, wait_reasons: 0x10 },
+            DispatchSnapshot { switches: 3, wait_reasons: 0x4000_0000 },
+        );
+        let stats = counters.stats();
+        assert_eq!(stats.successful_samples, 3);
+        assert_eq!(stats.calls_with_switches, 2);
+        assert_eq!((stats.total_switches, stats.max_switches), (5, 3));
+        assert_eq!(stats.wait_reason_bitmap, 0x4000_0010);
+        assert_eq!((stats.read_failures, stats.nested_calls_skipped), (0, 0));
+        assert!(!stats.requested && !stats.available);
+    }
+
+    #[test]
+    fn mask_dispatch_splits_only_single_callback_calls() {
+        use std::time::{Duration, Instant};
+        let latency = MaskDispatchLatency::new();
+        let started = Instant::now();
+        let at = |us| started + Duration::from_micros(us);
+        let mut single = MaskCallTiming { started, callbacks: 0, callback: None };
+        single.observe(at(10), at(12));
+        latency.record(single, at(40));
+
+        // Delivery after return cannot be attributed to a synchronous phase.
+        latency.record(MaskCallTiming { started, callbacks: 0, callback: None }, at(20));
+        // Multiple callbacks must not accidentally report only the first one.
+        let mut multiple = single;
+        multiple.observe(at(15), at(18));
+        latency.record(multiple, at(50));
+
+        let stats = latency.stats();
+        assert_eq!(stats.send_input.samples, 3);
+        assert_eq!((stats.send_input.p50_us, stats.send_input.max_us), (40, 50));
+        assert_eq!(stats.calls_without_callback, 1);
+        assert_eq!(stats.calls_with_multiple_callbacks, 1);
+        assert_eq!(stats.callbacks_outside_call, 0);
+        for (phase, expected_us) in
+            [(stats.before_callback, 10), (stats.callback_handler, 2), (stats.after_callback, 28)]
+        {
+            assert_eq!(phase.samples, 1);
+            assert_eq!(
+                (phase.p50_us, phase.p99_us, phase.max_us),
+                (expected_us, expected_us, expected_us)
+            );
+        }
     }
 
     #[test]

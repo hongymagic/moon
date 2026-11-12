@@ -5,7 +5,45 @@ It was reviewed on 13 November 2026 (Sydney). Implemented event handling and pas
 simulated tests do not establish that the corresponding physical Windows event
 has been exercised.
 
-## Current polish candidate, 13 November 2026
+## Current renderer refinement, 13 November 2026
+
+The corrected ordinary daemon is
+`D5831ED9F4C2DD5676D79EF1CD511D4EC379E582C5C4FFF7DADD6BBE5D006F4A`;
+its UIAccess installation candidate is
+`5EF1FB070BC48A5FC924728769B0DB572217F44958260B1D73B6EC8A849B23A6`.
+Settings remains `EC22F24B07DFAD2ABE6198B519016E26E2C119843351FE81AEAC13EE9799727C`.
+The installation candidate is built, not yet signed or installed.
+
+Workspace buttons now account for their displayed label/icon and font size,
+within the configured width limit. The Windows review caught and corrected
+workspace 10 becoming `1…` at Arial 18. Borders reuse one brush per current ring,
+and each bar canvas reuses its text format. Theme/font changes invalidate the
+appropriate resources and removed rings release their cached brush.
+
+This exact ordinary candidate passes 75 core tests, 27 Windows native unit
+tests, 14 lifecycle integration cases and ten carousel cases. Five visual stages
+cover initial styling, resize/focus, theme/font reload, window removal and style
+restoration. All 13 captures were reviewed at 4K/125%; the explicit underlay
+inspection option exposed complete gradients and corners without changing user
+windows. This pixel review does not establish normal Z-order or other physical
+DPI behavior. The unchanged hook implementation additionally passed its four
+interactive cases on the preceding `8B7FC844…` binary.
+
+Reports: `target/workspace-label-{normal,uiaccess}-build.json`,
+`target/workspace-labels-native-units.txt`,
+`target/workspace-labels-{integration,carousel,performance}.json` and
+`target/workspace-labels-visual/{report,visual-review,pixel-review}.json`.
+The latest performance budget results are below. Installation, physical
+resilience and seven-day acceptance remain incomplete.
+
+The D583 ordinary daemon is now running as the sole manager with its matching
+Settings companion available. All four existing application identities and
+workspace assignments were preserved, visible native frames match the plan,
+hidden windows remain hidden, original focus returned, and the personal config
+hash is unchanged. No previous manager was started. Live verification:
+`target/workspace-labels-live.json`.
+
+## Polish baseline, 13 November 2026
 
 The ordinary Windows daemon is
 `E050F021CFA3643CAF33B0EE007525FD1676575D688A73706FC14A8979512BE5`;
@@ -30,7 +68,7 @@ Reports: `target/polish-final-{integration,startup,carousel,desktop}.json`,
 `target/settings-polish/report.json`, `target/setup-polish-validation.json`,
 `target/setup-polish-recovery-validation.json` and `target/setup-polish-ui/report.json`.
 
-The ordinary daemon is running as the sole window manager. Actual visits to
+During this baseline run the ordinary daemon was the sole window manager. Actual visits to
 workspaces 1, 2 and 10 verified Arc, Windows Terminal, and ChatGPT plus Claude,
 respectively, with exact visible native frames and correct hidden-window state.
 The visits returned to workspace 10. See
@@ -46,6 +84,26 @@ in `target/settings-opening-ready-after/` and
 This candidate has not completed a signed installation. The physical resilience
 matrix, performance budgets and seven-day soak below remain open; this polish
 run does not supersede their measured results.
+
+### Follow-up rendering and host validation
+
+The subsequent resource-reuse candidate `B2ABB417…` creates eight gradient
+brushes and one text format across the 128-chord workload, rather than 1,032
+brushes. Both exact-placement runs pass, but the measured memory and latency
+budgets remain unmet. Matched no-input controls also establish that the initial
+startup snapshot is not a warmed memory baseline. Detailed candidate identities,
+residency categories and measurement limits are retained in
+[performance evidence](validation-performance.md#performance-investigation-13-november-2026).
+The optional input-profiling candidate `8B7FC844…` passes 27 native unit tests;
+all four interactive hook cases also pass separately with profiling enabled,
+including all 52 default routes and preserving keyboard layout and key ownership.
+
+The official Windows Enterprise evaluation ISO is downloaded and its SHA-256
+matches Microsoft's published checksum. This prepares clean-machine testing;
+it is not a completed VM or clean-first-run result. The ordinary host token
+cannot enumerate or create Hyper-V guests. `target/acceptance-vm-download.json`
+records the verified media and `target/acceptance-vm-capacity.json` records host
+capacity. No guest count is inferred from the permission failure.
 
 ## Earlier SID-fix candidate, 12 November 2026
 
@@ -156,29 +214,31 @@ must stay usable and every owned test window must be recoverable afterward.
 | RDP session | Session-scoped journals implemented; RDP not exercised. | Connect/disconnect RDP, verify separate session ownership/recovery and restored local display geometry. |
 | Native virtual desktop switch | Suspension and persistent-tree tests pass; physical switch not exercised. | Switch native desktops with managed windows on both; no forced switch back, off-desktop uncloak or membership loss. |
 | WSLg windows | Host `.wslconfig` explicitly sets `guiApplications=false`; the distro has no X11/Wayland display. WSLg 1.0.79 and `xmessage` are installed, but enabling GUI support requires restarting WSL, including this build environment. | Tile, focus, hide, restore and close a real WSLg application. |
-| WinUI 3 windows | Paint 11.2609.401.0 passed exact tile/float placement, hook-driven focus, hide/show, original-frame restoration and owned-window cleanup on final candidate 1A7F5020…. Its loaded Microsoft.UI.Xaml.dll version3 and medium token were measured; [application evidence](validation-applications.md) records both. | Application-window behavior is covered; WinUI 3 transient dialogs require a separate measured scenario. |
+| WinUI 3 windows | Paint 11.2609.401.0 passed exact tile/float placement, hook-driven focus, hide/show and restoration on candidate 1A7F5020…. Its genuine Edit colours dialog subsequently passed six checks on E050F021…, including floating, workspace hide/show with the same runtime identity, cancellation and exact retiling. Loaded WinUI3 and the medium token were measured. [Application evidence](validation-applications.md) records the runs and preserved original desktop. | Application-window and transient-dialog behavior are covered on the recorded candidates. |
 | Fullscreen games | Native borderless helper transition passes. | Exercise an actual fullscreen game and return to tiling without a persistent bar/border or manual-fullscreen flag change. |
 | Multi-monitor actions | Pure monitor/workspace movement tests pass; physical multi-monitor not exercised. | Move windows and workspaces between real displays, including differing DPI; verify cursor jump and per-monitor overrides. |
 
 ## Performance budgets
 
-These are the last measured budgets for candidate `075E96CD…`, not measurements
-of the current SID-fix candidate. The IPC correction does not establish a change
-to any failed performance budget.
+These are the latest measured budgets for ordinary candidate `D5831ED9…`.
+Earlier candidate measurements remain in [performance evidence](validation-performance.md).
+No signed-installation performance result is inferred from this ordinary run.
 
 | Budget | Evidence available |
 |---|---|
-| Hook callback p99 under 50 µs | Current static-runtime candidate: 140 µs p99 for Moon's own work and 719 µs for the whole callback. Both exceed the budget. The earlier 9 µs sample predates the key-pair correctness fix. |
-| Eight-window key-to-placement median under 10 ms, p99 under 30 ms | 128/128 exact placements pass. Current independent median/p99 are 12.665/32.790 ms; latency remains above budget. |
+| Hook callback p99 under 50 µs | 100 µs p99 for Moon's own work and 743 µs for the whole callback. Both exceed the budget. The earlier 9 µs sample predates the key-pair correctness fix. |
+| Eight-window key-to-placement median under 10 ms, p99 under 30 ms | 128/128 exact placements pass. Independent median/p99 are 12.183/43.941 ms; latency remains above budget. |
 | 50-window reducer plus layout under 100 µs | Passed: 22.59–22.93 µs in the recorded Criterion run. |
-| Idle CPU 0%, no timer faster than 1 Hz | Current ten-second sample is 0.625% of one core. Providers run at 1 Hz and unchanged scenes do not redraw; animation uses a bounded active-only timer. Literal zero CPU is not established. |
-| Working set under 50 MB, bar and borders on one 4K monitor | Current eight-window process: 45,682,688 bytes before the workload, 54,898,688 after it and 52,674,560 after idle. The current candidate fails the budget. Earlier lower measurements do not establish a pass for it. |
-| Ready in under 300 ms | Current eight-window candidate measured 129.901 ms and passes. The signed installation still needs its own result. |
+| Idle CPU 0%, no timer faster than 1 Hz | The ten-second sample is approximately 0.3125% of one core. Providers run at 1 Hz and unchanged scenes do not redraw; animation uses a bounded active-only timer. Literal zero CPU is not established. |
+| Working set under 50 MB, bar and borders on one 4K monitor | 46,780,416 bytes before the workload, 51,515,392 after it and 49,446,912 after idle. The after-input result still exceeds the budget; the lower idle result does not establish a complete pass. |
+| Ready in under 300 ms | 134.267 ms; passed on this ordinary candidate. The signed installation still needs its own result. |
 
-These results use normal-permission candidate `075E96CD…`, eight owned helpers,
+These results use normal-permission candidate `D5831ED9…`, eight owned helpers,
 the default WARP renderer, and a 3840×2160 display at 125% scaling, with the bar
 and borders enabled. Raw records are in
-`target/postpolish-performance/static-crt/`. A separate four-window workspace
+`target/workspace-labels-performance.json`. Optional input profiling was disabled.
+One device, one border atlas, eight gradient brushes and one text format served
+the workload, with no draw failure or device recreation. A previous, separate four-window workspace
 sample observed all six full-width animations below the 50-pixel bar, with
 47,575,040 bytes peak working set. Its command-to-overlay-disappearance interval
 was 251.64–269.55 ms; this includes command handling and external sampling, not

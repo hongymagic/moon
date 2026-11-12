@@ -85,3 +85,85 @@ then owns its isolated daemon and cleanup. The normal installation can resume
 after the probe. PowerShell 5.1 compiled the native INPUT helpers and parsed the
 scripts successfully; actual signed focus results are recorded separately by
 the probe.
+
+## Paint WinUI 3 transient dialog
+
+On 13 November 2026 (Sydney time), the real Paint colour-dialog scenario passed
+**6/6** against ordinary Moon daemon PID37512, image SHA-256
+`E050F021CFA3643CAF33B0EE007525FD1676575D688A73706FC14A8979512BE5`. Evidence:
+`target/paint-dialog-final.json`; screenshots and every bounded accessibility
+response are retained in `target/paint-dialog-final-assets`. Paint11.2609.401.0
+ran at medium integrity (RID8192), loading `Microsoft.UI.Xaml.dll`3.2.0.2511
+from WindowsAppRuntime2.6.5.0. It opened only a uniquely named owned copy of its
+installed blank bitmap template.
+
+The test identified the actual **Edit colours** XAML window by its observed
+`Popup` accessibility class and required its own `ColorSpectrum`,
+`PrimaryButton` (OK), and `CloseButton` (Cancel). Owned Paint PID41176/main
+HWND7996540 then passed:
+
+- Opening that genuine WinUI3 colour dialog, with its exact control identities.
+- Floating the owner while the dialog remained accessible and native geometry
+  matched Moon's placement.
+- Switching away and back: both the main HWND and its owned tooltip HWND had
+  DWM cloak value2 while hidden; the same dialog runtime identity returned.
+- Canceling the dialog normally, then restoring tiling with exact native bounds.
+- Keeping the temporary bitmap bytes unchanged.
+
+The six report checks include the initial process/runtime identity proof.
+Paint closed normally; no forced termination was needed, and cleanup errors
+were empty. The four preexisting HWND/PID/creation-time identities, full semantic
+layout, native foreground HWND263988, pointer and configuration hash were
+restored. A separate read-only check confirmed zero Paint processes and the
+same Moon PID37512 with `last_error=null`. Visual inspection of
+`restored-dialog.png` confirmed the complete colour dialog after its workspace
+round trip. This is real WinUI3 transient-dialog coverage, not a shell file
+picker or a helper simulation. It does not claim that Paint exposes the
+accessibility class `ContentDialog`.
+
+`scripts/paint-dialog-integration.ps1` runs against an explicitly identified
+existing daemon. Every accessibility read and cancellation runs in its own
+ordinary MTA worker with an eight-second process deadline and repeated native
+ownership checks. This follows Microsoft's [UI Automation threading
+guidance](https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-threading).
+A bounded breadth-first TreeWalker deduplicates visited nodes and truncates
+repeating sibling branches. Opening uses one click at the freshly observed
+button center, after exact control, foreground, hit-test and held-input checks.
+The test records every worker response and native failure state. Optional forced
+cleanup is restricted to the exact retained process, unchanged unique blank
+fixture, absence of a second document and no intervening input; needing that
+cleanup makes a run fail.
+
+PowerShell5.1 compilation and **11/11 isolated checks** pass in
+`target/paint-dialog-isolated-validation.json`, including the observed selector,
+rejection of foreign/hidden/non-XAML/ambiguous controls, invalid-window rejection
+before input or accessibility access, and termination of a deliberately stalled
+owned worker at its deadline. These checks did not change desktop windows.
+
+Earlier failed attempts are retained as harness history:
+
+- `target/paint-dialog-discovery.json` first identified the actual Edit colours
+  button and closed its blank document normally.
+- `target/paint-dialog-provider-failure.json` and
+  `target/paint-dialog-recovery.json` record an initial unbounded accessibility
+  attempt and its guarded cleanup. The harness inspected a descendants count
+  only after the provider call, which did not bound that call. Microsoft also
+  documents that [InvokePattern.Invoke can block for modal
+  providers](https://learn.microsoft.com/en-us/dotnet/api/system.windows.automation.invokepattern.invoke?view=windowsdesktop-10.0).
+  These observations do not establish an application or Moon defect.
+- `target/paint-dialog-click-validation.json` failed because the test required
+  the exact accessibility class `ContentDialog`. The diagnostic
+  `target/paint-dialog-observed-tree.json` and its saved screenshot/tree proved
+  that the real colour dialog was open as XAML `Window`/`Popup`, with all three
+  specific controls. The small native popup was its Black tooltip; the main
+  HWND stayed enabled. An ignored main-window `WM_CLOSE` with that dialog open
+  was not proof of a Paint hang.
+- `target/paint-dialog-selector-cycle-failure.json` records a repeated sibling
+  identity in the palette tree. The traversal initially rejected the whole
+  result. Bounded branch truncation preserved the already queued unique nodes
+  while still requiring the exact dialog controls. The subsequent full run
+  passed without changes to Moon or the user's configuration.
+
+Every failed attempt stopped before floating/workspace commands, retained its
+own cleanup evidence, and restored the original application identities and
+layout. None is counted as a product acceptance pass.

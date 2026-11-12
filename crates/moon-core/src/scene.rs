@@ -116,6 +116,14 @@ pub fn derive(world: &World, providers: &BTreeMap<String, String>, error: Option
                     let selected = workspace == Some(ws.id);
                     let style = &config.workspaces[ws.id.index()];
                     let accent = style.color.as_deref().unwrap_or("terracotta");
+                    let text = style.icon.clone().unwrap_or_else(|| ws.name.clone());
+                    // Reserve a full em per displayed character plus the native
+                    // renderer's rounded seven-DIP inset on each side. Long names
+                    // remain bounded; a smaller configured cap cannot erase the
+                    // existing minimum target size.
+                    let width = (text.chars().count() as f32 * config.bar.font_size * scale
+                        + 2.0 * (7.0 * scale).round())
+                    .clamp(34.0 * scale, widget.max_width.max(34) as f32 * scale);
                     items.push(BarItem {
                         rect: Rect::default(),
                         label: format!(
@@ -124,7 +132,7 @@ pub fn derive(world: &World, providers: &BTreeMap<String, String>, error: Option
                             if selected { " · Current" } else { "" }
                         ),
                         selected,
-                        text: style.icon.clone().unwrap_or_else(|| ws.name.clone()),
+                        text,
                         foreground: color(if selected { "crust" } else { accent }),
                         background: Some(color(if selected {
                             accent
@@ -134,7 +142,7 @@ pub fn derive(world: &World, providers: &BTreeMap<String, String>, error: Option
                         command: Some(format!("workspace {}", ws.name)),
                         font_size: config.bar.font_size * scale,
                     });
-                    alignments.push((widget.align.as_str(), 34.0 * scale, 0.0, 6.0 * scale));
+                    alignments.push((widget.align.as_str(), width, 0.0, 6.0 * scale));
                 }
                 continue;
             }
@@ -502,6 +510,77 @@ mod tests {
                 .all(|item| !item.rect.intersects(&notice.rect))
         );
     }
+    #[test]
+    fn workspace_ten_reserves_two_ems_and_padding_at_larger_fonts_and_scales() {
+        for (font_size, scale) in [(18.0, 1.0), (18.0, 1.25), (18.0, 1.5), (24.0, 1.25)] {
+            let mut config = Config::default();
+            config.bar.font = "Arial".into();
+            config.bar.font_size = font_size;
+            let world = World::new(
+                config,
+                vec![Monitor {
+                    id: MonitorId(1),
+                    name: "screen".into(),
+                    bounds: Rect::new(0, 0, 3840, 2160),
+                    work_area: Rect::new(0, 0, 3840, 2160),
+                    scale,
+                }],
+            )
+            .unwrap();
+            let scene = derive(&world, &BTreeMap::new(), None);
+            let ten = scene.bars[0]
+                .items
+                .iter()
+                .find(|item| item.command.as_deref() == Some("workspace 10"))
+                .unwrap();
+            assert_eq!(ten.text, "10");
+            let content_width = ten.rect.width - 2 * (7.0 * scale).round() as i32;
+            assert!(content_width >= (2.0 * f64::from(font_size) * scale).ceil() as i32);
+            assert!(ten.rect.width >= (34.0 * scale).round() as i32);
+        }
+    }
+
+    #[test]
+    fn workspace_width_follows_displayed_icons_and_font_with_bounded_names() {
+        let item = |config: Config| {
+            let world = World::new(
+                config,
+                vec![Monitor {
+                    id: MonitorId(1),
+                    name: "screen".into(),
+                    bounds: Rect::new(0, 0, 3840, 2160),
+                    work_area: Rect::new(0, 0, 3840, 2160),
+                    scale: 1.25,
+                }],
+            )
+            .unwrap();
+            derive(&world, &BTreeMap::new(), None).bars.remove(0).items.remove(0)
+        };
+        let mut config = Config::default();
+        config.bar.font_size = 18.0;
+        config.bar.widgets.retain(|widget| widget.id == "workspaces");
+        config.bar.widgets[0].max_width = 160;
+        config.workspaces.truncate(1);
+        config.workspaces[0].name = "A deliberately very long workspace name".into();
+        let long = item(config.clone());
+        assert_eq!(long.rect.width, 200); // The configured 160-DIP cap at 125%.
+        assert!(long.label.contains(&config.workspaces[0].name));
+        config.bar.widgets[0].max_width = 80;
+        assert_eq!(item(config.clone()).rect.width, 100);
+        config.bar.widgets[0].max_width = 12;
+        assert_eq!(item(config.clone()).rect.width, 43); // The 34-DIP minimum.
+        config.bar.widgets[0].max_width = 300;
+        config.workspaces[0].icon = Some("".into());
+        let icon = item(config.clone());
+        assert_eq!(icon.text, "");
+        assert_eq!(icon.rect.width, 43);
+        config.workspaces[0].icon = Some("DEV".into());
+        let wider_icon = item(config.clone());
+        assert!(wider_icon.rect.width > icon.rect.width);
+        config.bar.font_size = 28.0;
+        assert!(item(config).rect.width > wider_icon.rect.width);
+    }
+
     #[test]
     fn crowded_secondary_bars_keep_items_inside_their_group_without_overlap() {
         let providers = BTreeMap::from([

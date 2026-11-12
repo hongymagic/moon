@@ -24,6 +24,86 @@ redraw borders. All surfaces share one main-thread Direct2D device context.
 Its reusable texture-cache limit is zero; this does not limit live
 DirectComposition textures or total process working set.
 
+The renderer reuses one linear-gradient brush per current border slot. A color
+change replaces that slot's brush and gradient stops; geometry changes update
+the existing brush's start and end points. Removing borders drops the excess
+cached brushes. Each canvas also keeps one DirectWrite text format and ellipsis,
+replacing them when its requested font family or size changes. Text layouts stay
+fresh for each draw, with current bounds and the existing symbol-font overrides.
+These caches contain no history or least-recently-used list. Canvas teardown and
+shared-device recreation release them. This follows Microsoft's guidance to
+[reuse drawing resources](https://learn.microsoft.com/en-us/windows/win32/direct2d/improving-direct2d-performance#reuse-resources);
+it reduces repeated object creation, not necessarily working-set residency.
+
+### Renderer diagnostics
+
+The `query stats` response includes bounded, cumulative `renderer` diagnostics.
+Render-call, changed-scene and successful-commit counts distinguish repeated
+scene evaluation from drawing submissions. Other counters record successful
+device, canvas, atlas, gradient-brush, text-format and text-layout creation, plus
+device recreation attempts after render failures.
+
+For bar, border and pointer-feedback draws separately, diagnostics call
+`IDXGISurface::GetDesc` on the temporary surface returned by `BeginDraw`. Each
+category records draw calls/failures, descriptor failures, the largest requested
+pixel count, the largest observed backing-surface pixel count, and at most
+16 distinct width/height/sample-count combinations with observation counts.
+Additional combinations increment an overflow counter; the maximum continues
+to update. No surface pointer, virtual address or pixel content is retained.
+
+These observations are **not** unique allocation counts, simultaneously live
+buffer counts, allocation bytes or physical memory measurements. Separate draws
+may receive views of shared backing storage, and the same dimensions can refer
+to different storage. Summing their sizes would therefore be misleading.
+`surface_pixel_bytes` continues to describe only the renderer's nominal RGBA
+canvas/atlas/feedback pixels. It excludes backing-buffer padding, compositor
+buffers, caches, executable pages and the rest of the process.
+
+The native reuse regression test verifies stable COM-object reuse and correct
+font/size/color invalidation, including ellipsis, gradient colors, gamma and
+extend mode. Matched no-input and resize runs confirm that the eight-window
+workload retains eight gradient brushes and one text format while layouts are
+still rebuilt. Whole-process working-set results remain variable; neither
+resource reuse nor fixed nominal pixel storage establishes a memory-budget pass.
+The measured components and run identities are recorded separately in
+[performance validation](validation-performance.md).
+
+`scripts/validate-render-reuse.ps1` provides an isolated visual guard for an
+ordinary build. Give it `-BuildDirectory` containing `moon.exe` and `testwin.exe`,
+and an empty `-OutputDirectory`. It refuses existing Moon/test windows, other
+desktop managers and an outstanding recovery journal. Two owned helper windows
+and a temporary configuration exercise resize/focus, light-theme and font changes,
+gradient changes, border-slot removal, and restoration of the original styling.
+Every capture waits for native frames to match the committed placements and saves
+renderer counters with the scene and actual screen pixels. The capture includes
+layered windows through
+[BitBlt's CAPTUREBLT flag](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/nf-wingdi-bitblt).
+Normal cleanup requests the exact owned daemon's exit, checks frame restoration,
+and closes only its retained helper process's windows.
+
+For pixel inspection with ignored background apps still open, pass
+`-InspectUnderlay`. Before each capture, the harness verifies process/window
+ownership and places only its own layered underlays immediately below its lowest
+helper window, without moving, resizing or activating them. This uses
+[SetWindowPos's relative Z-order](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowpos).
+The report labels the override and records the affected handles. It isolates
+rendered pixels from background-window occlusion; it does **not** verify the
+product's normal Z-order. Teardown destroys those owned underlays with the daemon.
+
+`-CompileOnly` checks the PowerShell script and compiles its native helper without
+opening windows. That check and both fixture TOML checks passed; a full native
+run is separate. An automated run leaves `visual_review_status` as `pending`:
+the saved images still need review for gradient continuity, corners, focus colors,
+ellipsis and bundled symbols. Capturing screenshots is not visual acceptance.
+
+The final corrected D583 candidate completed this run on 13 November. All 13
+image hashes were verified and the images were reviewed: complete four-edge
+gradients and rounded corners, focus and theme changes, resize behavior, removal
+of the old split border, readable larger-font workspace labels and bundled
+symbols passed at 3840×2160/125%. The review is explicitly scoped to the
+inspection Z-order described above. Reports:
+`target/workspace-labels-visual/{report,visual-review,pixel-review}.json`.
+
 The default is WARP software rasterization with
 `D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS`, which avoids
 WARP's additional raster-worker pool for this small, infrequently updated scene.
@@ -268,3 +348,10 @@ remain to be verified; simulated geometry is not equivalent evidence.
 Exact Rust method signatures were checked against the downloaded `windows`
 0.62.2, `windows-future` 0.3.2 and `windows-numerics` 0.3.1 crate sources before
 cross-compilation. These compatible versions are pinned in Cargo.toml/Cargo.lock.
+
+Additional renderer references checked on 2026-11-13:
+
+- [Direct2D resource reuse and command lifetime](https://learn.microsoft.com/en-us/windows/win32/direct2d/improving-direct2d-performance)
+- [Linear-gradient brush lifetime and coordinates](https://learn.microsoft.com/en-us/windows/win32/api/d2d1/nn-d2d1-id2d1lineargradientbrush)
+- [DirectWrite text-layout inputs](https://learn.microsoft.com/en-us/windows/win32/api/dwrite/nf-dwrite-idwritefactory-createtextlayout)
+- [DXGI surface descriptions](https://learn.microsoft.com/en-us/windows/win32/api/dxgi/nf-dxgi-idxgisurface-getdesc)
