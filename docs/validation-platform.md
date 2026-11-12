@@ -235,6 +235,25 @@ repeated WTS and desktop checks retained exactly 98 process handles. The report
 is `target/session-guard-results.json`. No lock, desktop switch, UAC prompt or
 sleep was triggered; their physical acceptance scenarios remain separate.
 
+A further read-only probe on 13 November observed the actual session as locked
+and connected while `OpenInputDesktop` still returned `Default`.
+`session_interactive()` correctly returned false; 64 repeated checks retained
+102 handles (`target/session-lock-readonly.json`). Source review then guarded
+monitor-change cursor jumps with the existing suspension flag and made successful
+WTS registration retries request a fresh session check, without adding a timer.
+An unavailable session also clears animation input ownership on that recheck.
+The `stats` query now exposes `session_suspended` for later acceptance evidence.
+A focused Windows regression passes for failed registration, recovery
+notification and idempotent subsequent retries. It performs no native calls or
+desktop actions; the remaining native tests were not rerun while locked. The
+93 portable tests and both portable and Windows workspace Clippy checks pass.
+The ordinary build
+`475212403C1DBE8AF5BBD8F8ABA78AC8543523481F4D53AFE37746B3071D2067`
+is staged separately in `Downloads\Moon-validation\moon-session-guard-20261113`.
+Evidence: `target/session-lock-{build,stage,native-unit}.json`. These changes
+have not been exercised in a physical lock/unlock scenario or promoted to the
+currently locked live session, which remains ordinary build `43FD9136…`.
+
 References: [WTS extended lock flags](https://learn.microsoft.com/en-us/windows/win32/api/wtsapi32/ns-wtsapi32-wtsinfoex_level1_w),
 [WTS connection states](https://learn.microsoft.com/en-us/windows/win32/api/wtsapi32/ne-wtsapi32-wts_connectstate_class),
 [OpenInputDesktop](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-openinputdesktop),

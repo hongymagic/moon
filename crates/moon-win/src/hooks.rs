@@ -846,13 +846,21 @@ impl NotificationWindow {
 }
 impl NotificationWindow {
     fn retry_session_registration(&mut self) {
-        if !self.session_registered {
-            self.session_registered =
-                unsafe { WTSRegisterSessionNotification(self.handle, NOTIFY_FOR_THIS_SESSION) }
-                    .is_ok();
-        }
+        retry_session_registration(&mut self.session_registered, || unsafe {
+            WTSRegisterSessionNotification(self.handle, NOTIFY_FOR_THIS_SESSION).is_ok()
+        });
     }
 }
+
+fn retry_session_registration(registered: &mut bool, register: impl FnOnce() -> bool) {
+    if !*registered && register() {
+        *registered = true;
+        // Lock/unlock events may have occurred before registration recovered.
+        // Resumed requests a fresh fail-closed query; it does not imply unlocked.
+        send_system(SystemEvent::Resumed);
+    }
+}
+
 impl Drop for NotificationWindow {
     fn drop(&mut self) {
         unsafe {
@@ -1110,6 +1118,32 @@ fn mask_alt_chord() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovered_session_registration_requests_one_authoritative_recheck() {
+        let (sender, receiver) = mpsc::channel();
+        STATE.with(|state| {
+            *state.borrow_mut() = Some(State {
+                bindings: Vec::new(),
+                sender,
+                pressed: [false; 256],
+                swallowed: HashSet::new(),
+                taskbar_message: 0,
+                pointer: Arc::default(),
+            });
+        });
+        let mut registered = false;
+        retry_session_registration(&mut registered, || false);
+        assert!(!registered);
+        assert!(receiver.try_recv().is_err());
+        retry_session_registration(&mut registered, || true);
+        assert!(registered);
+        assert!(matches!(receiver.try_recv(), Ok(PlatformEvent::System(SystemEvent::Resumed))));
+        retry_session_registration(&mut registered, || panic!("already registered"));
+        assert!(receiver.try_recv().is_err());
+        drop(STATE.with(|state| state.borrow_mut().take()));
+    }
+
     static FORWARDED_F24: AtomicU64 = AtomicU64::new(0);
     static FORWARDED_MASK: AtomicU64 = AtomicU64::new(0);
     unsafe extern "system" fn observe_f24(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
