@@ -86,6 +86,27 @@ visit. These results verify the current startup behavior. The earlier observatio
 of only two managed windows lacks window identities and admission-state evidence,
 so it does not establish a cause for the reported first-start failure.
 
+## Focused binding-effect fixture: prepared, native run pending
+
+`-BindingEffectsOnly` reuses four owned helper windows on one monitor. It checks
+both horizontal and vertical neighbor focus and slot exchanges; deferred split
+direction through a subsequent owned insertion; manual fullscreen and exact tile
+restoration; pause preserving a manual move across maintenance and resume restoring
+the tile; all ten move-and-follow destinations and workspace selections; and all
+four original HWNDs surviving normal exit with their original visible frames.
+Before/after state and native frames are retained in `binding-effects.json`.
+
+```powershell
+./scripts/integration.ps1 -BuildDirectory <normal-build-directory> -BindingEffectsOnly -ReportPath <new-report-path>
+```
+
+This mode requires other managers to be stopped and uses the isolated fixture
+configuration with hooks and surfaces disabled. It covers CLI/IPC command effects,
+not no-config startup, complete shortcut-to-effect acceptance, monitor transfers,
+or opening the cheat sheet. Its nine planned checks, including background startup,
+have **not run natively**: execution is held while Windows is at LockApp. The
+previous fourteen-case results belong to the unchanged default scenario.
+
 ## Defects found and verified during integration
 
 - The pipe server disconnected immediately after a buffered response write,

@@ -6,10 +6,12 @@ param(
     [string]$TestwinPath = (Join-Path $env:LOCALAPPDATA 'moon-dev\testwin.exe'),
     [string]$ReportPath = (Join-Path $env:LOCALAPPDATA 'moon-dev\integration-results.json'),
     [switch]$GuardOnly,
-    [switch]$StartupAssignmentOnly
+    [switch]$StartupAssignmentOnly,
+    [switch]$BindingEffectsOnly
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+if (@($GuardOnly,$StartupAssignmentOnly,$BindingEffectsOnly | Where-Object { $_ }).Count -gt 1) { throw 'Choose only one focused integration mode.' }
 if (!$ExtensionPath) { $ExtensionPath = Join-Path $PSScriptRoot '..\examples\workspace-state.ps1' }
 if ($BuildDirectory) {
     $MoonPath = Join-Path $BuildDirectory 'moon.exe'
@@ -42,6 +44,7 @@ $buildEvidence = [pscustomobject]@{
     os = [Environment]::OSVersion.VersionString
     moon = [pscustomobject]@{ path=$MoonPath; sha256=(Get-FileHash -LiteralPath $MoonPath -Algorithm SHA256).Hash }
     testwin = [pscustomobject]@{ path=$TestwinPath; sha256=(Get-FileHash -LiteralPath $TestwinPath -Algorithm SHA256).Hash }
+    scope = if ($BindingEffectsOnly) { 'Owned four-window command effects via CLI/IPC; fixture config, hooks and surfaces disabled; not no-config or all-binding end-to-end acceptance.' } else { 'Existing lifecycle or focused integration scenario.' }
 }
 [IO.File]::WriteAllText((Join-Path $testDirectory 'build.json'), ($buildEvidence | ConvertTo-Json -Depth 4), $utf8)
 $journalFile = Join-Path $env:LOCALAPPDATA ('moon\journal-v1-session' + [Diagnostics.Process]::GetCurrentProcess().SessionId + '.json')
@@ -65,6 +68,8 @@ public static class MoonIntegrationNative {
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
+    [DllImport("user32.dll",SetLastError=true)] static extern bool GetWindowRect(IntPtr hwnd, out Rect rect);
     [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
     [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hwnd, int command);
     [DllImport("user32.dll",EntryPoint="GetWindowLongPtrW")] public static extern IntPtr GetWindowStyle(IntPtr hwnd, int index);
@@ -75,6 +80,8 @@ public static class MoonIntegrationNative {
     public static long[] Windows(uint process) { var handles = new List<long>(); EnumWindows((h,p) => { uint id; GetWindowThreadProcessId(h,out id); var name=new StringBuilder(256); GetClassName(h,name,256); if(id == process && IsWindowVisible(h) && name.ToString()=="MoonTestWindow") handles.Add(h.ToInt64()); return true; },IntPtr.Zero); return handles.ToArray(); }
     public static Rect Frame(long hwnd) { Rect value; int hr=DwmGetWindowAttribute(new IntPtr(hwnd),9,out value,16); Marshal.ThrowExceptionForHR(hr); return value; }
     public static uint Cloaked(long hwnd) { uint value; int hr=DwmGetCloaked(new IntPtr(hwnd),14,out value,4); Marshal.ThrowExceptionForHR(hr); return value; }
+    public static uint Owner(long hwnd) { uint process; GetWindowThreadProcessId(new IntPtr(hwnd),out process); return process; }
+    public static Rect Outer(long hwnd) { Rect value; if(!GetWindowRect(new IntPtr(hwnd),out value))throw new System.ComponentModel.Win32Exception();return value; }
 }
 '@
 [void][MoonIntegrationNative]::SetThreadDpiAwarenessContext([IntPtr](-4))
@@ -193,10 +200,187 @@ function Invoke-PublicRequest([hashtable]$Request) {
     } finally { $pipe.Dispose() }
 }
 
+function Assert-EffectIdentity([long]$Id) {
+    $helper.Refresh()
+    if ($helper.HasExited -or !$originals.ContainsKey([string]$Id) -or ![MoonIntegrationNative]::IsWindow([IntPtr]$Id) -or [MoonIntegrationNative]::Owner($Id) -ne $helper.Id) { throw 'An owned binding-effect window identity changed.' }
+}
+function Focus-EffectWindow([long]$Id) {
+    Assert-EffectIdentity $Id
+    $placement = @(Invoke-Moon query windows | Where-Object { [long]$_.id -eq $Id })
+    if ($placement.Count -ne 1 -or !$placement[0].visible) { throw 'Refused to focus an inactive binding-effect window.' }
+    if (![MoonIntegrationNative]::SetForegroundWindow([IntPtr]$Id)) { throw 'Windows refused owned binding-effect foreground.' }
+    Wait-Until -Seconds 5 -Description 'exact owned native and logical focus' -Condition {
+        [MoonIntegrationNative]::GetForegroundWindow().ToInt64() -eq $Id -and [long](Invoke-Moon query world).focused -eq $Id
+    }
+}
+function Test-EffectFrame($Actual,$Expected) {
+    foreach ($edge in @('Left','Top','Right','Bottom')) { if ([Math]::Abs($Actual.$edge-$Expected.$edge) -gt 1) { return $false } }
+    return $true
+}
+function Assert-EffectWorkspace([string]$Name,[hashtable]$Members,[long]$ExpectedFocus=0) {
+    Wait-Until -Seconds 5 -Description "workspace $Name exact memberships, visibility and focus" -Condition {
+        $world = Invoke-Moon query world
+        $active = $world.active.PSObject.Properties[[string]$world.active_monitor].Value
+        if ($world.workspaces[$active].name -ne $Name -or @($world.windows.PSObject.Properties).Count -ne 4) { return $false }
+        $placements = @(Invoke-Moon query windows)
+        if ($placements.Count -ne 4) { return $false }
+        foreach ($entry in $world.windows.PSObject.Properties) {
+            if (!$Members.ContainsKey($entry.Name) -or $world.workspaces[$entry.Value.workspace].name -ne $Members[$entry.Name]) { return $false }
+            Assert-EffectIdentity ([long]$entry.Name)
+            $placement = @($placements | Where-Object { [string]$_.id -eq $entry.Name })
+            if ($placement.Count -ne 1 -or $placement[0].visible -ne ($Members[$entry.Name] -eq $Name)) { return $false }
+        }
+        if ($ExpectedFocus -and [long]$world.focused -ne $ExpectedFocus) { return $false }
+        return !$world.focused -or [MoonIntegrationNative]::GetForegroundWindow().ToInt64() -eq [long]$world.focused
+    }
+    Assert-Placements
+}
+function Save-EffectStep([string]$Name) {
+    $world = Invoke-Moon query world
+    $native = foreach ($key in $originals.Keys) {
+        Assert-EffectIdentity ([long]$key)
+        [pscustomobject]@{id=[long]$key;frame=[MoonIntegrationNative]::Frame([long]$key);cloak=[MoonIntegrationNative]::Cloaked([long]$key)}
+    }
+    $effectSteps.Add([pscustomobject]@{name=$Name;active=$world.active;focused=$world.focused;paused=$world.paused;workspaces=$world.workspaces;native=@($native)})
+    [IO.File]::WriteAllText((Join-Path $testDirectory 'binding-effects.json'), ($effectSteps.ToArray() | ConvertTo-Json -Depth 64), $utf8)
+}
+function Invoke-BindingEffects {
+    $effectSteps = New-Object 'System.Collections.Generic.List[object]'
+    $world = Invoke-Moon query world
+    if (@($world.monitors).Count -ne 1 -or @($world.workspaces).Count -ne 10) { throw 'The focused binding-effects fixture requires one monitor and the ten default workspaces; monitor scenarios are separate.' }
+    for ($index=0; $index -lt 10; $index++) { if ($world.workspaces[$index].name -ne [string]($index+1)) { throw 'The numbered workspace defaults changed.' } }
+    $ids = @($originals.Keys | ForEach-Object { [long]$_ } | Sort-Object)
+    if ($ids.Count -ne 4) { throw 'Expected exactly four retained binding-effect HWNDs.' }
+    $anchor=$ids[0];$inserted=$ids[1];$third=$ids[2]
+    $members=@{};foreach ($id in $ids) { $members[[string]$id]='1' }
+    $null=Invoke-Moon workspace 1
+    Focus-EffectWindow $anchor
+    Assert-EffectWorkspace '1' $members
+    # Reuse owned windows as new insertions; never create or manipulate a user app.
+    foreach ($id in $ids[1..3]) {
+        Focus-EffectWindow $id;$null=Invoke-Moon move-to-workspace 10
+        $members[[string]$id]='10';Assert-EffectWorkspace '1' $members
+    }
+    foreach ($axis in @('vertical','horizontal')) {
+        Focus-EffectWindow $anchor
+        $opposite=if ($axis -eq 'vertical') { 'horizontal' } else { 'vertical' }
+        $null=Invoke-Moon -Words @('direction',$opposite)
+        $before=[MoonIntegrationNative]::Frame($anchor)
+        $null=Invoke-Moon toggle-direction
+        if ((Invoke-Moon query world).workspaces[0].tree.axis -ne $axis) { throw 'Toggle direction did not change the single-window insertion axis.' }
+        Assert-Placements
+        if (!(Test-EffectFrame ([MoonIntegrationNative]::Frame($anchor)) $before)) { throw 'Changing an insertion hint unexpectedly resized a single window.' }
+        $null=Invoke-Moon workspace 10;Assert-EffectWorkspace '10' $members
+        Focus-EffectWindow $inserted;$null=Invoke-Moon move-to-workspace 1 --follow
+        $members[[string]$inserted]='1';Assert-EffectWorkspace '1' $members $inserted
+        $first=[MoonIntegrationNative]::Frame($anchor);$second=[MoonIntegrationNative]::Frame($inserted)
+        if ($axis -eq 'vertical') {
+            $arranged=$first.Bottom -lt $second.Top -and $first.Left -eq $second.Left -and $first.Right -eq $second.Right
+            $forward='down';$back='up'
+        } else {
+            $arranged=$first.Right -lt $second.Left -and $first.Top -eq $second.Top -and $first.Bottom -eq $second.Bottom
+            $forward='right';$back='left'
+        }
+        if (!$arranged -or (Test-EffectFrame $first $before)) { throw "New insertion did not produce the independently expected $axis split." }
+        Save-EffectStep "$axis split after toggle and owned insertion"
+        Focus-EffectWindow $anchor
+        foreach ($direction in @($forward,$back)) {
+            $target=if ($direction -eq $forward) { $inserted } else { $anchor }
+            $null=Invoke-Moon -Words @('focus',$direction)
+            Assert-EffectWorkspace '1' $members $target
+            Save-EffectStep "focus $direction activates the exact neighbor"
+        }
+        $null=Invoke-Moon -Words @('move',$forward)
+        Assert-EffectWorkspace '1' $members $anchor
+        if (!(Test-EffectFrame ([MoonIntegrationNative]::Frame($anchor)) $second) -or !(Test-EffectFrame ([MoonIntegrationNative]::Frame($inserted)) $first)) { throw "Move $forward did not exchange the two native slots." }
+        Save-EffectStep "move $forward exchanges native slots"
+        $null=Invoke-Moon -Words @('move',$back)
+        Assert-EffectWorkspace '1' $members $anchor
+        if (!(Test-EffectFrame ([MoonIntegrationNative]::Frame($anchor)) $first) -or !(Test-EffectFrame ([MoonIntegrationNative]::Frame($inserted)) $second)) { throw "Move $back did not restore both native slots." }
+        Save-EffectStep "move $back restores native slots"
+        Record-Pass "$axis insertion, exact neighbor focus, and both directional reorders"
+        if ($axis -eq 'vertical') {
+            Focus-EffectWindow $inserted;$null=Invoke-Moon move-to-workspace 10
+            $members[[string]$inserted]='10';Assert-EffectWorkspace '1' $members
+        }
+    }
+    # With siblings, toggle-direction is deferred until insertion, not a reflow.
+    Focus-EffectWindow $anchor
+    $left=[MoonIntegrationNative]::Frame($anchor);$right=[MoonIntegrationNative]::Frame($inserted)
+    $null=Invoke-Moon toggle-direction;Assert-Placements
+    if (!(Test-EffectFrame ([MoonIntegrationNative]::Frame($anchor)) $left) -or !(Test-EffectFrame ([MoonIntegrationNative]::Frame($inserted)) $right)) { throw 'A deferred split hint moved existing siblings before insertion.' }
+    $null=Invoke-Moon workspace 10;Assert-EffectWorkspace '10' $members
+    Focus-EffectWindow $third;$null=Invoke-Moon move-to-workspace 1 --follow
+    $members[[string]$third]='1';Assert-EffectWorkspace '1' $members $third
+    $top=[MoonIntegrationNative]::Frame($anchor);$bottom=[MoonIntegrationNative]::Frame($third)
+    if ($top.Bottom -ge $bottom.Top -or $top.Left -ne $left.Left -or $top.Right -ne $left.Right -or $bottom.Left -ne $left.Left -or $bottom.Right -ne $left.Right -or $top.Top -ne $left.Top -or $bottom.Bottom -ne $left.Bottom -or !(Test-EffectFrame ([MoonIntegrationNative]::Frame($inserted)) $right)) { throw 'Deferred insertion did not split only the anchored native slot vertically.' }
+    Save-EffectStep 'deferred split changes only the anchored slot on insertion'
+    Record-Pass 'toggle direction preserves existing siblings and affects the next owned insertion'
+
+    Focus-EffectWindow $anchor
+    $tiled=[MoonIntegrationNative]::Frame($anchor);$state=Invoke-Moon query world
+    $bounds=$state.monitors[0].bounds
+    $full=[pscustomobject]@{Left=$bounds.x;Top=$bounds.y;Right=($bounds.x+$bounds.width);Bottom=($bounds.y+$bounds.height)}
+    $null=Invoke-Moon toggle-fullscreen
+    Wait-Until -Seconds 5 -Description 'manual fullscreen flag and full physical monitor bounds' -Condition {
+        $w=Invoke-Moon query world
+        $w.windows.PSObject.Properties[[string]$anchor].Value.fullscreen -and (Test-EffectFrame ([MoonIntegrationNative]::Frame($anchor)) $full)
+    }
+    if (Test-EffectFrame $tiled $full) { throw 'Fullscreen fixture did not start with a smaller tiled frame.' }
+    Assert-Placements;Save-EffectStep 'manual fullscreen fills physical monitor bounds'
+    $null=Invoke-Moon toggle-fullscreen
+    Wait-Until -Seconds 5 -Description 'manual fullscreen clears and restores the original tile' -Condition {
+        $w=Invoke-Moon query world
+        !$w.windows.PSObject.Properties[[string]$anchor].Value.fullscreen -and (Test-EffectFrame ([MoonIntegrationNative]::Frame($anchor)) $tiled)
+    }
+    Assert-Placements;Record-Pass 'manual fullscreen changes native bounds and restores the exact tile'
+
+    $treeBefore=(Invoke-Moon query world).workspaces | ConvertTo-Json -Depth 64 -Compress
+    $null=Invoke-Moon pause
+    if (!(Invoke-Moon query world).paused -or @(Invoke-Moon query windows).Count -ne 0) { throw 'Pause did not disable placement effects.' }
+    Assert-EffectIdentity $anchor
+    $outer=[MoonIntegrationNative]::Outer($anchor)
+    $offset=[pscustomobject]@{Left=($tiled.Left+17);Top=($tiled.Top+11);Right=($tiled.Right+17);Bottom=($tiled.Bottom+11)}
+    if (![MoonIntegrationNative]::SetWindowPos([IntPtr]$anchor,[IntPtr]::Zero,($outer.Left+17),($outer.Top+11),0,0,0x15)) { throw 'Could not move the owned paused fixture.' }
+    Wait-Until -Seconds 5 -Description 'owned paused window accepts manual placement' -Condition { Test-EffectFrame ([MoonIntegrationNative]::Frame($anchor)) $offset }
+    Start-Sleep -Milliseconds 1250
+    if (!(Invoke-Moon query world).paused -or !(Test-EffectFrame ([MoonIntegrationNative]::Frame($anchor)) $offset) -or (((Invoke-Moon query world).workspaces | ConvertTo-Json -Depth 64 -Compress) -ne $treeBefore)) { throw 'Paused maintenance changed the owned native frame or workspace trees.' }
+    Save-EffectStep 'pause preserves a manual owned-window move across maintenance'
+    $null=Invoke-Moon pause;Assert-EffectWorkspace '1' $members $anchor
+    if ((Invoke-Moon query world).paused -or !(Test-EffectFrame ([MoonIntegrationNative]::Frame($anchor)) $tiled) -or (((Invoke-Moon query world).workspaces | ConvertTo-Json -Depth 64 -Compress) -ne $treeBefore)) { throw 'Resume did not restore the exact tiled frame and persistent trees.' }
+    Save-EffectStep 'resume reapplies the saved native tile'
+    Record-Pass 'pause leaves manual placement alone and resume restores tiling'
+
+    foreach ($number in @(2,3,4,5,6,7,8,9,10,1)) {
+        $name=[string]$number
+        $null=Invoke-Moon -Words @('move-to-workspace',$name,'--follow')
+        $members[[string]$anchor]=$name
+        Assert-EffectWorkspace $name $members $anchor
+        Save-EffectStep "move-and-follow $name exact membership, focus and visibility"
+    }
+    Record-Pass 'move-and-follow visits every numbered destination with exact native visibility'
+    $null=Invoke-Moon workspace 10;Assert-EffectWorkspace '10' $members
+    foreach ($number in 1..10) {
+        $name=[string]$number;$null=Invoke-Moon -Words @('workspace',$name)
+        Assert-EffectWorkspace $name $members
+        Save-EffectStep "workspace $name exact active workspace and unchanged memberships"
+    }
+    Record-Pass 'all ten workspace selections preserve membership and show only their owned windows'
+    $null=Invoke-Moon exit
+    Wait-Until -Description 'all four original binding-effect windows survive and regain their frames' -Condition {
+        $helper.Refresh();if ($helper.HasExited) { return $false }
+        $survivors=@([MoonIntegrationNative]::Windows([uint32]$helper.Id))
+        if ($survivors.Count -ne 4 -or @($survivors | Where-Object { !$originals.ContainsKey([string]$_) }).Count) { return $false }
+        return Test-OriginalsRestored
+    }
+    Record-Pass 'binding-effect fixture restores original frames on exit'
+}
+
 try {
     # Existing daemons and helper windows belong to the user or another test run.
-    $existing = @(Get-Process -Name moon,testwin -ErrorAction SilentlyContinue)
+    $existing = @(Get-Process -Name @('moon','testwin') -ErrorAction SilentlyContinue)
     if ($existing.Count -gt 0) { throw 'Close existing moon/testwin test instances before running integration tests.' }
+    if ($BindingEffectsOnly -and @(Get-Process -Name @('glazewm','komorebi','whim','zebar','tacky','tacky-borders') -ErrorAction SilentlyContinue).Count) { throw 'The binding-effects fixture requires Moon to be the sole manager and bar/border owner.' }
     if (Test-Path $journalFile) { throw 'A previous recovery journal exists; restore it before running the isolated integration suite.' }
     if (Get-Process -Name glazewm -ErrorAction SilentlyContinue) {
         $glazeConfig = Join-Path $env:USERPROFILE '.glzr\glazewm\config.yaml'
@@ -217,6 +401,7 @@ try {
     [IO.File]::WriteAllText((Join-Path $testDirectory 'background-start.json'), ($background | ConvertTo-Json), $utf8)
     Record-Pass 'background launcher exits with a ready independent daemon'
     Wait-Until -Description 'daemon adopts four test windows' -Condition { (Invoke-Moon query stats).managed_windows -eq 4 }
+    if ($BindingEffectsOnly) { Invoke-BindingEffects;return }
     if ($StartupAssignmentOnly) {
         $state = Invoke-Moon query world
         $stats = Invoke-Moon query stats
