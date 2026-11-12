@@ -32,9 +32,9 @@ if (!(Test-MoonAdministrator)) {
     if ($OperationId) {$arguments+=@('-OperationId',$OperationId)}
     if ($HandoverId) {$arguments+=@('-HandoverId',$HandoverId)}
     Write-MoonSetupStatus $OperationId 'waiting' 'Approve the Windows prompt to continue.'
-    try {$process=Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -Verb RunAs -WindowStyle Hidden -ArgumentList (($arguments | ForEach-Object {ConvertTo-MoonArgument $_}) -join ' ') -PassThru -Wait}
+    try {$exitCode=Invoke-MoonShellProcess (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') $arguments -Elevate}
     catch {if (Test-MoonApprovalCancelled $_) {throw [OperationCanceledException]::new('The Windows approval prompt was canceled.')} else {throw}}
-    exit $process.ExitCode
+    exit $exitCode
 }
 Write-MoonSetupStatus $OperationId 'working' 'Preparing a safe place for Moon.'
 

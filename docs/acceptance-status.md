@@ -5,15 +5,61 @@ It was reviewed on 12 November 2026. Implemented event handling and passing
 simulated tests do not establish that the corresponding physical Windows event
 has been exercised.
 
-## Product polish candidate, 12 November 2026
+## Current SID-fix candidate, 12 November 2026
 
-The current normal-permission Windows candidate is
+The current normal-permission daemon is
+`DBADD0C08FA4C78AA1EF567520B593B7D3F68297BD3724C641CEDB082ECBCCAE`;
+the matching Settings image is
+`6A633A06B872765EA30AEDCBC9839F856FD3EA70BA5D855AC1BD85CCC8670E92`.
+The UIAccess installation candidate is
+`521E8BD9E926AF8108A722564452DF3970E5A935D496A7EF22D37AE865C1E219`.
+Both applications and the installer now derive the IPC endpoint from the logon
+SID. The measured linked UAC tokens had different authentication LUIDs but the
+same logon SID; the earlier endpoint derivation separated those clients.
+
+Four native IPC checks, including the linked-token identity check, and all 14
+normal-daemon integration scenarios pass on this source/build. Evidence:
+`target/sid-ipc-native-tests.txt` and
+`target/live-sid-integration-results.json`. The matching Settings image also
+passes all eight native checks with the normal daemon: save/apply, conflict
+retention, reload confirmation, Appearance and different-file isolation. The
+user's configuration was unchanged and cleanup recorded no errors. Report:
+`target/sid-settings-ui/report.json`.
+
+The ordinary live startup then adopted all four expected application windows:
+Arc in workspace 1, Windows Terminal in workspace 2, and ChatGPT plus Claude in
+workspace 10. At the settled observation, workspace 10 was active, its two
+visible frames matched their placements, and Arc/Terminal were shell-cloaked.
+The daemon remained medium integrity without UIAccess. See
+`target/live-workspace-after.json` and `target/live-workspace-settled.json`.
+Actual visits to workspaces 1, 2 and 10 then verified each expected visible set
+and exact native frames, returning to 10; see `target/live-workspace-visits.json`.
+Four isolated startup checks also pass for pre-existing windows' individual
+workspace rules, native reveal/hide and original-frame restoration:
+`target/startup-assignment-native-results.json`.
+
+Installation is authorized. Earlier accepted installation attempts failed;
+the diagnostic retry recorded rollback, and the retained diagnostic logs report
+a signed-daemon readiness timeout. The latest SID-fix attempt was canceled at the Windows consent prompt;
+the corrected launcher preserved cancellation code 1223 and handover recorded
+`rolled_back_stopped`. Evidence is in
+`target/live-install-sid-cancellation-fixed.log` and
+`target/live-install-sid-cancellation-fixed-state.json`. This UIAccess candidate
+has not completed installation or signed runtime
+verification. [Installation evidence](installation.md#live-installation-attempts-and-sid-fix)
+records the distinct outcomes. The requested no-fallback mode keeps the previous
+desktop processes stopped during rollback. Startup reliability, signed privilege
+checks, the physical resilience matrix and the seven-day soak remain open.
+
+## Earlier product polish evidence, 12 November 2026
+
+The recorded normal-permission Windows candidate is
 `075E96CD3C7C95E24D04F07EC9BCFF7D53F74F60E2F6AC53B23B179C7DFBB134`.
 Settings is
 `7901563646D88335A3882DC0604691F5868D5F4BEA625D9C0D1479368A7BE050`.
 The corresponding UIAccess installation image is
 `9B85EBEEFD8404AC8E1FCB2F5395883D81CF1ADD8E7CCFE79488F7DD503B1546`;
-it has been built, but has not been signed, installed or run with UIAccess.
+its application evidence below predates the subsequent installation attempts.
 All four distribution executables use the static C runtime. Setup checks the
 separate WebView2 Evergreen prerequisite for Settings.
 
@@ -27,10 +73,9 @@ separate WebView2 Evergreen prerequisite for Settings.
 | Distribution | The packaging validator passes 14 isolated cases, including deterministic archive readback, input tampering, permission declarations, external-runtime rejection and partial-publication cleanup. [Packaging](packaging.md) describes strict validation of the final inputs. |
 | Build and dependencies | Portable and Windows Clippy pass with warnings denied; frontend type checking, generated assets and formatting pass. Windows-target dependency policy checks pass. The cross-platform lockfile's two unused Linux dependency advisories are documented in [product polish](product-polish.md). |
 
-The user's deferred Windows installation approval remains in effect. This
-candidate does not establish signed-install, elevated-window, physical resilience
-or seven-day-soak acceptance. Earlier rows below retain their candidate identity;
-they are not silently promoted to measurements of the new binary.
+These measurements do not establish signed-install, elevated-window, physical
+resilience or seven-day-soak acceptance. Rows below retain their candidate
+identity; they are not promoted to measurements of the SID-fix binary.
 
 ## Milestone checks
 
@@ -47,7 +92,7 @@ they are not silently promoted to measurements of the new binary.
 | M2: config and workspaces | All 46 active GlazeWM chords have equivalent moon defaults; none are missing. Real rule fixtures, command parsing, live reload, cloak, restart, public IPC extension and parser fuzzers pass. Sixteen ordinary native regressions include terminated-process liveness, bounded IPC, atomic-replacement sharing, modifier state and border ownership. All 52 defaults route exact command payloads through the live hook without executing daemon effects. Five portable writer tests cover durable barriers, coalescing, error handling and shutdown. A source/data-flow review and 231 saved evidence files found no raw keyboard-event logging or pressed-state dumps; [scope and limits](validation-platform.md#input-logging-evidence) are recorded. | Exercise every binding's resulting behavior with moon as the sole manager. |
 | M3: bar | Pure scene tests, provider probes, native rendering, centered pills, custom theme and default glyphs pass. | Record side-by-side visual parity and the full-process idle/performance measurements. |
 | M4: borders | Pure ring geometry and physical 125% rendering pass; floating native tint is implemented. | Complete physical 100% and 150% scaling and multi-monitor visual checks. |
-| M5: installation | The actual handover reached UAC and was canceled. Its rollback restored the startup shortcut and configurations byte-for-byte; old components restarted, and no moon installation, task, signing/trust entries or PATH entry remained. [Rollback evidence](validation-applications.md) distinguishes this observed cancellation path from the isolated installer-helper tests. | Signed installation and running upgrade/rollback are still untested. A new Windows approval prompt is deferred until the user is available. |
+| M5: installation | The initial cancellation had verified full rollback. Later accepted attempts failed; the diagnostic retry recorded rollback and a readiness timeout. The latest SID-fix consent cancellation retained code 1223 and recorded `rolled_back_stopped`. [Attempt evidence](installation.md#live-installation-attempts-and-sid-fix) keeps these outcomes separate. | Complete installation and signed runtime verification of the current SID-fix candidate, then verify a running upgrade/rollback. Installation authorization exists; Windows consent is still required for an elevated attempt. |
 | S8: privilege boundary | Medium-integrity IPC succeeds; low-integrity IPC is rejected. | With the installed signed binary, exercise elevated foreground hotkeys/placement and confirm launched applications are medium integrity without UIAccess. |
 | M5: clean first run | No-config loading and native sandbox adoption pass. | Run the copied executable on a clean Hyper-V Windows VM with no config and confirm tiling. |
 | M5: seven-day soak | No seven-day observation has elapsed. | Seven consecutive days as the sole manager, no lost windows, recorded uptime and papercuts, no fallback to GlazeWM. |
@@ -65,7 +110,7 @@ must stay usable and every owned test window must be recoverable afterward.
 | Explorer restart | Passed on final candidate 1A7F5020… after excluding shell/desktop handles from fullscreen detection. The same daemon retained four helpers, complete layout semantics and exact frames; AppBar reservation and tray registration returned. All five visible user applications survived. Cleanup restored original frames/work area. See `target/explorer-restart-results.json` and [platform evidence](validation-platform.md#actual-explorer-restart). | Covered on this Windows build. Tray API recovery is verified; visible-pixel icon position is not asserted. |
 | Display added/removed | Core display-removal tests pass; physical hotplug not exercised. | Attach/remove a monitor with visible and hidden workspaces; all windows land on a surviving display. |
 | Resolution and DPI changes | Geometry tests include 125%; physical changes not exercised. | Change resolution and scale, checking AppBar reservation, physical frame bounds and ring/text alignment. |
-| UAC prompt | Not exercised. | Enter and leave the secure desktop; no unwanted focus, normal bindings resume after the prompt. |
+| UAC prompt | Actual consent prompts were entered during accepted and canceled installation attempts; controlled before/after hook and focus checks were not recorded. | Verify no unwanted focus and that normal bindings resume after leaving the secure desktop. |
 | RDP session | Session-scoped journals implemented; RDP not exercised. | Connect/disconnect RDP, verify separate session ownership/recovery and restored local display geometry. |
 | Native virtual desktop switch | Suspension and persistent-tree tests pass; physical switch not exercised. | Switch native desktops with managed windows on both; no forced switch back, off-desktop uncloak or membership loss. |
 | WSLg windows | Host `.wslconfig` explicitly sets `guiApplications=false`; the distro has no X11/Wayland display. WSLg 1.0.79 and `xmessage` are installed, but enabling GUI support requires restarting WSL, including this build environment. | Tile, focus, hide, restore and close a real WSLg application. |
@@ -74,6 +119,10 @@ must stay usable and every owned test window must be recoverable afterward.
 | Multi-monitor actions | Pure monitor/workspace movement tests pass; physical multi-monitor not exercised. | Move windows and workspaces between real displays, including differing DPI; verify cursor jump and per-monitor overrides. |
 
 ## Performance budgets
+
+These are the last measured budgets for candidate `075E96CD…`, not measurements
+of the current SID-fix candidate. The IPC correction does not establish a change
+to any failed performance budget.
 
 | Budget | Evidence available |
 |---|---|

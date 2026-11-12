@@ -243,6 +243,25 @@ function Invoke-MoonNative {
         return $result
     } finally { $process.Dispose() }
 }
+function Invoke-MoonShellProcess {
+    param([string]$Path,[string[]]$Arguments=@(),[switch]$Elevate)
+    $start=[Diagnostics.ProcessStartInfo]::new()
+    $start.FileName=$Path
+    $start.Arguments=(@($Arguments | ForEach-Object {ConvertTo-MoonArgument $_}) -join ' ')
+    $start.UseShellExecute=$true
+    $start.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
+    if ($Elevate) {$start.Verb='runas'}
+    $process=[Diagnostics.Process]::new();$process.StartInfo=$start
+    try {
+        # Start-Process discards the native exception when ShellExecute fails.
+        # Keep it intact so a declined Windows prompt retains error 1223.
+        if (!$process.Start()) {throw 'Windows did not return a setup process.'}
+        # Wait for the installer/remover itself, including its recovery work.
+        # Approval has no deadline and is never canceled by terminating a process.
+        $process.WaitForExit()
+        return $process.ExitCode
+    } finally {$process.Dispose()}
+}
 function Invoke-MoonRpc {
     param([ValidateSet('query','command')][string]$Method,[string]$Query,[string[]]$Commands,[long]$ExpectedFocus)
     $pipe = [IO.Pipes.NamedPipeClientStream]::new('.', [MoonInstallNative]::PipeName(), [IO.Pipes.PipeDirection]::InOut, [IO.Pipes.PipeOptions]::Asynchronous)

@@ -10,6 +10,48 @@ try {
     $cancelled=[Management.Automation.ErrorRecord]::new([InvalidOperationException]::new('wrapped',[ComponentModel.Win32Exception]::new(1223)),'cancelled',[Management.Automation.ErrorCategory]::OperationStopped,$null)
     if((Test-MoonApprovalCancelled $denied) -or !(Test-MoonApprovalCancelled $cancelled)){throw 'Windows approval cancellation was misclassified.'}
     $checks.Add('Windows approval cancellation is distinguished from access denial through wrapped exceptions')
+    Add-Type -TypeDefinition 'public static class MoonApprovalErrorFixture {public static void Fail(int code) {throw new System.ComponentModel.Win32Exception(code);}}'
+    foreach($code in @(1223,5)) {
+        try {[MoonApprovalErrorFixture]::Fail($code);throw 'Expected a native error fixture'}
+        catch {if((Test-MoonApprovalCancelled $_) -ne ($code -eq 1223)){throw 'PowerShell method invocation lost the native cancellation classification.'}}
+    }
+    $messageOnly=[Management.Automation.ErrorRecord]::new([InvalidOperationException]::new('The operation was canceled by the user.'),'message-only',[Management.Automation.ErrorCategory]::OperationStopped,$null)
+    if(Test-MoonApprovalCancelled $messageOnly){throw 'Cancellation was inferred from localized text without a native error code.'}
+    $checks.Add('Actual PowerShell method wrappers preserve native cancellation codes; message text alone is never classified')
+    $powershell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $exitScript=Join-Path $temporary 'ordinary shell child.ps1'
+    [IO.File]::WriteAllText($exitScript,'Start-Sleep -Milliseconds 150; exit 37',[Text.UTF8Encoding]::new($false))
+    $clock=[Diagnostics.Stopwatch]::StartNew()
+    $exitCode=Invoke-MoonShellProcess $powershell @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$exitScript)
+    if($exitCode -ne 37 -or $clock.ElapsedMilliseconds -lt 150){throw 'The production shell launcher did not wait for and preserve its ordinary child exit status.'}
+    $nativeFailure=$false
+    try {Invoke-MoonShellProcess (Join-Path $temporary 'missing.exe')|Out-Null}
+    catch {
+        $exception=$_.Exception
+        while($exception){if($exception -is [ComponentModel.Win32Exception]){$nativeFailure=$exception.NativeErrorCode -eq 2};$exception=$exception.InnerException}
+        if(Test-MoonApprovalCancelled $_){throw 'Missing executable was classified as cancellation.'}
+    }
+    if(!$nativeFailure){throw 'The production shell launcher discarded a real native launch error.'}
+    $checks.Add('Production shell launcher waits for an ordinary child and retains its exact exit status and native launch failures without UAC')
+    foreach($file in @('install.ps1','uninstall.ps1')) {
+        $tokens=$null;$errors=$null
+        $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot $file),[ref]$tokens,[ref]$errors)
+        if($errors.Count){throw ($errors|Out-String)}
+        $clauses=@($ast.FindAll({param($node)$node -is [Management.Automation.Language.CatchClauseAst] -and $node.Body.Extent.Text -match 'Test-MoonApprovalCancelled'},$true))
+        if($clauses.Count -ne 1){throw "Expected one production Windows approval catch in $file"}
+        $body=$clauses[0].Body.Extent.Text
+        $handler=[scriptblock]::Create('try {[MoonApprovalErrorFixture]::Fail($code)} catch '+$body)
+        foreach($code in @(1223,5)) {
+            $caught=$false
+            try {& $handler} catch {
+                $caught=$true
+                if($code -eq 1223 -and $_.Exception -isnot [OperationCanceledException]){throw 'Native cancellation did not reach the setup cancellation path.'}
+                if($code -eq 5 -and $_.Exception -is [OperationCanceledException]){throw 'Access denial was converted to cancellation.'}
+            }
+            if(!$caught){throw 'Approval error was swallowed.'}
+        }
+        $checks.Add("Actual $file approval catch converts native cancellation and preserves other launch errors")
+    }
     $rejected=$false;try{Get-MoonSetupFiles '..\arbitrary'|Out-Null}catch{$rejected=$true}
     if(!$rejected){throw 'Setup status accepted an arbitrary output path.'}
     $checks.Add('Status output accepts only a bounded operation identity')
@@ -37,10 +79,10 @@ try {
     $trapText=$handover.EndBlock.Traps[0].Extent.Text
     $common=(Join-Path $PSScriptRoot 'install-common.ps1').Replace("'","''")
     $powershell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    foreach($kind in @('nested-error','generated-operation','malformed-status','malformed-handover','cancelled','stopped-rollback')){
+    foreach($kind in @('nested-error','generated-operation','malformed-status','malformed-handover','cancelled','stopped-rollback','stopped-cancelled')){
         $fixture=Join-Path $temporary $kind;[void][IO.Directory]::CreateDirectory($fixture)
         $supplied=if($kind -eq 'generated-operation'){''}else{[guid]::NewGuid().ToString('N')}
-        $priorStatus=if($kind -eq 'cancelled'){'cancelled'}else{'failed'}
+        $priorStatus=if($kind -in @('cancelled','stopped-cancelled')){'cancelled'}else{'failed'}
         $child=Join-Path $fixture 'trap.ps1'
         $childText=@"
 . '$common'
@@ -49,7 +91,7 @@ try {
 `$StatePath=Join-Path `$fixtureDirectory 'handover.json'
 function Get-MoonSetupFiles([string]`$OperationId){[pscustomobject]@{directory=`$fixtureDirectory;status=(Join-Path `$fixtureDirectory 'status.json');cancel=(Join-Path `$fixtureDirectory 'cancel')}}
 $initializer
-[IO.File]::WriteAllText(`$StatePath,'{"status":"$(if($kind -eq 'stopped-rollback'){'rolled_back_stopped'}else{'rolled_back'})"}')
+[IO.File]::WriteAllText(`$StatePath,'{"status":"$(if($kind -in @('stopped-rollback','stopped-cancelled')){'rolled_back_stopped'}else{'rolled_back'})"}')
 Write-MoonSetupStatus `$OperationId '$priorStatus' 'Installer failed and recovered.' 'Original elevated installer cause: fixture access denied.'
 if('$kind' -eq 'malformed-status'){[IO.File]::WriteAllText((Get-MoonSetupFiles `$OperationId).status,'invalid JSON')}
 if('$kind' -eq 'malformed-handover'){[IO.File]::WriteAllText(`$StatePath,'invalid JSON')}
@@ -58,7 +100,7 @@ throw [IO.IOException]::new('Generic child exit 1')
 "@
         [IO.File]::WriteAllText($child,$childText,[Text.UTF8Encoding]::new($false))
         $result=Invoke-MoonNative $powershell @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$child) -AllowFailure
-        $expectedExit=if($kind -eq 'cancelled'){1223}else{1}
+        $expectedExit=if($kind -in @('cancelled','stopped-cancelled')){1223}else{1}
         if($result.ExitCode -ne $expectedExit){throw "Handover trap returned unexpected exit status for $kind : $($result.ExitCode)"}
         $actual=Get-Content -Raw -LiteralPath (Join-Path $fixture 'status.json')|ConvertFrom-Json
         if($actual.operation -notmatch '^[a-f0-9]{32}$' -or ($supplied -and $actual.operation -ne $supplied)){throw 'Handover lost or failed to create its diagnostic operation identity.'}
@@ -66,7 +108,7 @@ throw [IO.IOException]::new('Generic child exit 1')
         $stderrText=$result.Error -replace '\s+',' '
         if($kind -ne 'malformed-status' -and ($actual.detail -notlike '*Original elevated installer cause*' -or $stderrText -notlike '*Original elevated installer cause*')){throw "Handover overwrote the elevated installer's diagnostic in $kind."}
         if($actual.status -ne $priorStatus){throw "Handover misclassified the final status in $kind."}
-        if($kind -eq 'stopped-rollback' -and ($actual.message -notlike '*remains stopped*' -or $actual.message -like '*has been restored*')){throw 'Stopped rollback incorrectly claimed to restart the previous desktop.'}
+        if($kind -in @('stopped-rollback','stopped-cancelled') -and ($actual.message -notlike '*remains stopped*' -or $actual.message -like '*has been restored*')){throw 'Stopped rollback incorrectly claimed to restart the previous desktop.'}
         $checks.Add("Actual handover error trap preserves status, stderr and operation identity: $kind")
     }
     $restore=$handover.Find({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Restore-PreviousDesktop'},$true)

@@ -23,9 +23,9 @@ if (!(Test-MoonAdministrator)) {
     if ($ExpectedInstallId) {$arguments+=@('-ExpectedInstallId',$ExpectedInstallId)}
     if ($ExpectedHandoverId) {$arguments+=@('-ExpectedHandoverId',$ExpectedHandoverId)}
     Write-MoonSetupStatus $OperationId 'waiting' 'Approve the Windows prompt to remove Moon.'
-    try {$process=Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -Verb RunAs -WindowStyle Hidden -ArgumentList (($arguments | ForEach-Object {ConvertTo-MoonArgument $_}) -join ' ') -Wait -PassThru}
+    try {$exitCode=Invoke-MoonShellProcess (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') $arguments -Elevate}
     catch {if (Test-MoonApprovalCancelled $_) {throw [OperationCanceledException]::new('The Windows approval prompt was canceled.')}else{throw}}
-    exit $process.ExitCode
+    exit $exitCode
 }
 $installationLock=Enter-MoonInstallLock
 try {

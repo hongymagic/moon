@@ -99,7 +99,7 @@ are bounded to 4 MiB, allowing a 1 MiB source plus edits and JSON escaping;
 the store independently enforces the final saved-file limit.
 
 On 12 November 2026, `scripts/validate-settings-ui.ps1 -MoonBinary ...`
-passed all eight native checks on the final static-runtime candidate. These cover
+passed all eight native checks on the current SID-compatible candidate. These cover
 an isolated daemon with no managed windows, loading the owned configuration,
 saving while preserving comments, confirming both the UI's applied message and
 the daemon's queried inner gap of 24, rejecting concurrent edits without losing
@@ -108,16 +108,19 @@ saving a different configuration without changing the running daemon or revision
 
 The tested SHA-256 values were:
 
-- Moon: `075E96CD3C7C95E24D04F07EC9BCFF7D53F74F60E2F6AC53B23B179C7DFBB134`.
-- Moon Settings: `7901563646D88335A3882DC0604691F5868D5F4BEA625D9C0D1479368A7BE050`.
+- Moon: `DBADD0C08FA4C78AA1EF567520B593B7D3F68297BD3724C641CEDB082ECBCCAE`.
+- Moon Settings: `6A633A06B872765EA30AEDCBC9839F856FD3EA70BA5D855AC1BD85CCC8670E92`.
 
-The report, Appearance screenshot and independent cleanup result are retained in
-`target/polish-settings-ui/{report.json,appearance.png,cleanup.json}`. Earlier
-candidate evidence remains in `target/polish-settings-ui-pre-static-ea798913`.
-The owned windows and daemon closed; no Moon, Settings, test-window process or
-recovery journal remained. The user's configuration was not opened. These checks
-establish this candidate's Settings behavior, not a daemon performance budget or
-future builds' behavior.
+The report and Appearance screenshot are retained in
+`target/sid-settings-ui/{report.json,appearance.png}`. The report records no cleanup
+errors and no change to the user's configuration; its isolated daemon managed
+zero windows. The ordinary live daemon resumed afterward. Earlier candidate
+evidence remains in `target/polish-settings-ui` and
+`target/polish-settings-ui-pre-static-ea798913`. These checks establish the current
+Settings-to-normal-daemon behavior; launching Settings from the installed
+UIAccess daemon and verifying its ordinary token still require the signed
+installation. They do not establish a performance budget or future build's
+behavior.
 
 - [DWM frame pixels and alpha](https://learn.microsoft.com/en-us/windows/win32/dwm/customframe)
 - [Frame extension and composition changes](https://learn.microsoft.com/en-us/windows/win32/api/dwmapi/nf-dwmapi-dwmextendframeintoclientarea)

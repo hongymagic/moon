@@ -10,6 +10,14 @@ handover; an update preserves the active window layout. Cancellation requests a
 safe transaction checkpoint and rollback instead of terminating the worker.
 After removal has crossed its final deletion boundary, the window waits for safe
 completion. Diagnostics are available through a separate **Details** action.
+Declining the Windows approval prompt is reported as cancellation using its native
+error code ([ERROR_CANCELLED, 1223](https://learn.microsoft.com/en-us/windows/win32/debug/system-error-codes--1000-1299-)),
+including when the previous desktop was explicitly left stopped.
+The elevation launcher retains that code through .NET `Process.Start`; PowerShell's
+[`Start-Process` source](https://github.com/PowerShell/PowerShell/blob/v7.7.0/src/Microsoft.PowerShell.Commands.Management/commands/management/Process.cs)
+discards it while wrapping a shell launch error. Isolated Windows
+checks cover the exception chain, installer/removal handlers and stopped rollback
+without opening another approval prompt.
 
 Only one elevated installation or removal can run at a time, across accounts and
 Windows sessions. Its named mutex permits Administrators and SYSTEM and stays held
@@ -155,6 +163,13 @@ operation when validation had already stopped the previous manager. Recovery ref
 moon process or recovery journal remains. If a recovery step cannot finish,
 the record and backups remain available instead of silently discarding them.
 
+When continuing with Moon without restarting the old desktop, pass
+`-KeepPreviousDesktopStopped` to `handover.ps1`, including a requested rollback.
+Recovery still restores the saved startup shortcut and installation state, but
+does not launch GlazeWM, Zebar or tacky-borders. It records
+`rolled_back_stopped`. This option follows the user's current no-fallback
+instruction; it does not remove the preserved startup shortcut or backups.
+
 For a deliberate return to the previous desktop:
 
 ```sh
@@ -206,9 +221,9 @@ and the prior foreground returned. Screenshots and the report are in
 `target/setup-preview-final`. Both views passed again with the final static-runtime
 image, including its actual embedded crescent icon in the header and title bar.
 A first preview exposed stretching by the existing tiling manager; the bounded
-dialog corrected it. The polished transaction has not yet been run elevated:
-the user's deferred Windows approval still applies, and none of these checks
-constitute installed signed acceptance.
+dialog corrected it. These previews did not run installation. Subsequent accepted
+and canceled elevated attempts are recorded below; neither the previews nor the
+failed attempts establish installed signed acceptance.
 
 `scripts/validate-install.ps1` passes fourteen checks on Windows PowerShell
 5.1.26100.9818: all installation and handover scripts parse; native token access
@@ -240,8 +255,9 @@ shortcut/configuration hashes and restarted the previous desktop components;
 the verification found no moon installation, task, signing/trust entries or PATH
 entry. The detailed record is `target/handover-rollback-results.json`. This proves
 the cancellation path; the signed install and running upgrade/rollback still
-need their own captured results. Further elevation is deferred until the user is
-available. After installation,
+need their own captured successful results. Installation is now authorized, but
+an elevated attempt still needs its Windows consent prompt to be accepted.
+After installation,
 `scripts/verify-uiaccess.ps1` must run from ordinary medium-integrity PowerShell
 and writes `%LOCALAPPDATA%\moon\uiaccess-results.json` by default.
 
@@ -256,6 +272,75 @@ trees and restores the previous focus. It records
 this machine without requesting elevation; that check verifies the native x64
 input structure and token-reading helper, not the S8 outcome.
 
+## Live installation attempts and SID fix
+
+The first accepted attempt with daemon `9B85EBEE…503B1546` failed and rolled
+back. Its caller initially reported only the elevated worker's exit code; see
+`target/live-install-20261112.log`. The diagnostic retry used
+`1E77B62EB4D60AA7252BA0CE562880D405D48E40E03A963A1E67AB7DB2C08D8A`.
+It retained the actual timeout waiting for the signed replacement daemon with
+UIAccess, then recorded `rolled_back`. Evidence:
+`target/live-install-diagnostic-retry.log` and
+`target/live-install-diagnostic-attempt.json`. A separate operation with the same
+image also reached the readiness timeout, as recorded in
+`target/live-install-launch-probe.log`; its log does not by itself establish the
+complete rollback outcome. None of these outcomes proves a working signed
+installation.
+
+Read-only token inspection found different authentication LUIDs for the ordinary
+and linked elevated token, with the same logon SID
+`S-1-5-5-0-14298163`. The old endpoint used the differing LUIDs. The Rust transport,
+installer helper and standalone IPC example now use `TokenLogonSid`; the pipe
+ACL still grants the current logon SID and retains its medium-integrity floor.
+Microsoft documents the [logon SID as the current sign-in session's identity](https://learn.microsoft.com/en-us/windows/win32/secauthz/access-tokens)
+and [`TokenLogonSid` as a `TOKEN_GROUPS` result](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ne-winnt-token_information_class).
+The captured token comparison is
+`target/live-install-token-link-evidence.json`; four IPC native checks, including
+equality for linked tokens, pass in `target/sid-ipc-native-tests.txt`.
+
+The endpoint-compatible candidate hashes are:
+
+- Normal daemon: `DBADD0C08FA4C78AA1EF567520B593B7D3F68297BD3724C641CEDB082ECBCCAE`.
+- UIAccess daemon: `521E8BD9E926AF8108A722564452DF3970E5A935D496A7EF22D37AE865C1E219`.
+- Settings: `6A633A06B872765EA30AEDCBC9839F856FD3EA70BA5D855AC1BD85CCC8670E92`.
+
+Both daemon and Settings must be updated together. The attempted bundle's report is
+`target/package-moon-live-SIDfix-20261112-215657-2996bae7.json`; inventory and
+recovery helpers retain their verified earlier bytes because they do not use IPC.
+An attempt with this bundle was canceled at Windows consent before its
+elevated installation ran. `target/live-install-SIDfix.log` records that outcome.
+The refreshed bundle `moon-live-SIDfix-20261112-221404-db28feb0` was also canceled
+at consent, at 11:17:03 UTC on 12 November. Operation
+`e01d4dc15f434670a6fc13040edfb648` retained native code 1223, reported setup
+`cancelled`, and recorded handover `rolled_back_stopped`; normal Moon subsequently
+resumed without restarting GlazeWM. Evidence is in
+`target/live-install-sid-cancellation-fixed.log` and
+`target/live-install-sid-cancellation-fixed-state.json`.
+The current UIAccess candidate therefore still needs an accepted installation
+and successful signed runtime checks. A fixed endpoint alone does not establish
+that scheduled startup or every other installation phase succeeds.
+
+The updated diagnostics and recovery helpers passed 17 setup/startup checks,
+14 recovery checks and 14 installer-helper checks. Their records are
+`target/setup-startup-diagnostics-checks.json`,
+`target/install-recovery-startup-checks.json` and
+`target/install-helper-startup-checks.json`. The subsequent cancellation fix
+passes 22 checks, including native error-code preservation and stopped rollback,
+in `target/setup-cancellation-validation.json`; it requested no UAC prompt and
+changed no installation. These isolated checks do not stand in for an actual
+task-triggered signed daemon or an upgrade.
+
+After a successful signed installation,
+`scripts/verify-installed-settings.ps1` checks the actual `settings` RPC launch
+from an ordinary PowerShell client. It requires valid signatures for the installed
+UIAccess daemon and Settings, with no existing Settings process, and binds the newly launched companion to
+its path and creation time, and verifies medium integrity without elevation or
+UIAccess. Read-only UI Automation must find **Moon is running** and an unedited
+document. It compares the configuration hash before and after, closes only the
+owned unedited window gracefully, and retains a JSON report. Its syntax, native
+token reader and UI Automation assembly loading have been checked; the signed
+scenario has not yet run.
+
 ## Sources
 
 - [Microsoft UIAccess security requirements](https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-securityoverview), updated 19 February 2026.
@@ -267,21 +352,35 @@ input structure and token-reading helper, not the S8 outcome.
 
 ## Daily-driver observations
 
-The refreshed installation candidate is staged locally under
-`%LOCALAPPDATA%\moon-install-candidate`. Its unsigned UIAccess image has SHA-256
-`1BA672B16A67C23F6EE95B69D73587F1925E46B712A6C0B0430F9FCE4609D769`;
-manifest inspection confirms `asInvoker` and `uiAccess=true`. The adjacent
-`candidate.json` records the executable, helper and script hashes. Staging does
-not sign, trust, install or launch this image. Windows approval remains deferred
-at the user's request.
+The SID-fix installation attempt used the bundle staged locally under
+`%LOCALAPPDATA%\moon-live-SIDfix-20261112-215657-2996bae7\moon-0.1.0-windows-x64`.
+Its manifest records the executable, helper and script hashes. Staging did not
+sign, trust, install or launch the images; the subsequent consent cancellation
+is recorded above.
 
-After the ordinary Windows checks, the unchanged GlazeWM startup shortcut
-restored GlazeWM, Zebar and tacky-borders on 12 November. The checked process
+Earlier, after the ordinary Windows checks, the unchanged GlazeWM startup
+shortcut restored GlazeWM, Zebar and tacky-borders on 12 November. The checked process
 paths and creation times are recorded in
 `target/revised-release-20261112/previous-desktop-restored.json`.
 `scripts/restore-previous-desktop.ps1 -ReceiptPath <shutdown-receipt>` verifies
 shortcut hashes and the captured executable paths before resuming that setup.
-No moon daemon is left running, and the sole-manager soak has not started.
+That is a historical restoration record. The user subsequently requested no
+fallback to the previous manager. Ordinary SID-fix Moon is now running with the
+personal configuration: Arc is assigned to workspace 1, Windows Terminal to 2,
+and ChatGPT/Claude to 10. All four memberships remained correct in the settled
+snapshot; the two visible workspace-10 frames matched the plan, and the other
+two windows had shell-cloak value 2. Evidence is in
+`target/live-workspace-after.json` and `target/live-workspace-settled.json`.
+Actual visits to all three workspaces verified their expected visible applications
+and exact native frames before returning to workspace 10; see
+`target/live-workspace-visits.json`. Four isolated native checks then verified
+per-window startup assignments, reveal/hide and original-frame restoration in
+`target/startup-assignment-native-results.json`. The matching Settings image
+passed all eight native save/conflict/reload/isolation checks with the normal
+daemon, without changing personal configuration; evidence is in
+`target/sid-settings-ui/report.json`. Normal Moon resumed after those isolated
+checks. These results establish ordinary-session behavior, not signed-installation,
+performance-budget or seven-day-soak acceptance.
 
 After the signed handover, `just soak` appends a durable timestamped observation
 to `%LOCALAPPDATA%\moon\soak\session-<id>.jsonl`. It records process start time,
