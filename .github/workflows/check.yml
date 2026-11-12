@@ -56,6 +56,9 @@ jobs:
       - name: Real window integration
         shell: pwsh
         run: ./scripts/integration.ps1 -BuildDirectory "$PWD/target/x86_64-pc-windows-msvc/release"
+      - name: Pre-existing window workspace assignments
+        shell: powershell
+        run: ./scripts/integration.ps1 -BuildDirectory "$PWD/target/x86_64-pc-windows-msvc/release" -StartupAssignmentOnly -ReportPath "$PWD/target/startup-assignment-results.json"
       - name: Workspace carousel integration
         shell: powershell
         run: ./scripts/carousel-integration.ps1 -BuildDirectory "$PWD/target/x86_64-pc-windows-msvc/release" -ReportPath "$PWD/target/carousel-integration-results.json"
@@ -68,6 +71,7 @@ jobs:
             target/x86_64-pc-windows-msvc/release/moon-settings.exe
             target/x86_64-pc-windows-msvc/release/testwin.exe
             target/integration-results.json
+            target/startup-assignment-results.json
             target/carousel-integration-results.json
             target/integration-logs/
             target/install-recovery-checks.json

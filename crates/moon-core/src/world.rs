@@ -1071,6 +1071,65 @@ matches=[{process={equals="testwin"},class={equals="#32770"}}]
         assert_eq!(w.windows.len(), 1);
     }
     #[test]
+    fn existing_windows_keep_rule_assignments_across_adoption_order_and_foreground() {
+        let config = Config::load(
+            r#"[[rules]]
+commands=["move-to-workspace 1"]
+matches=[{process={equals="browser"}}]
+[[rules]]
+commands=["move-to-workspace 2"]
+matches=[{process={equals="terminal"}}]
+[[rules]]
+commands=["move-to-workspace 10"]
+matches=[{process={regex="^(chat|assistant)$"}}]
+"#,
+        )
+        .unwrap();
+        let applications = ["browser", "terminal", "chat", "assistant"];
+        let destinations = [WorkspaceId(0), WorkspaceId(1), WorkspaceId(9), WorkspaceId(9)];
+        for order in [[1, 2, 3, 4], [4, 3, 2, 1], [3, 1, 4, 2]] {
+            for foreground in 1..=4 {
+                let mut w = World::new(config.clone(), vec![monitor(1, 0)]).unwrap();
+                // Initial enumeration has no OS effects between WindowAdded
+                // events. Each rule must target its new window, not prior focus.
+                for id in order {
+                    let mut info = window(id);
+                    info.process = applications[(id - 1) as usize].into();
+                    apply(&mut w, Event::WindowAdded(info));
+                }
+                let trees: Vec<_> = w.workspaces.iter().map(|ws| ws.tree.clone()).collect();
+                apply(&mut w, Event::WindowFocused(WindowId(foreground)));
+                assert_eq!(w.focused, Some(WindowId(foreground)));
+                assert_eq!(w.current_workspace(), destinations[(foreground - 1) as usize]);
+                assert_eq!(w.windows.len(), 4);
+                for (index, destination) in destinations.iter().enumerate() {
+                    assert_eq!(w.windows[&WindowId(index as u64 + 1)].workspace, *destination);
+                }
+                for (workspace, original_tree) in w.workspaces.iter().zip(&trees) {
+                    assert_eq!(&workspace.tree, original_tree);
+                }
+                let placements = w.plan().placements;
+                assert_eq!(placements.len(), 4);
+                for placement in &placements {
+                    assert!(!placement.floating && !placement.fullscreen);
+                    assert_eq!(
+                        placement.visible,
+                        w.windows[&placement.id].workspace == w.current_workspace()
+                    );
+                    assert!(placement.rect.width > 0 && placement.rect.height > 0);
+                    assert_eq!(
+                        placement.rect.clamped_within(&monitor(1, 0).work_area),
+                        placement.rect
+                    );
+                }
+                let chat = &placements.iter().find(|p| p.id == WindowId(3)).unwrap().rect;
+                let assistant = &placements.iter().find(|p| p.id == WindowId(4)).unwrap().rect;
+                assert!(!chat.intersects(assistant));
+                w.check().unwrap();
+            }
+        }
+    }
+    #[test]
     fn every_default_binding_executes_against_a_live_world() {
         let mut fixture = world();
         for id in 1..=4 {

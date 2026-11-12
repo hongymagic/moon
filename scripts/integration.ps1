@@ -5,7 +5,8 @@ param(
     [string]$MoonPath = (Join-Path $env:LOCALAPPDATA 'moon-dev\moon.exe'),
     [string]$TestwinPath = (Join-Path $env:LOCALAPPDATA 'moon-dev\testwin.exe'),
     [string]$ReportPath = (Join-Path $env:LOCALAPPDATA 'moon-dev\integration-results.json'),
-    [switch]$GuardOnly
+    [switch]$GuardOnly,
+    [switch]$StartupAssignmentOnly
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -22,6 +23,20 @@ $testDirectory = Join-Path ([IO.Path]::GetTempPath()) ('moon-integration-' + [gu
 $configFile = Join-Path $testDirectory 'config with spaces.toml'
 $utf8 = New-Object Text.UTF8Encoding($false)
 [IO.File]::WriteAllText($configFile, "config-version = 1`n", $utf8)
+if ($StartupAssignmentOnly) {
+    [IO.File]::WriteAllText($configFile, @'
+config-version = 1
+[[rules]]
+commands = ["move-to-workspace 10"]
+matches = [{process={equals="testwin"},title={regex="^moon test window [12]$"}}]
+[[rules]]
+commands = ["move-to-workspace 1"]
+matches = [{process={equals="testwin"},title={equals="moon test window 3"}}]
+[[rules]]
+commands = ["move-to-workspace 2"]
+matches = [{process={equals="testwin"},title={equals="moon test window 4"}}]
+'@, $utf8)
+}
 $buildEvidence = [pscustomobject]@{
     started_at = [DateTime]::UtcNow.ToString('o')
     os = [Environment]::OSVersion.VersionString
@@ -202,6 +217,45 @@ try {
     [IO.File]::WriteAllText((Join-Path $testDirectory 'background-start.json'), ($background | ConvertTo-Json), $utf8)
     Record-Pass 'background launcher exits with a ready independent daemon'
     Wait-Until -Description 'daemon adopts four test windows' -Condition { (Invoke-Moon query stats).managed_windows -eq 4 }
+    if ($StartupAssignmentOnly) {
+        $state = Invoke-Moon query world
+        $stats = Invoke-Moon query stats
+        if (![string]::Equals([IO.Path]::GetFullPath($stats.config_path), [IO.Path]::GetFullPath($configFile), [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Startup loaded a different configuration file'
+        }
+        if ($stats.last_error) { throw "Startup reported an error: $($stats.last_error)" }
+        $expected = @{'moon test window 1'='10';'moon test window 2'='10';'moon test window 3'='1';'moon test window 4'='2'}
+        $seen = @{}
+        foreach ($entry in $state.windows.PSObject.Properties) {
+            $window = $entry.Value
+            $name = [string]$window.info.title
+            if (!$expected.ContainsKey($name) -or $seen.ContainsKey($name) -or $window.info.process_id -ne $helper.Id) {
+                throw 'Startup adopted an unexpected or duplicate window identity'
+            }
+            $seen[$name] = [long]$window.info.id
+            if ($state.workspaces[$window.workspace].name -ne $expected[$name] -or $window.floating -or $window.suspended) {
+                throw "Pre-existing helper $name was not tiled in its configured workspace"
+            }
+        }
+        if ($seen.Count -ne 4) { throw 'Startup did not adopt every pre-existing helper' }
+        [IO.File]::WriteAllText((Join-Path $testDirectory 'startup-assignments.json'), ($state | ConvertTo-Json -Depth 64), $utf8)
+        Record-Pass 'pre-existing windows receive their individual workspace rules at startup'
+        foreach ($name in @('1','2','10')) {
+            $null = Invoke-Moon -Words @('workspace', $name)
+            Assert-Placements
+            $visible = @((Invoke-Moon query windows) | Where-Object visible | ForEach-Object {[long]$_.id})
+            foreach ($title in $expected.Keys) {
+                if ($expected[$title] -eq $name -and $seen[$title] -notin $visible) {
+                    throw "Assigned helper $title did not appear on workspace $name"
+                }
+            }
+        }
+        Record-Pass 'assigned workspaces reveal exact native tiles and hide inactive tiles'
+        $null = Invoke-Moon exit
+        Wait-Until -Description 'startup assignment fixture restores all original windows' -Condition { Test-OriginalsRestored }
+        Record-Pass 'startup assignment fixture restores original frames on exit'
+        return
+    }
     Assert-Placements
     Record-Pass 'four native windows tile exactly'
     $extension = (& $ExtensionPath -Once) | ConvertFrom-Json

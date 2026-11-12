@@ -64,6 +64,28 @@ raw response are retained in `target/guard-results.json` and the associated
 integration evidence directory. This shorter mode exits through the same
 recovery and owned-process cleanup as the full suite.
 
+The focused `-StartupAssignmentOnly` run passed all four checks on 12 November
+with normal candidate
+`DBADD0C08FA4C78AA1EF567520B593B7D3F68297BD3724C641CEDB082ECBCCAE`.
+It opens four windows before starting Moon, applies separate title rules that
+assign them to workspaces 1, 2 and 10, and checks the loaded configuration and
+each window's identity and membership. It then visits all three destinations,
+checks actual visible frames and hidden-window cloak state, and verifies original
+frame restoration on exit. Evidence is retained in
+`target/startup-assignment-native-results.json` and its integration log directory.
+The core regression also covers three enumeration orders and four initial
+foreground choices; the complete core suite passes 71 tests.
+
+```powershell
+./scripts/integration.ps1 -BuildDirectory <normal-build-directory> -StartupAssignmentOnly
+```
+
+The personal desktop was checked independently: Arc appeared on workspace 1,
+Windows Terminal on 2, and ChatGPT/Claude on 10, with exact native frames on each
+visit. These results verify the current startup behavior. The earlier observation
+of only two managed windows lacks window identities and admission-state evidence,
+so it does not establish a cause for the reported first-start failure.
+
 ## Defects found and verified during integration
 
 - The pipe server disconnected immediately after a buffered response write,
