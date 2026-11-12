@@ -171,6 +171,7 @@ try {
     $handoverRecovery=@($handoverAst.FindAll({param($node) $node -is [Management.Automation.Language.CatchClauseAst] -and $node.Body.Extent.Text -match '\$saved.status=''recovery_required'''},$true))
     if ($handoverRecovery.Count -ne 1) {throw 'Expected exactly one production handover recovery body.'}
     $handoverText=$handoverRecovery[0].Body.Extent.Text
+    $KeepPreviousDesktopStopped=$false
     $handoverRollback=[scriptblock]::Create($handoverText.Substring(1,$handoverText.Length-2).Replace('$PSScriptRoot',("'"+$PSScriptRoot.Replace("'","''")+"'")))
     & {
         $fixtureInstall=Join-Path $temporary 'handover';[void][IO.Directory]::CreateDirectory($fixtureInstall)

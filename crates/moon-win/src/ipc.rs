@@ -4,7 +4,6 @@
 use crate::platform::wide;
 use serde_json::Value;
 use std::{
-    ffi::c_void,
     mem::size_of,
     sync::{
         Arc,
@@ -55,19 +54,17 @@ fn identity() -> Result<(String, String)> {
         let mut token = HANDLE::default();
         OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)?;
         let token = Handle(token);
+        identity_for_token(token.0)
+    }
+}
+
+fn identity_for_token(token: HANDLE) -> Result<(String, String)> {
+    unsafe {
         let mut length = 0;
-        let mut statistics = TOKEN_STATISTICS::default();
-        GetTokenInformation(
-            token.0,
-            TokenStatistics,
-            Some(&mut statistics as *mut _ as *mut c_void),
-            size_of::<TOKEN_STATISTICS>() as u32,
-            &mut length,
-        )?;
-        let _ = GetTokenInformation(token.0, TokenLogonSid, None, 0, &mut length);
+        let _ = GetTokenInformation(token, TokenLogonSid, None, 0, &mut length);
         let mut groups = vec![0usize; (length as usize).div_ceil(size_of::<usize>())];
         GetTokenInformation(
-            token.0,
+            token,
             TokenLogonSid,
             Some(groups.as_mut_ptr().cast()),
             length,
@@ -82,8 +79,9 @@ fn identity() -> Result<(String, String)> {
         let sid = text.to_string();
         let _ = LocalFree(Some(HLOCAL(text.0.cast())));
         let sid = sid?;
-        let auth = statistics.AuthenticationId;
-        Ok((format!(r"\\.\pipe\moon-v1-{:08x}-{:08x}", auth.HighPart as u32, auth.LowPart), sid))
+        // UAC's linked administrator and filtered tokens can have different
+        // AuthenticationIds. Their shared logon SID is also our pipe ACL boundary.
+        Ok((format!(r"\\.\pipe\moon-v1-{sid}"), sid))
     }
 }
 
@@ -408,6 +406,46 @@ pub fn subscribe(message: &Value, mut receive: impl FnMut(Value) -> bool) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn linked_uac_tokens_share_pipe_identity() {
+        unsafe {
+            let mut current = HANDLE::default();
+            OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut current).unwrap();
+            let current = Handle(current);
+            let mut length = 0;
+            let mut elevation = TOKEN_ELEVATION_TYPE::default();
+            GetTokenInformation(
+                current.0,
+                TokenElevationType,
+                Some((&mut elevation as *mut TOKEN_ELEVATION_TYPE).cast()),
+                size_of::<TOKEN_ELEVATION_TYPE>() as u32,
+                &mut length,
+            )
+            .unwrap();
+            if elevation == TokenElevationTypeDefault {
+                eprintln!("No linked UAC token exists for this account; split-token check skipped");
+                return;
+            }
+            let mut linked = TOKEN_LINKED_TOKEN::default();
+            GetTokenInformation(
+                current.0,
+                TokenLinkedToken,
+                Some((&mut linked as *mut TOKEN_LINKED_TOKEN).cast()),
+                size_of::<TOKEN_LINKED_TOKEN>() as u32,
+                &mut length,
+            )
+            .unwrap();
+            // Query only: never impersonate or launch a process with this handle.
+            let linked = Handle(linked.LinkedToken);
+            let current_identity = identity_for_token(current.0).unwrap();
+            let linked_identity = identity_for_token(linked.0).unwrap();
+            assert_eq!(current_identity, linked_identity);
+            assert_eq!(pipe_name().unwrap(), current_identity.0);
+            assert_eq!(current_identity.0, format!(r"\\.\pipe\moon-v1-{}", current_identity.1));
+            eprintln!("Current and linked tokens share {}", current_identity.0);
+        }
+    }
 
     fn server(
         tag: &str,

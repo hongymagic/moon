@@ -17,7 +17,7 @@ $registry=$null
 $checks=[Collections.Generic.List[string]]::new()
 try {
     $checks.Add('PowerShell 5.1 syntax')
-    if ([MoonInstallNative]::PipeName() -notmatch '^moon-v1-[0-9a-f]{8}-[0-9a-f]{8}$') {throw 'Native logon identity format failed'}
+    if ([MoonInstallNative]::PipeName() -notmatch '^moon-v1-S-1-5-5-[0-9]+-[0-9]+$') {throw 'Native logon identity format failed'}
     $checks.Add('Native token helper')
     $publication=[pscustomobject]@{revision=1}
     Write-MoonInstallState $temporary $publication

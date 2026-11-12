@@ -9,10 +9,20 @@ if (!$PipeName) {
 using System;
 using System.Runtime.InteropServices;
 public static class MoonExtensionIdentity {
-    [StructLayout(LayoutKind.Sequential)] struct Luid { public uint Low; public int High; }
-    [StructLayout(LayoutKind.Sequential)] struct Statistics { public Luid Token, Authentication; public long Expiration; public uint TokenType, ImpersonationLevel, DynamicCharged, DynamicAvailable, GroupCount, PrivilegeCount; public Luid Modified; }
-    [DllImport("advapi32.dll",SetLastError=true)] static extern bool GetTokenInformation(IntPtr token, int kind, out Statistics statistics, uint length, out uint returned);
-    public static string PipeName(IntPtr token) { Statistics statistics; uint returned; if(!GetTokenInformation(token,10,out statistics,(uint)Marshal.SizeOf(typeof(Statistics)),out returned)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error()); return String.Format("moon-v1-{0:x8}-{1:x8}",unchecked((uint)statistics.Authentication.High),statistics.Authentication.Low); }
+    [StructLayout(LayoutKind.Sequential)] struct Label { public IntPtr Sid; public uint Attributes; }
+    [StructLayout(LayoutKind.Sequential)] struct LogonGroups { public uint Count; public Label Group; }
+    [DllImport("advapi32.dll",SetLastError=true)] static extern bool GetTokenInformation(IntPtr token,int kind,IntPtr value,uint length,out uint returned);
+    public static string PipeName(IntPtr token) {
+        uint length;GetTokenInformation(token,28,IntPtr.Zero,0,out length);
+        if(length<Marshal.SizeOf(typeof(LogonGroups)) || length>65536)throw new InvalidOperationException("Invalid Windows logon identity size");
+        var memory=Marshal.AllocHGlobal((int)length);
+        try {
+            if(!GetTokenInformation(token,28,memory,length,out length))throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+            var groups=(LogonGroups)Marshal.PtrToStructure(memory,typeof(LogonGroups));
+            if(groups.Count!=1 || groups.Group.Sid==IntPtr.Zero)throw new InvalidOperationException("Expected one Windows logon SID");
+            return "moon-v1-"+new System.Security.Principal.SecurityIdentifier(groups.Group.Sid).Value;
+        } finally {Marshal.FreeHGlobal(memory);}
+    }
 }
 '@
     }

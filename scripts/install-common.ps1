@@ -9,11 +9,9 @@ using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Text;
 public static class MoonInstallNative {
-    [StructLayout(LayoutKind.Sequential)] struct Luid { public uint Low; public int High; }
-    [StructLayout(LayoutKind.Sequential)] struct Statistics { public Luid Token, Authentication; public long Expiration; public uint TokenType, ImpersonationLevel, DynamicCharged, DynamicAvailable, GroupCount, PrivilegeCount; public Luid Modified; }
     [StructLayout(LayoutKind.Sequential)] struct Label { public IntPtr Sid; public uint Attributes; }
+    [StructLayout(LayoutKind.Sequential)] struct LogonGroups { public uint Count; public Label Group; }
     [DllImport("advapi32.dll",SetLastError=true)] static extern bool GetTokenInformation(IntPtr token,int kind,IntPtr value,uint length,out uint returned);
-    [DllImport("advapi32.dll",EntryPoint="GetTokenInformation",SetLastError=true)] static extern bool StatisticsOf(IntPtr token,int kind,out Statistics value,uint length,out uint returned);
     [DllImport("advapi32.dll",SetLastError=true)] static extern bool OpenProcessToken(IntPtr process,uint access,out IntPtr token);
     [DllImport("advapi32.dll",SetLastError=true)] static extern bool SetTokenInformation(IntPtr token,int kind,ref Label value,uint length);
     [DllImport("advapi32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool ConvertStringSidToSid(string value,out IntPtr sid);
@@ -36,7 +34,18 @@ public static class MoonInstallNative {
     static Exception Error() { return new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error()); }
     public sealed class ProcessIdentityInfo {public string Path; public long Birth;}
     public static ProcessIdentityInfo ProcessIdentity(uint processId) {var process=OpenProcess(0x1000,false,processId);if(process==IntPtr.Zero)throw Error();try{var path=new StringBuilder(32768);uint length=(uint)path.Capacity;long created,exited,kernel,user;if(!QueryFullProcessImageName(process,0,path,ref length))throw Error();if(!GetProcessTimes(process,out created,out exited,out kernel,out user))throw Error();return new ProcessIdentityInfo{Path=path.ToString(),Birth=created};}finally{CloseHandle(process);}}
-    public static string PipeName() { using(var identity=WindowsIdentity.GetCurrent()) { Statistics value; uint length; if(!StatisticsOf(identity.Token,10,out value,(uint)Marshal.SizeOf(typeof(Statistics)),out length)) throw Error(); return String.Format("moon-v1-{0:x8}-{1:x8}",unchecked((uint)value.Authentication.High),value.Authentication.Low); } }
+    public static string PipeName() { using(var identity=WindowsIdentity.GetCurrent()) { return PipeName(identity.Token); } }
+    public static string PipeName(IntPtr token) {
+        uint length;GetTokenInformation(token,28,IntPtr.Zero,0,out length);
+        if(length<Marshal.SizeOf(typeof(LogonGroups)) || length>65536)throw new InvalidOperationException("Invalid Windows logon identity size");
+        var memory=Marshal.AllocHGlobal((int)length);
+        try {
+            if(!GetTokenInformation(token,28,memory,length,out length))throw Error();
+            var groups=(LogonGroups)Marshal.PtrToStructure(memory,typeof(LogonGroups));
+            if(groups.Count!=1 || groups.Group.Sid==IntPtr.Zero)throw new InvalidOperationException("Expected one Windows logon SID");
+            return "moon-v1-"+new SecurityIdentifier(groups.Group.Sid).Value;
+        } finally {Marshal.FreeHGlobal(memory);}
+    }
     public static uint TokenWord(int kind) { using(var identity=WindowsIdentity.GetCurrent()) { var memory=Marshal.AllocHGlobal(4); try {uint length; if(!GetTokenInformation(identity.Token,kind,memory,4,out length)) throw Error(); return unchecked((uint)Marshal.ReadInt32(memory));} finally {Marshal.FreeHGlobal(memory);} } }
     public static uint Integrity() { using(var identity=WindowsIdentity.GetCurrent()) {uint length;GetTokenInformation(identity.Token,25,IntPtr.Zero,0,out length);var memory=Marshal.AllocHGlobal((int)length);try {if(!GetTokenInformation(identity.Token,25,memory,length,out length)) throw Error();var sid=Marshal.ReadIntPtr(memory);var count=Marshal.ReadByte(GetSidSubAuthorityCount(sid));return unchecked((uint)Marshal.ReadInt32(GetSidSubAuthority(sid,(uint)(count-1))));}finally{Marshal.FreeHGlobal(memory);}} }
     public static void LowerToLowIntegrity() {IntPtr token,sid;if(!OpenProcessToken(GetCurrentProcess(),0x88,out token))throw Error();try{if(!ConvertStringSidToSid("S-1-16-4096",out sid))throw Error();try{var label=new Label{Sid=sid,Attributes=0x20};if(!SetTokenInformation(token,25,ref label,(uint)Marshal.SizeOf(typeof(Label))+GetLengthSid(sid)))throw Error();}finally{LocalFree(sid);}}finally{CloseHandle(token);}}
@@ -337,8 +346,9 @@ function Assert-MoonOwnedTask($Task,$State,[string]$Target) {
     $powershell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     if (![string]::Equals($Task.Actions[0].Execute,$powershell,[StringComparison]::OrdinalIgnoreCase) -or $Task.Actions[0].Arguments -notmatch '^-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand ([A-Za-z0-9+/=]+)$') { throw 'Unexpected startup task executable or arguments.' }
     $launch=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($Matches[1]))
-    $expected="Start-Process -FilePath '$($Target.Replace("'","''"))' -ArgumentList 'start --background' -WindowStyle Hidden"
-    if ($launch -ne $expected) { throw 'The startup task points outside the expected moon launch operation.' }
+    $legacy="Start-Process -FilePath '$($Target.Replace("'","''"))' -ArgumentList 'start --background' -WindowStyle Hidden"
+    $expected=Get-MoonTaskLaunchScript $Target
+    if ($launch -ne $expected -and $launch -ne $legacy) { throw 'The startup task points outside the expected moon launch operation.' }
     $principal=$Task.Principal.UserId
     if ($principal -notmatch '^S-1-') { $principal=([Security.Principal.NTAccount]::new($principal)).Translate([Security.Principal.SecurityIdentifier]).Value }
     if ($principal -ne $State.owner_sid) { throw 'Unexpected startup task user.' }
@@ -387,9 +397,71 @@ function Get-MoonUpgradeSnapshot {
     throw "Cannot capture a consistent upgrade recovery checkpoint; the executable was not replaced. $last"
 }
 
+function Get-MoonTaskLaunchScript([string]$Target,[string]$Arguments='start --background') {
+    $prefix="`$target='$($Target.Replace("'","''"))'`n`$arguments='$($Arguments.Replace("'","''"))'`n"
+    $prefix+@'
+$ErrorActionPreference='Stop'
+$ProgressPreference='SilentlyContinue'
+$directory=Join-Path $env:LOCALAPPDATA 'moon'
+$path=Join-Path $directory ('startup-session'+[Diagnostics.Process]::GetCurrentProcess().SessionId+'.json')
+$record=[ordered]@{version=1;attempt=[guid]::NewGuid().ToString('N');started_at=[DateTime]::UtcNow.ToString('o');updated_at='';worker_pid=$PID;target=$target;arguments=$arguments;phase='launching';child_pid=$null;exit_code=$null;error=$null;native_error_code=$null;environment=[ordered]@{user_profile=$env:USERPROFILE;local_app_data=$env:LOCALAPPDATA;path_extensions=$env:PATHEXT;current_directory=[Environment]::CurrentDirectory;session_id=[Diagnostics.Process]::GetCurrentProcess().SessionId}}
+function Write-StartupRecord {
+    $temporary=$null
+    try {
+        $record.updated_at=[DateTime]::UtcNow.ToString('o')
+        [void][IO.Directory]::CreateDirectory($directory)
+        $temporary=Join-Path $directory ('startup-'+[guid]::NewGuid().ToString('N')+'.tmp')
+        $text=$record|ConvertTo-Json -Depth 4
+        if([Text.Encoding]::UTF8.GetByteCount($text) -gt 65536){throw 'Startup diagnostic exceeded its size limit.'}
+        [IO.File]::WriteAllText($temporary,$text,[Text.UTF8Encoding]::new($false))
+        if(Test-Path -LiteralPath $path){[IO.File]::Replace($temporary,$path,[NullString]::Value)}else{[IO.File]::Move($temporary,$path)}
+    }catch{Write-Warning ('Moon startup diagnostic could not be written: '+$_.Exception.Message) -WarningAction Continue}
+    finally{if($temporary -and (Test-Path -LiteralPath $temporary)){Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue}}
+}
+$child=$null
+try {
+    Write-StartupRecord
+    $child=Start-Process -FilePath $target -ArgumentList $arguments -WindowStyle Hidden -PassThru
+    $record.child_pid=$child.Id;$record.phase='started';Write-StartupRecord
+    # Process.WaitForExit waits only for this launcher, unlike Start-Process
+    # -Wait, which can wait for its long-lived daemon descendants as well.
+    if(!$child.WaitForExit(15000)){
+        $record.phase='timed-out';$record.error='The launch process is still running after 15 seconds; it was not terminated.'
+        $record.exit_code=1460;Write-StartupRecord;exit 1460
+    }
+    $record.phase='exited';$record.exit_code=$child.ExitCode;Write-StartupRecord
+    exit $child.ExitCode
+}catch{
+    $failure=$_;$record.phase='failed'
+    $record.error=$failure.Exception.ToString()
+    if($record.error.Length -gt 8192){$record.error=$record.error.Substring(0,8192)}
+    $exception=$failure.Exception
+    while($exception){if($exception -is [ComponentModel.Win32Exception]){$record.native_error_code=$exception.NativeErrorCode;break};$exception=$exception.InnerException}
+    $record.exit_code=1;Write-StartupRecord
+    Write-Error -ErrorRecord $failure -ErrorAction Continue
+    exit 1
+}finally{if($child){$child.Dispose()}}
+'@
+}
+function Get-MoonTaskStartupDiagnostic([string]$Target,[datetime]$Since) {
+    $path=Join-Path $env:LOCALAPPDATA ('moon\startup-session'+[Diagnostics.Process]::GetCurrentProcess().SessionId+'.json')
+    try {
+        if(!(Test-Path -LiteralPath $path)){return "Startup task did not write a diagnostic record: $path"}
+        $stream=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+        try {
+            if($stream.Length -gt 65536){throw 'Startup diagnostic exceeded its size limit.'}
+            $reader=[IO.StreamReader]::new($stream,[Text.UTF8Encoding]::new($false,$true))
+            try{$record=$reader.ReadToEnd()|ConvertFrom-Json}finally{$reader.Dispose()}
+        }finally{$stream.Dispose()}
+        if($record.version -ne 1 -or ![string]::Equals($record.target,$Target,[StringComparison]::OrdinalIgnoreCase) -or [datetime]::Parse($record.started_at).ToUniversalTime() -lt $Since.ToUniversalTime()){
+            return "Startup task has no matching diagnostic from this attempt: $path"
+        }
+        return "Startup task diagnostic ($path):`n$($record|ConvertTo-Json -Depth 4)"
+    }catch{return "Startup task diagnostic could not be read ($path): $($_.Exception.Message)"}
+}
 function New-MoonTaskAction([string]$Target,[string]$Arguments='start --background') {
     $powershell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    $launch="Start-Process -FilePath '$($Target.Replace("'","''"))' -ArgumentList '$($Arguments.Replace("'","''"))' -WindowStyle Hidden"
+    $launch=Get-MoonTaskLaunchScript $Target $Arguments
     $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($launch))
     New-ScheduledTaskAction -Execute $powershell -Argument ('-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand '+$encoded)
 }
@@ -399,11 +471,14 @@ function Start-MoonLimitedOnce([string]$Target,[string]$Arguments,$State) {
     $settings=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::FromMinutes(1))
     Register-ScheduledTask -TaskName $name -Description "moon temporary installation $($State.install_id)" -Action (New-MoonTaskAction $Target $Arguments) -Principal $principal -Settings $settings | Out-Null
     try {
+        $launchAfter=[DateTime]::UtcNow
         Start-ScheduledTask -TaskName $name
-        Wait-MoonCondition -Description 'the restored signed daemon' -Condition {
-            $running=Get-MoonDaemon
-            $running -and [string]::Equals($running.executable,$Target,[StringComparison]::OrdinalIgnoreCase) -and $running.token.ui_access
-        }
+        try {
+            Wait-MoonCondition -Description 'the restored signed daemon' -Condition {
+                $running=Get-MoonDaemon
+                $running -and [string]::Equals($running.executable,$Target,[StringComparison]::OrdinalIgnoreCase) -and $running.token.ui_access
+            }
+        }catch{throw "$($_.Exception.Message)`n$(Get-MoonTaskStartupDiagnostic $Target $launchAfter)"}
     } finally {Unregister-ScheduledTask -TaskName $name -Confirm:$false}
 }
 

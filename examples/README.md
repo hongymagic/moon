@@ -6,7 +6,7 @@
 powershell.exe -NoProfile -File examples\workspace-state.ps1 -Once
 ```
 
-The pipe is `\\.\pipe\moon-v1-HIGH-LOW`, where HIGH and LOW are the eight-digit hexadecimal halves of the token authentication LUID. The pipe ACL uses the logon SID, and the mandatory integrity label is medium. No network transport is supported.
+The pipe is `\\.\pipe\moon-v1-S-1-5-5-X-Y`, using the actual `TokenLogonSid` returned by Windows. This identifier is shared by the ordinary and elevated tokens of the same sign-in session; their authentication LUIDs can differ. The pipe ACL uses that same logon SID, and the mandatory integrity label remains medium. No network transport is supported. Microsoft documents this SID as [unique to each logon session](https://learn.microsoft.com/en-us/windows/win32/secauthz/well-known-sids).
 
 Each UTF-8 JSON frame ends in a newline. Requests are at most 64 KiB; responses at most 8 MiB. Each connection sends one request. A normal request receives one response and closes; subscriptions receive an initial world followed by committed worlds until disconnected. Slow subscriptions are disconnected so they cannot delay input or retain an unbounded queue.
 

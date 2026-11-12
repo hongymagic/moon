@@ -5,6 +5,7 @@ param(
     [string]$InventoryPath,
     [string]$RecoveryPath,
     [switch]$Rollback,
+    [switch]$KeepPreviousDesktopStopped,
     [string]$StatePath=(Join-Path $env:LOCALAPPDATA 'moon\handover.json'),
     [string]$OperationId
 )
@@ -15,7 +16,7 @@ trap {
     $current=$null
     try {if(Test-Path -LiteralPath $StatePath){$current=Get-Content -Raw -LiteralPath $StatePath|ConvertFrom-Json}} catch { }
     $currentStatus=if($current -and $current.PSObject.Properties['status']){$current.status}else{''}
-    $restored=$currentStatus -eq 'rolled_back'
+    $restored=$currentStatus -in @('rolled_back','rolled_back_stopped')
     $operationState=$null
     try {$operationState=Read-MoonSetupStatus $OperationId} catch { }
     # The elevated installer publishes its full error before its parent receives
@@ -30,7 +31,7 @@ trap {
     $detail+="`r`n`r`nSetup operation: $OperationId"
     try {$detail+="`r`nDiagnostic status: $((Get-MoonSetupFiles $OperationId).status)"} catch { }
     $cancelled=$restored -and ($failure.Exception -is [OperationCanceledException] -or $priorStatus -eq 'cancelled')
-    Write-MoonSetupStatus $OperationId $(if($cancelled){'cancelled'}elseif($currentStatus -eq 'recovery_required'){'recovery_required'}else{'failed'}) $(if($restored){'Your previous desktop has been restored.'}else{'Setup could not finish. Open details before trying again.'}) $detail
+    Write-MoonSetupStatus $OperationId $(if($cancelled){'cancelled'}elseif($currentStatus -eq 'recovery_required'){'recovery_required'}else{'failed'}) $(if($currentStatus -eq 'rolled_back_stopped'){'Moon setup was rolled back. Your previous desktop remains stopped.'}elseif($restored){'Your previous desktop has been restored.'}else{'Setup could not finish. Open details before trying again.'}) $detail
     Write-Error -Message $detail -ErrorAction Continue
     exit $(if($cancelled){1223}else{1})
 }
@@ -62,7 +63,7 @@ function Assert-MoonStopped {
         throw 'A moon recovery journal remains; recover those windows before restarting the previous manager.'
     }
 }
-function Restore-PreviousDesktop($Saved) {
+function Restore-PreviousDesktop($Saved,[switch]$KeepPreviousDesktopStopped) {
     Assert-MoonStopped
     foreach ($link in $Saved.startup_links) {
         if (!(Test-Path -LiteralPath $link.backup) -or (Get-FileHash -LiteralPath $link.backup -Algorithm SHA256).Hash -ne $link.sha256) {throw 'The saved startup shortcut failed its integrity check.'}
@@ -70,6 +71,7 @@ function Restore-PreviousDesktop($Saved) {
             if ((Get-FileHash -LiteralPath $link.original -Algorithm SHA256).Hash -ne $link.sha256) {throw "A new shortcut occupies $($link.original); it was not replaced."}
         } else {Copy-Item -LiteralPath $link.backup -Destination $link.original}
     }
+    if($KeepPreviousDesktopStopped){return}
     # Glaze may start its configured bars itself. Wait briefly before restarting
     # any originally running companion that is still absent.
     foreach ($name in $names) {
@@ -104,8 +106,8 @@ if ($Rollback) {
         if (!(Test-MoonHandoverInstallation $saved $installedState)) {throw 'The current installation is not owned by this handover. Remove it explicitly before restoring the saved desktop.'}
         Invoke-MoonNative $powershell @('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $PSScriptRoot 'uninstall.ps1'),'-ExpectedInstallId',$installedState.install_id,'-ExpectedHandoverId',$saved.handover_id) -TimeoutSeconds 0 | Out-Null
     }
-    Restore-PreviousDesktop $saved
-    $saved.status='rolled_back'; $saved.finished_at=[DateTime]::UtcNow.ToString('o')
+    Restore-PreviousDesktop $saved -KeepPreviousDesktopStopped:$KeepPreviousDesktopStopped
+    $saved.status=if($KeepPreviousDesktopStopped){'rolled_back_stopped'}else{'rolled_back'}; $saved.finished_at=[DateTime]::UtcNow.ToString('o')
     Write-MoonJsonFile $StatePath $saved
     $saved | ConvertTo-Json -Depth 10
     return
@@ -127,7 +129,7 @@ Assert-MoonStopped
 if (Test-Path -LiteralPath (Join-Path (Get-MoonInstallDirectory) 'installation.json')) {throw 'moon is already installed. Use install.ps1 for an upgrade or -Rollback to restore the previous desktop.'}
 if (Test-Path -LiteralPath $StatePath) {
     $existing=Get-Content -Raw -LiteralPath $StatePath | ConvertFrom-Json
-    if ($existing.status -ne 'rolled_back') {throw 'An earlier handover record exists. Use -Rollback to restore it, or use install.ps1 for an upgrade.'}
+    if ($existing.status -notin @('rolled_back','rolled_back_stopped')) {throw 'An earlier handover record exists. Use -Rollback to restore it, or use install.ps1 for an upgrade.'}
 }
 $startupLinks=@(Get-MoonStartupLinks -Programs $names)
 $processes=@(Get-PreviousDesktopProcesses | ForEach-Object {
@@ -169,7 +171,7 @@ foreach ($relative in @('.glzr\glazewm\config.yaml','.glzr\zebar\settings.json',
         $configs+=[pscustomobject]@{original=$original;backup=$backup;sha256=(Get-FileHash -LiteralPath $backup -Algorithm SHA256).Hash}
     }
 }
-$saved=[pscustomobject]@{version=1;operation_id=$OperationId;owner_sid=$owner;session=$session;handover_id=[guid]::NewGuid().ToString('N');installation_id=$null;started_at=[DateTime]::UtcNow.ToString('o');finished_at=$null;status='prepared';source_sha256=(Get-FileHash -LiteralPath $Binary -Algorithm SHA256).Hash;processes=$processes;startup_links=$links;config_backups=$configs;glaze_inventory=$glazeInventoryPath;glaze_owned_handles=$glazeHandles;glaze_recovery=$null;installed_stats=$null;uiaccess_report=$null}
+$saved=[pscustomobject]@{version=1;operation_id=$OperationId;keep_previous_desktop_stopped=[bool]$KeepPreviousDesktopStopped;owner_sid=$owner;session=$session;handover_id=[guid]::NewGuid().ToString('N');installation_id=$null;started_at=[DateTime]::UtcNow.ToString('o');finished_at=$null;status='prepared';source_sha256=(Get-FileHash -LiteralPath $Binary -Algorithm SHA256).Hash;processes=$processes;startup_links=$links;config_backups=$configs;glaze_inventory=$glazeInventoryPath;glaze_owned_handles=$glazeHandles;glaze_recovery=$null;installed_stats=$null;uiaccess_report=$null}
 [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($StatePath)))
 Write-MoonJsonFile $StatePath $saved
 try {
@@ -232,8 +234,8 @@ try {
             Invoke-MoonNative $powershell @('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $PSScriptRoot 'uninstall.ps1'),'-ExpectedInstallId',$installedState.install_id,'-ExpectedHandoverId',$saved.handover_id) -TimeoutSeconds 0 | Out-Null
         }
     }
-    Restore-PreviousDesktop $saved
-    $saved.status='rolled_back'; $saved.finished_at=[DateTime]::UtcNow.ToString('o')
+    Restore-PreviousDesktop $saved -KeepPreviousDesktopStopped:$KeepPreviousDesktopStopped
+    $saved.status=if($KeepPreviousDesktopStopped){'rolled_back_stopped'}else{'rolled_back'}; $saved.finished_at=[DateTime]::UtcNow.ToString('o')
     Write-MoonJsonFile $StatePath $saved
     throw $failure
 }

@@ -37,7 +37,7 @@ try {
     $trapText=$handover.EndBlock.Traps[0].Extent.Text
     $common=(Join-Path $PSScriptRoot 'install-common.ps1').Replace("'","''")
     $powershell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    foreach($kind in @('nested-error','generated-operation','malformed-status','malformed-handover','cancelled')){
+    foreach($kind in @('nested-error','generated-operation','malformed-status','malformed-handover','cancelled','stopped-rollback')){
         $fixture=Join-Path $temporary $kind;[void][IO.Directory]::CreateDirectory($fixture)
         $supplied=if($kind -eq 'generated-operation'){''}else{[guid]::NewGuid().ToString('N')}
         $priorStatus=if($kind -eq 'cancelled'){'cancelled'}else{'failed'}
@@ -49,7 +49,7 @@ try {
 `$StatePath=Join-Path `$fixtureDirectory 'handover.json'
 function Get-MoonSetupFiles([string]`$OperationId){[pscustomobject]@{directory=`$fixtureDirectory;status=(Join-Path `$fixtureDirectory 'status.json');cancel=(Join-Path `$fixtureDirectory 'cancel')}}
 $initializer
-[IO.File]::WriteAllText(`$StatePath,'{"status":"rolled_back"}')
+[IO.File]::WriteAllText(`$StatePath,'{"status":"$(if($kind -eq 'stopped-rollback'){'rolled_back_stopped'}else{'rolled_back'})"}')
 Write-MoonSetupStatus `$OperationId '$priorStatus' 'Installer failed and recovered.' 'Original elevated installer cause: fixture access denied.'
 if('$kind' -eq 'malformed-status'){[IO.File]::WriteAllText((Get-MoonSetupFiles `$OperationId).status,'invalid JSON')}
 if('$kind' -eq 'malformed-handover'){[IO.File]::WriteAllText(`$StatePath,'invalid JSON')}
@@ -66,8 +66,78 @@ throw [IO.IOException]::new('Generic child exit 1')
         $stderrText=$result.Error -replace '\s+',' '
         if($kind -ne 'malformed-status' -and ($actual.detail -notlike '*Original elevated installer cause*' -or $stderrText -notlike '*Original elevated installer cause*')){throw "Handover overwrote the elevated installer's diagnostic in $kind."}
         if($actual.status -ne $priorStatus){throw "Handover misclassified the final status in $kind."}
+        if($kind -eq 'stopped-rollback' -and ($actual.message -notlike '*remains stopped*' -or $actual.message -like '*has been restored*')){throw 'Stopped rollback incorrectly claimed to restart the previous desktop.'}
         $checks.Add("Actual handover error trap preserves status, stderr and operation identity: $kind")
     }
+    $restore=$handover.Find({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Restore-PreviousDesktop'},$true)
+    if(!$restore){throw 'Production desktop restoration helper was not found.'}
+    & {
+        Invoke-Expression $restore.Extent.Text
+        function Assert-MoonStopped {$script:stoppedChecked=$true}
+        function Get-PreviousDesktopProcesses {if($script:fixtureRunning){[pscustomobject]@{Name='fixture.exe'}}}
+        function Start-Process {param($FilePath,$WorkingDirectory,$ArgumentList) $script:previousLaunches++;$script:fixtureRunning=$true}
+        $names=@('fixture.exe')
+        $backup=Join-Path $temporary 'previous-shortcut.backup';$original=Join-Path $temporary 'previous-shortcut'
+        [IO.File]::WriteAllText($backup,'owned previous startup bytes')
+        $saved=[pscustomobject]@{startup_links=@([pscustomobject]@{backup=$backup;original=$original;sha256=(Get-FileHash $backup).Hash;program='fixture.exe'});processes=@([pscustomobject]@{name='fixture.exe';path=$backup;arguments=''})}
+        foreach($keepStopped in @($false,$true)){
+            if(Test-Path -LiteralPath $original){Remove-Item -LiteralPath $original}
+            $script:previousLaunches=0;$script:fixtureRunning=$false;$script:stoppedChecked=$false
+            Restore-PreviousDesktop $saved -KeepPreviousDesktopStopped:$keepStopped
+            if(!$script:stoppedChecked -or [IO.File]::ReadAllText($original) -ne 'owned previous startup bytes'){throw 'Desktop rollback skipped safe state restoration.'}
+            if($script:previousLaunches -ne $(if($keepStopped){0}else{1})){throw 'Desktop rollback ignored the explicit keep-stopped policy.'}
+            $checks.Add("Actual previous-desktop restoration retains safe state and honors keep-stopped=$keepStopped")
+        }
+    }
+
+    $savedLocalAppData=$env:LOCALAPPDATA
+    try {
+        foreach($kind in @('missing-image','child-nonzero','child-success','wrapped-launch-error','bounded-wait')){
+            $fixture=Join-Path $temporary ('startup-'+$kind);[void][IO.Directory]::CreateDirectory($fixture)
+            $worker=Join-Path $fixture 'worker.ps1'
+            $testTarget=if($kind -eq 'missing-image'){Join-Path $fixture 'absent.exe'}else{$powershell}
+            $childExit=if($kind -eq 'child-nonzero'){37}else{0}
+            $testArguments='-NoProfile -NonInteractive -EncodedCommand '+[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("exit $childExit"))
+            $prefix="`$env:LOCALAPPDATA='$($fixture.Replace("'","''"))'`n"
+            if($kind -eq 'wrapped-launch-error'){
+                $prefix+="function Start-Process {throw [InvalidOperationException]::new('Original launch failure',[ComponentModel.Win32Exception]::new(5))}`n"
+            }elseif($kind -eq 'bounded-wait'){
+                $prefix+=@'
+function Start-Process {
+ $child=[pscustomobject]@{Id=1234;ExitCode=0}
+ $child|Add-Member ScriptMethod WaitForExit {param($Milliseconds) if($Milliseconds -ne 15000){throw 'Unexpected startup wait limit'};return $false}
+ $child|Add-Member ScriptMethod Kill {throw 'Slow launchers must not be terminated'}
+ $child|Add-Member ScriptMethod Dispose {}
+ return $child
+}
+'@
+                $prefix+="`n"
+            }
+            [IO.File]::WriteAllText($worker,($prefix+(Get-MoonTaskLaunchScript $testTarget $testArguments)),[Text.UTF8Encoding]::new($false))
+            $since=[DateTime]::UtcNow
+            $result=Invoke-MoonNative $powershell @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$worker) -TimeoutSeconds 20 -AllowFailure
+            $status=Join-Path $fixture ('moon\startup-session'+[Diagnostics.Process]::GetCurrentProcess().SessionId+'.json')
+            $actual=Get-Content -Raw -LiteralPath $status|ConvertFrom-Json
+            if($actual.target -ne $testTarget -or $actual.arguments -ne $testArguments -or !$actual.environment.local_app_data -or (Get-Item $status).Length -gt 65536){throw 'Startup record lost its identity, context or bound.'}
+            switch($kind){
+                'missing-image' {if($result.ExitCode -ne 1 -or $actual.phase -ne 'failed' -or $actual.error -notlike ('*'+([ComponentModel.Win32Exception]::new(2)).Message+'*')){throw 'Missing image lost the original Windows launch error message.'}}
+                'child-nonzero' {if($result.ExitCode -ne 37 -or $actual.phase -ne 'exited' -or $actual.exit_code -ne 37 -or !$actual.child_pid){throw 'Nonzero child status was not recorded or propagated.'}}
+                'child-success' {if($result.ExitCode -ne 0 -or $actual.phase -ne 'exited' -or $actual.exit_code -ne 0 -or !$actual.child_pid){throw 'Successful child status was not recorded.'}}
+                'wrapped-launch-error' {if($result.ExitCode -ne 1 -or $actual.native_error_code -ne 5 -or $actual.error -notlike '*Original launch failure*'){throw 'Wrapped Win32 cause was not preserved.'}}
+                'bounded-wait' {if($result.ExitCode -ne 1460 -or $actual.phase -ne 'timed-out' -or $actual.error -notlike '*not terminated*'){throw 'Bounded wait did not preserve the running launcher.'}}
+            }
+            # Override only this test process's environment; no user registry or
+            # task settings are changed. Exercise the real diagnostic reader.
+            $env:LOCALAPPDATA=$fixture
+            $diagnostic=Get-MoonTaskStartupDiagnostic $testTarget $since
+            if($diagnostic -notlike '*Startup task diagnostic (*' -or $diagnostic -notlike ('*'+$actual.attempt+'*')){throw 'Installer timeout could not find its matching task diagnostic.'}
+            if((Get-MoonTaskStartupDiagnostic $testTarget ([DateTime]::UtcNow.AddMinutes(1))) -notlike '*no matching diagnostic*'){throw 'An older launch record was attributed to a new attempt.'}
+            [IO.File]::WriteAllText($status,'invalid JSON')
+            if((Get-MoonTaskStartupDiagnostic $testTarget $since) -notlike '*could not be read*'){throw 'Malformed task diagnostics obscured the installer error.'}
+            $env:LOCALAPPDATA=$savedLocalAppData
+            $checks.Add("Actual startup worker records and propagates result without a task or elevation: $kind")
+        }
+    }finally{$env:LOCALAPPDATA=$savedLocalAppData}
     $report=[pscustomobject]@{passed=$true;checks=$checks.ToArray();uac_requested=$false;installation_changed=$false}
     if($ReportPath){[IO.File]::WriteAllText($ReportPath,($report|ConvertTo-Json -Depth 5),[Text.UTF8Encoding]::new($false))}
     $report|ConvertTo-Json -Depth 5

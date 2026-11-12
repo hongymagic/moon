@@ -185,12 +185,15 @@ try {
     Write-MoonSetupStatus $OperationId 'working' 'Restoring your window layout.'
     $state.installed_at=[DateTime]::UtcNow.ToString('o')
     Write-MoonInstallState $install $state
+    $launchAfter=[DateTime]::UtcNow
     if ($daemon) { Invoke-MoonRpc command -Commands @('restart') | Out-Null }
     else { Start-ScheduledTask -TaskName $taskName }
-    Wait-MoonCondition -Description 'the signed replacement daemon with UIAccess' -Condition {
-        $running=Get-MoonDaemon
-        $running -and $running.process_id -ne $oldPid -and [string]::Equals($running.executable,$target,[StringComparison]::OrdinalIgnoreCase) -and $running.token.ui_access
-    }
+    try {
+        Wait-MoonCondition -Description 'the signed replacement daemon with UIAccess' -Condition {
+            $running=Get-MoonDaemon
+            $running -and $running.process_id -ne $oldPid -and [string]::Equals($running.executable,$target,[StringComparison]::OrdinalIgnoreCase) -and $running.token.ui_access
+        }
+    }catch{throw "$($_.Exception.Message)`n$(Get-MoonTaskStartupDiagnostic $target $launchAfter)"}
     if ($null -ne $oldLayout) {
         Wait-MoonCondition -Description 'the preserved window layout after upgrade' -Condition {(Get-MoonLayoutFingerprint) -eq $oldLayout}
     }
