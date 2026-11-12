@@ -378,3 +378,79 @@ owned-input runs. It is not a continuous runtime assertion, an exhaustive
 encoding detector or a seven-day soak result. Window/configuration metadata and
 ordinary error text may contain other application or user-provided information;
 this check concerns raw keyboard events and character capture.
+
+## Native virtual-desktop acceptance preflight
+
+On 13 November 2026, the native-switch harness was prepared and its read-only
+preflight validated. **The actual desktop-switch scenario has not run.** The
+three attempts below all stopped before creating a helper or sending a desktop
+shortcut; none establishes a virtual-desktop or lock/unlock acceptance pass.
+
+[`validate-virtual-desktops.ps1`](../scripts/validate-virtual-desktops.ps1) uses
+the public `IVirtualDesktopManager` queries to identify desktop GUIDs and current
+membership. Creation, navigation and removal use the documented
+Win+Ctrl+D, Win+Ctrl+Left/Right and Win+Ctrl+F4 shortcuts. It does not use private
+shell interfaces or move existing application windows between desktops.
+[Microsoft interface contract](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nn-shobjidl_core-ivirtualdesktopmanager),
+[Windows shortcut reference](https://support.microsoft.com/en-us/accessibility/windows/keyboard-shortcuts-in-windows).
+
+The intended run pins the ordinary daemon's executable hash, PID and process
+birth, snapshots the original four managed identities, native states, workspace
+trees, focus and configuration, and creates one owned helper on each of two
+desktops. It checks suspension, sampled cloak/geometry stability and unchanged
+membership while away, then verifies a reversible configured hotkey after
+returning. Navigation is bounded to 16 hops and follows observed GUIDs. A passive
+input guard aborts further switching on external input or guard failure without
+recording key contents. Desktop removal requires a fresh inventory proving the
+identified created desktop contains only its owned helper; unknown or changed
+foreign windows retain the desktop and a recovery report. This is a guarded
+sequence, not an atomic Windows inventory-and-delete operation, and sampled
+cloak observations cannot prove the absence of every transient uncloak.
+
+| Attempt | Observed stop and correction | Retained evidence |
+|---|---|---|
+| v1 | Windows PowerShell 5.1 rejected the `ushort` type alias in a generic list. PowerShell types were changed to `System.UInt16`/`uint16`; C# types were unchanged. | `target/native-desktops-20261113-worker.json` |
+| v2 | Native process identity queries refused access to hidden DWM/NVIDIA infrastructure. No helper or desktop was created; input counters remained zero and cleanup/configuration checks passed. A narrow read-only CIM identity fallback was added. | `target/native-desktops-v2-20261113.json` and `target/native-desktops-v2-20261113-worker.json` |
+| v3 | The existing readiness check refused `native_fullscreen=[8456378,3229624234]`. A separate read-only audit identified HWND 8456378 as `LockApp.exe`, PID 45676, on the existing monitor. This refusal occurred before the input guard or helpers started. | `target/native-desktops-v3-20261113-worker.json` and `target/native-fullscreen-identity.json` |
+
+The protected-process audit found exactly four inaccessible HWNDs belonging to
+`dwm.exe` PID 2500 and `NVDisplay.Container.exe` PID 11928. All were hidden and
+returned `TYPE_E_ELEMENTNOTFOUND` specifically from `GetWindowDesktopId`.
+The fallback is limited to native access-denied identities with a recognized
+unassigned desktop result. It records separate CIM provenance, executable name,
+session and the raw `CreationDate.ToFileTimeUtc()` value, then re-queries and
+compares them before deletion. It also requires the same baseline HWND, PID,
+class, visibility and API result. New inaccessible unassigned windows and all
+assigned windows with inaccessible identities still refuse deletion. Original
+applications, foreground and helpers require native path/birth identities.
+Microsoft documents `CreationDate` as a fixed, read-only process start time;
+executable-path availability is a separate privilege requirement.
+[Win32_Process documentation](https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/win32-process).
+
+The corrected read-only inventory retained **210 windows: five assigned native
+identities and 205 unassigned entries**, including those four CIM records. A
+fresh inventory matched, and all original four managed windows retained native
+birth identities. Tests checked 139 PowerShell type nodes, compiled the native
+helper, exercised the actual binding selector, re-queried both CIM identities,
+and rejected ten changed identity/state fields plus an unrelated native error.
+These checks created no windows, started no input hooks and sent no input.
+Reports are `target/native-desktop-types-validation.json`,
+`target/native-desktop-cim-validation.json` and
+`target/native-desktop-cim-inventory.json`; the underlying audits are
+`target/native-desktop-identities.json`,
+`target/native-desktop-process-handles.json` and
+`target/native-desktop-protected-cim.json`.
+
+Frozen source SHA-256:
+`F6E0D38DDF2C72F6DF75BDE50F408F000B9447B86A943D40A3159578E527C66D`.
+The v3 wrapper SHA-256 is
+`B30506842A22A98E43818E773B5533825813DEF5911C343ED55CBF511BC04762`.
+All three attempts pinned daemon PID 32520, SHA-256
+`43FD913681AD449967DEEBD2DD6BA38DAD59E37D384FD1142A30E9FC9F17E314`,
+and fixture SHA-256
+`BE6550EB8FEAC0BDA113AEB0C9BA6EB39FCC5A59891493633090AA47077C6CBB`.
+The v3 refusal precedes scenario-report initialization, so its worker report is
+the evidence; no `native-desktops-v3-20261113.json` scenario result was produced.
+Execution remains pending an observed unlocked, ready session. The LockApp
+observation does not establish correct placement suppression during a lock or
+working hooks after unlock.
