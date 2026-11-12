@@ -1,4 +1,5 @@
-//! Input callbacks only compare and enqueue. No keys leave this thread.
+//! Input callbacks match commands and neutralize consumed Alt chords before release.
+//! Physical key data is never sent to the main thread or retained in logs.
 
 use crate::platform::{wide, window_id};
 use moon_core::ids::WindowId;
@@ -77,15 +78,28 @@ struct PointerState {
     pending: AtomicBool,
 }
 const EMERGENCY: i32 = 0x4d01;
+const MASK_TAG: usize = 0x4d4f4f4e;
+// Microsoft documents 0xE8 as unassigned. A key-up generates no character.
+const ALT_MASK: VIRTUAL_KEY = VIRTUAL_KEY(0xe8);
 #[cfg(test)]
 static TEST_RENEWALS: AtomicU64 = AtomicU64::new(0);
 
-fn modifier_snapshot(mut down: impl FnMut(VIRTUAL_KEY) -> bool) -> [bool; 256] {
+fn is_internal_mask(info: &KBDLLHOOKSTRUCT) -> bool {
+    info.dwExtraInfo == MASK_TAG
+        && info.vkCode == u32::from(ALT_MASK.0)
+        && info.scanCode == 0
+        && info.flags.contains(LLKHF_INJECTED | LLKHF_UP)
+        && !info.flags.contains(LLKHF_LOWER_IL_INJECTED)
+}
+
+fn keyboard_snapshot(mut down: impl FnMut(VIRTUAL_KEY) -> bool) -> [bool; 256] {
     let mut pressed = [false; 256];
-    for key in
-        [VK_LMENU, VK_RMENU, VK_LSHIFT, VK_RSHIFT, VK_LCONTROL, VK_RCONTROL, VK_LWIN, VK_RWIN]
-    {
-        pressed[key.0 as usize] = down(key);
+    for (key, value) in pressed.iter_mut().enumerate() {
+        // Generic modifier aliases must never form independent sticky latches.
+        // Other held keys belong to the application until their next release.
+        if !matches!(key, 0x10..=0x12) {
+            *value = down(VIRTUAL_KEY(key as u16));
+        }
     }
     pressed
 }
@@ -98,7 +112,7 @@ fn modifier_mask(pressed: &[bool; 256]) -> u8 {
         | (u8::from(down(VK_LWIN) || down(VK_RWIN)) << 3)
 }
 
-fn record_key(pressed: &mut [bool; 256], info: &KBDLLHOOKSTRUCT, up: bool) -> u32 {
+fn record_key(pressed: &mut [bool; 256], info: &KBDLLHOOKSTRUCT, up: bool) -> (u32, bool) {
     let key = if matches!(info.vkCode, 0x10..=0x12) {
         // Keep only a sided latch. Right Ctrl/Alt are extended keys even when
         // the current input layout maps their scan codes to Hangul/Hanja.
@@ -116,8 +130,9 @@ fn record_key(pressed: &mut [bool; 256], info: &KBDLLHOOKSTRUCT, up: bool) -> u3
     } else {
         info.vkCode
     };
+    let was_pressed = pressed[key as usize];
     pressed[key as usize] = !up;
-    key
+    (key, was_pressed)
 }
 
 const LATENCY_BUCKETS: usize = 4097;
@@ -132,7 +147,7 @@ pub struct HookStats {
     pub callbacks: u64,
     pub p99_us: u64,
     pub max_us: u64,
-    /// Matching/enqueue work only, excluding downstream third-party hooks.
+    /// Matching, enqueueing and ordered Alt masking, excluding CallNextHookEx.
     pub own_p99_us: u64,
     pub own_max_us: u64,
 }
@@ -262,21 +277,46 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
     let mut measure = Measure { start: std::time::Instant::now(), local_recorded: false };
     if code >= 0 {
         let info = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
-        if info.dwExtraInfo != 0x4d4f4f4e
-            && info.flags & LLKHF_LOWER_IL_INJECTED == KBDLLHOOKSTRUCT_FLAGS(0)
-        {
-            let consume = STATE.with(|cell| {
+        if is_internal_mask(info) {
+            // Deliver this internal no-character event to Windows without
+            // invoking other remappers. Every other event follows the chain.
+            return LRESULT(0);
+        }
+        if !info.flags.contains(LLKHF_LOWER_IL_INJECTED) {
+            enum Match {
+                Forward,
+                Swallow,
+                Command {
+                    key: u32,
+                    alt: bool,
+                    was_swallowed: bool,
+                    commands: Arc<[String]>,
+                    sender: Sender<PlatformEvent>,
+                    received: std::time::Instant,
+                },
+            }
+            let matched = STATE.with(|cell| {
                 let mut value = cell.borrow_mut();
                 let Some(state) = value.as_mut() else {
-                    return false;
+                    return Match::Forward;
                 };
                 if info.vkCode >= 256 {
-                    return false;
+                    return Match::Forward;
                 }
                 let up = matches!(wparam.0 as u32, WM_KEYUP | WM_SYSKEYUP);
-                let key = record_key(&mut state.pressed, info, up);
+                let (key, was_pressed) = record_key(&mut state.pressed, info, up);
                 if up {
-                    return state.swallowed.remove(&key);
+                    return if state.swallowed.remove(&key) {
+                        Match::Swallow
+                    } else {
+                        Match::Forward
+                    };
+                }
+                let was_swallowed = state.swallowed.contains(&key);
+                if was_pressed && !was_swallowed {
+                    // The initial down reached the app, so repeats and up must
+                    // keep doing so even when modifiers change mid-press.
+                    return Match::Forward;
                 }
                 let modifiers = modifier_mask(&state.pressed);
                 if let Some(binding) = state
@@ -284,23 +324,46 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
                     .iter()
                     .find(|binding| binding.key == key && binding.modifiers == modifiers)
                 {
-                    let sent = state
-                        .sender
-                        .send(PlatformEvent::Commands {
-                            commands: binding.commands.clone(),
-                            received: std::time::Instant::now(),
-                        })
-                        .is_ok();
-                    if sent {
-                        state.swallowed.insert(key);
+                    Match::Command {
+                        key,
+                        alt: modifiers & 1 != 0,
+                        was_swallowed,
+                        commands: binding.commands.clone(),
+                        sender: state.sender.clone(),
+                        received: std::time::Instant::now(),
                     }
-                    sent
+                } else if was_swallowed {
+                    Match::Swallow
                 } else {
-                    false
+                    Match::Forward
                 }
             });
-            if consume {
-                return LRESULT(1);
+            match matched {
+                Match::Swallow => return LRESULT(1),
+                Match::Command { key, alt, was_swallowed, commands, sender, received } => {
+                    // SendInput can reenter the callback. No State borrow is
+                    // held, and masking precedes both modifier release and any
+                    // focus change caused by the queued command.
+                    if alt && !mask_alt_chord() {
+                        let _ = sender.send(PlatformEvent::HookError(
+                            "Windows refused the internal Alt mask; shortcut was not executed"
+                                .into(),
+                        ));
+                    } else if sender.send(PlatformEvent::Commands { commands, received }).is_ok() {
+                        STATE.with(|cell| {
+                            if let Some(state) = cell.borrow_mut().as_mut() {
+                                state.swallowed.insert(key);
+                            }
+                        });
+                        return LRESULT(1);
+                    }
+                    // A repeat of an already consumed down must not leak to an
+                    // app whose corresponding up will still be consumed.
+                    if was_swallowed {
+                        return LRESULT(1);
+                    }
+                }
+                Match::Forward => {}
             }
         }
     }
@@ -496,7 +559,7 @@ impl Hooks {
                     *state.borrow_mut() = Some(State {
                         bindings,
                         sender: sender.clone(),
-                        pressed: modifier_snapshot(|key| GetAsyncKeyState(key.0 as i32) < 0),
+                        pressed: keyboard_snapshot(|key| GetAsyncKeyState(key.0 as i32) < 0),
                         swallowed: HashSet::with_capacity(16),
                         pointer: pointer_thread,
                         taskbar_message: RegisterWindowMessageW(PCWSTR(
@@ -625,7 +688,7 @@ impl Hooks {
                         STATE.with(|state| {
                             if let Some(state) = state.borrow_mut().as_mut() {
                                 state.pressed =
-                                    modifier_snapshot(|key| GetAsyncKeyState(key.0 as i32) < 0);
+                                    keyboard_snapshot(|key| GetAsyncKeyState(key.0 as i32) < 0);
                             }
                         });
                         #[cfg(test)]
@@ -679,32 +742,116 @@ impl Drop for Hooks {
     }
 }
 
-/// Called by the main thread before executing an Alt binding. This prevents
-/// Windows from treating a consumed Alt chord as a bare menu activation.
-pub fn suppress_alt_menu() {
-    unsafe {
-        if GetAsyncKeyState(VK_MENU.0 as i32) < 0 {
-            let mut down = INPUT {
-                r#type: INPUT_KEYBOARD,
-                Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VK_F24, ..Default::default() } },
-            };
-            down.Anonymous.ki.dwExtraInfo = 0x4d4f4f4e;
-            let mut up = down;
-            up.Anonymous.ki.dwFlags = KEYEVENTF_KEYUP;
-            SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32);
-        }
-    }
+/// Must run inside the trigger callback, before any queued modifier release.
+fn mask_alt_chord() -> bool {
+    let input = INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: ALT_MASK,
+                dwFlags: KEYEVENTF_KEYUP,
+                dwExtraInfo: MASK_TAG,
+                ..Default::default()
+            },
+        },
+    };
+    unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) == 1 }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    static FORWARDED_F24: AtomicU64 = AtomicU64::new(0);
+    static FORWARDED_MASK: AtomicU64 = AtomicU64::new(0);
+    unsafe extern "system" fn observe_f24(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        if code >= 0 {
+            let info = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
+            if info.dwExtraInfo == MASK_TAG && info.flags.contains(LLKHF_INJECTED) {
+                FORWARDED_MASK.fetch_add(1, Ordering::Relaxed);
+            } else if info.vkCode == u32::from(VK_F24.0) {
+                FORWARDED_F24.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        unsafe { CallNextHookEx(None, code, wparam, lparam) }
+    }
+    struct ForwardObserver {
+        id: u32,
+        thread: Option<JoinHandle<()>>,
+    }
+    impl ForwardObserver {
+        fn start() -> std::result::Result<Self, Box<dyn std::error::Error>> {
+            FORWARDED_F24.store(0, Ordering::Relaxed);
+            FORWARDED_MASK.store(0, Ordering::Relaxed);
+            let (ready, receiver) = mpsc::sync_channel(1);
+            let thread = thread::spawn(move || unsafe {
+                let mut message = MSG::default();
+                let _ = PeekMessageW(&mut message, None, 0, 0, PM_NOREMOVE);
+                match SetWindowsHookExW(WH_KEYBOARD_LL, Some(observe_f24), None, 0) {
+                    Ok(hook) => {
+                        let _ = ready.send(Ok(GetCurrentThreadId()));
+                        while GetMessageW(&mut message, None, 0, 0).as_bool() {}
+                        let _ = UnhookWindowsHookEx(hook);
+                    }
+                    Err(error) => {
+                        let _ = ready.send(Err(error));
+                    }
+                }
+            });
+            Ok(Self { id: receiver.recv()??, thread: Some(thread) })
+        }
+    }
+    impl Drop for ForwardObserver {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = PostThreadMessageW(self.id, WM_QUIT, WPARAM(0), LPARAM(0));
+            }
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+    enum InputScenario {
+        Renewal,
+        Bursts,
+        Defaults,
+        KeyPairs,
+    }
     #[test]
     #[ignore = "requires an isolated interactive desktop and MOON_TESTWIN_PATH"]
     fn held_alt_shift_renewal_preserves_hkl_and_plain_trigger()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
+        modifier_language_regression(InputScenario::Renewal)
+    }
+
+    #[test]
+    #[ignore = "requires an isolated interactive desktop and MOON_TESTWIN_PATH"]
+    fn contiguous_alt_shift_chords_preserve_hkl()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        modifier_language_regression(InputScenario::Bursts)
+    }
+
+    #[test]
+    #[ignore = "requires an isolated interactive desktop and MOON_TESTWIN_PATH"]
+    fn every_default_chord_routes_exact_commands_without_native_actions()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        modifier_language_regression(InputScenario::Defaults)
+    }
+
+    #[test]
+    #[ignore = "requires an isolated interactive desktop and MOON_TESTWIN_PATH"]
+    fn key_pairs_keep_their_initial_owner_through_repeats_and_renewal()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        modifier_language_regression(InputScenario::KeyPairs)
+    }
+
+    fn modifier_language_regression(
+        scenario: InputScenario,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         use crate::platform;
         use std::time::{Duration, Instant};
+        let bursts = matches!(scenario, InputScenario::Bursts);
+        let defaults = matches!(scenario, InputScenario::Defaults);
+        let pairs = matches!(scenario, InputScenario::KeyPairs);
         fn inject(keys: &[(VIRTUAL_KEY, bool)]) -> bool {
             let inputs: Vec<_> = keys
                 .iter()
@@ -713,7 +860,12 @@ mod tests {
                     Anonymous: INPUT_0 {
                         ki: KEYBDINPUT {
                             wVk: key,
-                            dwFlags: if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) },
+                            dwFlags: (if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) })
+                                | if matches!(key, VK_LEFT | VK_RIGHT | VK_UP | VK_DOWN) {
+                                    KEYEVENTF_EXTENDEDKEY
+                                } else {
+                                    KEYBD_EVENT_FLAGS(0)
+                                },
                             ..Default::default()
                         },
                     },
@@ -723,6 +875,21 @@ mod tests {
                 SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) == inputs.len() as u32
             }
         }
+        fn helper_counter(id: WindowId, message: u32) -> std::result::Result<u64, &'static str> {
+            let mut counts = 0usize;
+            let result = unsafe {
+                SendMessageTimeoutW(
+                    platform::hwnd(id),
+                    message,
+                    WPARAM(0),
+                    LPARAM(0),
+                    SMTO_ABORTIFHUNG,
+                    1000,
+                    Some(&mut counts),
+                )
+            };
+            if result.0 == 0 { Err("helper key-count query timed out") } else { Ok(counts as u64) }
+        }
         struct Fixture {
             child: std::process::Child,
             foreground: Option<WindowId>,
@@ -730,7 +897,7 @@ mod tests {
         }
         impl Drop for Fixture {
             fn drop(&mut self) {
-                inject(&[(VK_LSHIFT, true), (VK_LMENU, true)]);
+                inject(&[(VK_OEM_MINUS, true), (VK_LSHIFT, true), (VK_LMENU, true)]);
                 if let Some((id, layout)) = self.helper {
                     unsafe {
                         let _ = PostMessageW(
@@ -754,10 +921,13 @@ mod tests {
         }) {
             return Err("stop existing moon/testwin processes before this interactive test".into());
         }
-        if modifier_mask(&modifier_snapshot(|key| unsafe { GetAsyncKeyState(key.0 as i32) < 0 }))
+        if modifier_mask(&keyboard_snapshot(|key| unsafe { GetAsyncKeyState(key.0 as i32) < 0 }))
             != 0
         {
             return Err("physical modifiers must be released before this test".into());
+        }
+        if unsafe { GetAsyncKeyState(VK_OEM_MINUS.0 as i32) } < 0 {
+            return Err("the physical minus key must be released before this test".into());
         }
         let _apartment = platform::Apartment::new()?;
         let foreground = platform::foreground();
@@ -782,35 +952,103 @@ mod tests {
             thread::sleep(Duration::from_millis(20));
         };
         platform::focus(helper)?;
+        if platform::foreground() != Some(helper) {
+            return Err("cannot activate the owned helper; no keyboard input was injected".into());
+        }
         let helper_thread = unsafe { GetWindowThreadProcessId(platform::hwnd(helper), None) };
         let initial_layout = unsafe { GetKeyboardLayout(helper_thread) };
         fixture.helper = Some((helper, initial_layout));
         let available_layouts = unsafe { GetKeyboardLayoutList(None) };
-        assert!(inject(&[(VK_LMENU, false), (VK_LSHIFT, false)]));
+        // Calibrate the counter so an older helper cannot falsely report zero.
+        helper_counter(helper, WM_CHAR)?;
+        let character_baseline = helper_counter(helper, WM_APP + 94)?;
+        if character_baseline != 1 {
+            return Err("rebuild testwin: its character-event counter did not observe the calibration message".into());
+        }
+        if bursts || defaults || pairs {
+            if available_layouts < 2 {
+                return Err("the burst regression requires two installed input layouts".into());
+            }
+            // Prove this desktop's Alt+Shift language switch is actually armed.
+            // The change and restoration are confined to the owned helper.
+            assert!(inject(&[
+                (VK_LMENU, false),
+                (VK_LSHIFT, false),
+                (VK_LSHIFT, true),
+                (VK_LMENU, true),
+            ]));
+            thread::sleep(Duration::from_millis(100));
+            let switched = unsafe { GetKeyboardLayout(helper_thread) };
+            if switched == initial_layout {
+                return Err("Alt+Shift positive control did not change the owned helper's HKL; no burst result claimed".into());
+            }
+            unsafe {
+                PostMessageW(
+                    Some(platform::hwnd(helper)),
+                    WM_INPUTLANGCHANGEREQUEST,
+                    WPARAM(0),
+                    LPARAM(initial_layout.0 as isize),
+                )?;
+            }
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while unsafe { GetKeyboardLayout(helper_thread) } != initial_layout {
+                if Instant::now() >= deadline {
+                    return Err("owned helper did not restore its original HKL".into());
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+            println!(
+                "positive control: bare Alt+Shift changed HKL {:x}->{:x}, original restored",
+                initial_layout.0 as usize, switched.0 as usize
+            );
+            if pairs {
+                assert!(inject(&[(VK_OEM_MINUS, false)]));
+                thread::sleep(Duration::from_millis(20));
+                assert_eq!(
+                    helper_counter(helper, WM_APP + 93)?,
+                    1,
+                    "initial down did not reach the helper before hook installation"
+                );
+            }
+        } else {
+            assert!(inject(&[(VK_LMENU, false), (VK_LSHIFT, false)]));
+        }
         let (sender, receiver) = mpsc::channel();
-        let hook = Hooks::start(
+        let observer = ForwardObserver::start()?;
+        let test_bindings = if defaults {
+            moon_core::config::Config::default()
+                .bindings
+                .into_iter()
+                .map(|(chord, commands)| HookBinding { chord, commands })
+                .collect()
+        } else if pairs {
+            vec![HookBinding {
+                chord: "alt+shift+oem_minus".into(),
+                commands: vec!["modified".into()],
+            }]
+        } else {
             vec![
+                HookBinding { chord: "oem_minus".into(), commands: vec!["plain".into()] },
                 HookBinding {
                     chord: "alt+shift+oem_minus".into(),
                     commands: vec!["modified".into()],
                 },
-                HookBinding { chord: "oem_minus".into(), commands: vec!["plain".into()] },
-            ],
-            sender,
-            true,
-        )?;
-        let expect = |expected: &str| -> std::result::Result<(), Box<dyn std::error::Error>> {
+            ]
+        };
+        let default_routes = test_bindings.clone();
+        let hook = Hooks::start(test_bindings, sender, true)?;
+        let expect = |expected: &[String]| -> std::result::Result<(), Box<dyn std::error::Error>> {
             let deadline = Instant::now() + Duration::from_secs(2);
             loop {
                 if Instant::now() >= deadline {
-                    return Err(format!("expected {expected} trigger was not received").into());
+                    return Err(format!("expected {expected:?} trigger was not received").into());
                 }
                 if let Ok(PlatformEvent::Commands { commands, .. }) =
                     receiver.recv_timeout(Duration::from_millis(10))
                 {
-                    if commands.first().is_none_or(|actual| actual != expected) {
+                    if commands.as_ref() != expected {
                         return Err(format!(
-                            "modifier mismatch: expected {expected}, received {commands:?}"
+                            "modifier mismatch: expected {expected:?}, received {commands:?}"
                         )
                         .into());
                     }
@@ -818,43 +1056,367 @@ mod tests {
                 }
             }
         };
-        for trial in 0..11 {
-            if trial > 0 {
-                assert!(inject(&[(VK_LMENU, false), (VK_LSHIFT, false)]));
-                let before = TEST_RENEWALS.load(Ordering::Acquire);
-                unsafe {
-                    PostThreadMessageW(hook.id, RENEW, WPARAM(0), LPARAM(0))?;
-                }
-                let deadline = Instant::now() + Duration::from_secs(2);
-                while TEST_RENEWALS.load(Ordering::Acquire) == before {
-                    if Instant::now() >= deadline {
-                        return Err("hook renewal did not complete".into());
-                    }
-                    thread::sleep(Duration::from_millis(1));
-                }
+        let modified = ["modified".to_owned()];
+        let plain = ["plain".to_owned()];
+        let renew = || -> std::result::Result<(), Box<dyn std::error::Error>> {
+            let before = TEST_RENEWALS.load(Ordering::Acquire);
+            unsafe {
+                PostThreadMessageW(hook.id, RENEW, WPARAM(0), LPARAM(0))?;
             }
-            if platform::foreground() != Some(helper) {
-                return Err("foreground left the owned helper".into());
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while TEST_RENEWALS.load(Ordering::Acquire) == before {
+                if Instant::now() >= deadline {
+                    return Err("hook renewal did not complete".into());
+                }
+                thread::sleep(Duration::from_millis(1));
             }
-            assert!(inject(&[(VK_OEM_MINUS, false), (VK_OEM_MINUS, true)]));
-            expect("modified")?;
-            suppress_alt_menu();
-            assert!(inject(&[(VK_LSHIFT, true), (VK_LMENU, true)]));
-            thread::sleep(Duration::from_millis(40));
+            Ok(())
+        };
+        if pairs {
+            let app_owned_repeat = [
+                (VK_LMENU, false),
+                (VK_LSHIFT, false),
+                (VK_OEM_MINUS, false),
+                (VK_LSHIFT, true),
+                (VK_LMENU, true),
+                (VK_OEM_MINUS, true),
+            ];
+            // The initial down preceded installation; modifiers cannot transfer
+            // its repeat/up ownership away from the application.
+            assert!(inject(&app_owned_repeat));
+            thread::sleep(Duration::from_millis(20));
             assert_eq!(
-                unsafe { GetKeyboardLayout(helper_thread) },
-                initial_layout,
-                "Alt+Shift changed HKL in trial {trial}"
+                helper_counter(helper, WM_APP + 93)?,
+                2 | (1 << 32),
+                "held-at-install key lost its forwarded repeat/up"
             );
-            assert!(inject(&[(VK_OEM_MINUS, false), (VK_OEM_MINUS, true)]));
-            expect("plain")?;
+            assert!(
+                !receiver.try_iter().any(|event| matches!(event, PlatformEvent::Commands { .. })),
+                "an app-owned press became a shortcut"
+            );
+
+            // Forwarded input retains normal Windows language-switch behavior.
+            // Each consumed phase must preserve its own immediate HKL baseline.
+            let consumed_layout = unsafe { GetKeyboardLayout(helper_thread) };
+            // A consumed down stays consumed across renewal and modifier release,
+            // while repetition of the same chord continues to execute normally.
+            assert!(inject(&[(VK_LMENU, false), (VK_LSHIFT, false), (VK_OEM_MINUS, false)]));
+            expect(&modified)?;
+            renew()?;
+            assert!(inject(&[(VK_OEM_MINUS, false)]));
+            expect(&modified)?;
+            assert!(inject(&[
+                (VK_LSHIFT, true),
+                (VK_LMENU, true),
+                (VK_OEM_MINUS, false),
+                (VK_OEM_MINUS, true)
+            ]));
+            thread::sleep(Duration::from_millis(20));
+            assert_eq!(
+                helper_counter(helper, WM_APP + 93)?,
+                2 | (1 << 32),
+                "consumed press leaked after renewal or modifier release"
+            );
+            assert_eq!(unsafe { GetKeyboardLayout(helper_thread) }, consumed_layout);
+
+            // Renewal must retain a forwarded, still-held nonmodifier key.
+            assert!(inject(&[(VK_OEM_MINUS, false)]));
+            thread::sleep(Duration::from_millis(20));
+            renew()?;
+            assert!(inject(&app_owned_repeat));
+            thread::sleep(Duration::from_millis(20));
+            assert_eq!(
+                helper_counter(helper, WM_APP + 93)?,
+                4 | (2 << 32),
+                "held-at-renewal key lost its forwarded repeat/up"
+            );
+            assert!(
+                !receiver.try_iter().any(|event| matches!(event, PlatformEvent::Commands { .. })),
+                "an app-owned or unmatched repeat queued a command"
+            );
+            let next_layout = unsafe { GetKeyboardLayout(helper_thread) };
+            assert!(inject(&[
+                (VK_LMENU, false),
+                (VK_LSHIFT, false),
+                (VK_OEM_MINUS, false),
+                (VK_OEM_MINUS, true),
+                (VK_LSHIFT, true),
+                (VK_LMENU, true)
+            ]));
+            expect(&modified)?;
+            thread::sleep(Duration::from_millis(20));
+            assert_eq!(unsafe { GetKeyboardLayout(helper_thread) }, next_layout);
+            assert!(
+                unsafe { GetAsyncKeyState(VK_OEM_MINUS.0 as i32) } >= 0,
+                "trigger remained logically held"
+            );
+            assert_eq!(
+                modifier_mask(&keyboard_snapshot(|key| unsafe {
+                    GetAsyncKeyState(key.0 as i32) < 0
+                })),
+                0
+            );
+            println!(
+                "key-pair ownership: held-at-install and held-at-renewal forwarded 4 downs/2 ups; consumed repeats stayed hidden across renewal and modifier release; same-chord repeat and next press routed3commands; consumed phases preserved their HKL"
+            );
+        } else if defaults {
+            let menu_flags = || -> windows::core::Result<GUITHREADINFO_FLAGS> {
+                let mut info = GUITHREADINFO {
+                    cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+                    ..Default::default()
+                };
+                unsafe {
+                    GetGUIThreadInfo(helper_thread, &mut info)?;
+                }
+                Ok(info.flags & (GUI_INMENUMODE | GUI_POPUPMENUMODE | GUI_SYSTEMMENUMODE))
+            };
+            let initial_menu = menu_flags()?;
+            assert_eq!(
+                initial_menu,
+                GUITHREADINFO_FLAGS(0),
+                "owned helper starts in native menu mode"
+            );
+            for (index, binding) in default_routes.iter().enumerate() {
+                if platform::foreground() != Some(helper) {
+                    return Err("foreground left the owned helper".into());
+                }
+                // Independent physical-key oracle for the stock configuration;
+                // do not use the hook compiler to generate its own test inputs.
+                let parts: Vec<_> = binding.chord.split('+').collect();
+                let key_name = parts.last().ok_or("empty default chord")?;
+                let key = VIRTUAL_KEY(match *key_name {
+                    "left" => 0x25,
+                    "up" => 0x26,
+                    "right" => 0x27,
+                    "down" => 0x28,
+                    "space" => 0x20,
+                    "tab" => 0x09,
+                    "oem_plus" => 0xbb,
+                    "oem_minus" => 0xbd,
+                    "oem_question" => 0xbf,
+                    value if value.len() == 1 && value.as_bytes()[0].is_ascii_alphanumeric() => {
+                        u16::from(value.as_bytes()[0].to_ascii_uppercase())
+                    }
+                    _ => {
+                        return Err(
+                            format!("add an independent input mapping for {key_name}").into()
+                        );
+                    }
+                });
+                let modifiers: Vec<_> = parts[..parts.len() - 1]
+                    .iter()
+                    .map(|part| match *part {
+                        "alt" => Ok(VK_LMENU),
+                        "shift" => Ok(VK_LSHIFT),
+                        "ctrl" => Ok(VK_LCONTROL),
+                        _ => Err("unexpected default modifier"),
+                    })
+                    .collect::<std::result::Result<_, _>>()?;
+                let mut chord: Vec<_> = modifiers.iter().map(|key| (*key, false)).collect();
+                chord.push((key, false));
+                if index % 2 == 0 {
+                    chord.push((key, true));
+                }
+                chord.extend(modifiers.iter().rev().map(|key| (*key, true)));
+                if index % 2 == 1 {
+                    chord.push((key, true));
+                }
+                assert!(inject(&chord));
+                expect(&binding.commands)?;
+                thread::sleep(Duration::from_millis(20));
+                assert_eq!(
+                    platform::foreground(),
+                    Some(helper),
+                    "{} changed foreground",
+                    binding.chord
+                );
+                assert_eq!(
+                    unsafe { GetKeyboardLayout(helper_thread) },
+                    initial_layout,
+                    "{} changed HKL",
+                    binding.chord
+                );
+                assert_eq!(
+                    menu_flags()?,
+                    initial_menu,
+                    "{} activated a native menu",
+                    binding.chord
+                );
+                assert_eq!(
+                    modifier_mask(&keyboard_snapshot(|key| unsafe {
+                        GetAsyncKeyState(key.0 as i32) < 0
+                    })),
+                    0,
+                    "{} left a modifier pressed",
+                    binding.chord
+                );
+            }
+            println!(
+                "{}/{} default chords routed exact payloads; foreground, HKL and menu unchanged; all modifiers released; no daemon effects executed",
+                default_routes.len(),
+                default_routes.len()
+            );
+        } else if bursts {
+            for trial in 0..128 {
+                if platform::foreground() != Some(helper) {
+                    return Err("foreground left the owned helper".into());
+                }
+                let mut chord = [
+                    (VK_LMENU, false),
+                    (VK_LSHIFT, false),
+                    (VK_OEM_MINUS, false),
+                    (VK_OEM_MINUS, true),
+                    (VK_LSHIFT, true),
+                    (VK_LMENU, true),
+                ];
+                if trial % 2 == 1 {
+                    chord[3..].rotate_left(1);
+                }
+                assert!(inject(&chord));
+                // Model a busy main thread: all releases precede command intake.
+                thread::sleep(Duration::from_millis(20));
+                expect(&modified)?;
+                thread::sleep(Duration::from_millis(20));
+                let actual = unsafe { GetKeyboardLayout(helper_thread) };
+                let counts = helper_counter(helper, WM_APP + 93)?;
+                assert_eq!(
+                    helper_counter(helper, WM_APP + 94)?,
+                    character_baseline,
+                    "mask generated an application character message"
+                );
+                if trial == 0 || actual != initial_layout {
+                    println!(
+                        "trial {trial}: helper trigger events down={}, up={}",
+                        counts as u32,
+                        counts >> 32
+                    );
+                }
+                if actual != initial_layout {
+                    println!("hook timing: {}", serde_json::to_string(&stats())?);
+                    return Err(format!(
+                        "contiguous Alt+Shift chord changed HKL in trial {trial}: {:x}->{:x}",
+                        initial_layout.0 as usize, actual.0 as usize
+                    )
+                    .into());
+                }
+                assert!(inject(&[(VK_OEM_MINUS, false), (VK_OEM_MINUS, true)]));
+                expect(&plain)?;
+            }
+            assert_eq!(
+                helper_counter(helper, WM_APP + 93)?,
+                0,
+                "consumed triggers leaked to the helper"
+            );
+            assert_eq!(
+                helper_counter(helper, WM_APP + 94)?,
+                character_baseline,
+                "mask generated an application character message"
+            );
+            println!(
+                "128 contiguous chords:256/256 triggers, unchanged HKL; hook timing: {}",
+                serde_json::to_string(&stats())?
+            );
+        } else {
+            for trial in 0..11 {
+                if trial > 0 {
+                    assert!(inject(&[(VK_LMENU, false), (VK_LSHIFT, false)]));
+                    let before = TEST_RENEWALS.load(Ordering::Acquire);
+                    unsafe {
+                        PostThreadMessageW(hook.id, RENEW, WPARAM(0), LPARAM(0))?;
+                    }
+                    let deadline = Instant::now() + Duration::from_secs(2);
+                    while TEST_RENEWALS.load(Ordering::Acquire) == before {
+                        if Instant::now() >= deadline {
+                            return Err("hook renewal did not complete".into());
+                        }
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                }
+                if platform::foreground() != Some(helper) {
+                    return Err("foreground left the owned helper".into());
+                }
+                assert!(inject(&[(VK_OEM_MINUS, false), (VK_OEM_MINUS, true)]));
+                expect(&modified)?;
+                assert!(inject(&[(VK_LSHIFT, true), (VK_LMENU, true)]));
+                thread::sleep(Duration::from_millis(40));
+                assert_eq!(
+                    unsafe { GetKeyboardLayout(helper_thread) },
+                    initial_layout,
+                    "Alt+Shift changed HKL in trial {trial}"
+                );
+                assert!(inject(&[(VK_OEM_MINUS, false), (VK_OEM_MINUS, true)]));
+                expect(&plain)?;
+            }
+            println!(
+                "initially held modifiers +10 renewals:22/22 triggers; HKL={:x}, available_layouts={available_layouts}",
+                initial_layout.0 as usize
+            );
+        }
+        assert_eq!(
+            FORWARDED_MASK.load(Ordering::Relaxed),
+            0,
+            "internal masks reached downstream hooks"
+        );
+        assert_eq!(
+            FORWARDED_F24.load(Ordering::Relaxed),
+            0,
+            "internal masks became real F24 events"
+        );
+        assert!(inject(&[(VK_F24, false), (VK_F24, true)]));
+        thread::sleep(Duration::from_millis(20));
+        assert_eq!(
+            FORWARDED_F24.load(Ordering::Relaxed),
+            2,
+            "ordinary F24 must reach downstream hooks"
+        );
+        assert_eq!(
+            helper_counter(helper, WM_APP + 93)?,
+            if pairs { 4 | (2 << 32) } else { 0 },
+            "trigger-pair ownership changed"
+        );
+        if !pairs {
+            assert_eq!(
+                helper_counter(helper, WM_APP + 94)?,
+                character_baseline,
+                "unexpected application character message"
+            );
+        }
+        for event in receiver.try_iter() {
+            match event {
+                PlatformEvent::Commands { .. } => {
+                    return Err("an extra command was queued after the expected routes".into());
+                }
+                PlatformEvent::HookError(error) => return Err(error.into()),
+                _ => {}
+            }
         }
         println!(
-            "initially held modifiers +10 renewals:22/22 triggers; HKL={:x}, available_layouts={available_layouts}",
-            initial_layout.0 as usize
+            "downstream ordinary F24=2; internal mask leaks=0; trigger-pair ownership verified"
         );
         drop(hook);
+        drop(observer);
         Ok(())
+    }
+
+    #[test]
+    fn only_the_exact_internal_injected_keyup_bypasses_other_hooks() {
+        let mask = KBDLLHOOKSTRUCT {
+            vkCode: u32::from(ALT_MASK.0),
+            flags: LLKHF_INJECTED | LLKHF_UP,
+            dwExtraInfo: MASK_TAG,
+            ..Default::default()
+        };
+        assert!(is_internal_mask(&mask));
+        for ordinary in [
+            KBDLLHOOKSTRUCT { vkCode: u32::from(VK_F24.0), ..mask },
+            KBDLLHOOKSTRUCT { flags: LLKHF_UP, ..mask },
+            KBDLLHOOKSTRUCT { flags: LLKHF_INJECTED, ..mask },
+            KBDLLHOOKSTRUCT { flags: mask.flags | LLKHF_LOWER_IL_INJECTED, ..mask },
+            KBDLLHOOKSTRUCT { scanCode: 1, ..mask },
+            KBDLLHOOKSTRUCT { dwExtraInfo: 0, ..mask },
+        ] {
+            assert!(!is_internal_mask(&ordinary));
+        }
     }
 
     #[test]
@@ -872,7 +1434,7 @@ mod tests {
             for event_key in [generic, side] {
                 // Windows reports both the generic and the actual side as held
                 // during renewal. Only the side may survive in our snapshot.
-                let mut pressed = modifier_snapshot(|key| key == generic || key == side);
+                let mut pressed = keyboard_snapshot(|key| key == generic || key == side);
                 assert_eq!(modifier_mask(&pressed), expected_mask);
                 assert!(!pressed[generic.0 as usize]);
                 let event = KBDLLHOOKSTRUCT {
@@ -885,7 +1447,7 @@ mod tests {
                     },
                     ..Default::default()
                 };
-                assert_eq!(record_key(&mut pressed, &event, true), u32::from(side.0));
+                assert_eq!(record_key(&mut pressed, &event, true).0, u32::from(side.0));
                 assert_eq!(modifier_mask(&pressed), 0);
             }
         }
@@ -893,7 +1455,7 @@ mod tests {
 
     #[test]
     fn releasing_one_modifier_side_preserves_the_other_side() {
-        let mut pressed = modifier_snapshot(|key| key == VK_LMENU || key == VK_RMENU);
+        let mut pressed = keyboard_snapshot(|key| key == VK_LMENU || key == VK_RMENU);
         for (side, expected_mask) in [(VK_LMENU, 1), (VK_RMENU, 0)] {
             record_key(
                 &mut pressed,

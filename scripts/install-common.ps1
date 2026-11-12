@@ -21,6 +21,9 @@ public static class MoonInstallNative {
     [DllImport("advapi32.dll")] static extern IntPtr GetSidSubAuthority(IntPtr sid,uint index);
     [DllImport("advapi32.dll")] static extern uint GetLengthSid(IntPtr sid);
     [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+    [DllImport("kernel32.dll",SetLastError=true)] static extern IntPtr OpenProcess(uint access,bool inherit,uint processId);
+    [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool QueryFullProcessImageName(IntPtr process,uint flags,StringBuilder path,ref uint length);
+    [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetProcessTimes(IntPtr process,out long created,out long exited,out long kernel,out long user);
     [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
     [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
     [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern IntPtr LoadLibraryEx(string path,IntPtr file,uint flags);
@@ -31,6 +34,8 @@ public static class MoonInstallNative {
     [DllImport("kernel32.dll")] static extern bool FreeLibrary(IntPtr module);
     [DllImport("user32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern IntPtr SendMessageTimeout(IntPtr window,uint message,IntPtr wparam,string lparam,uint flags,uint timeout,out UIntPtr result);
     static Exception Error() { return new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error()); }
+    public sealed class ProcessIdentityInfo {public string Path; public long Birth;}
+    public static ProcessIdentityInfo ProcessIdentity(uint processId) {var process=OpenProcess(0x1000,false,processId);if(process==IntPtr.Zero)throw Error();try{var path=new StringBuilder(32768);uint length=(uint)path.Capacity;long created,exited,kernel,user;if(!QueryFullProcessImageName(process,0,path,ref length))throw Error();if(!GetProcessTimes(process,out created,out exited,out kernel,out user))throw Error();return new ProcessIdentityInfo{Path=path.ToString(),Birth=created};}finally{CloseHandle(process);}}
     public static string PipeName() { using(var identity=WindowsIdentity.GetCurrent()) { Statistics value; uint length; if(!StatisticsOf(identity.Token,10,out value,(uint)Marshal.SizeOf(typeof(Statistics)),out length)) throw Error(); return String.Format("moon-v1-{0:x8}-{1:x8}",unchecked((uint)value.Authentication.High),value.Authentication.Low); } }
     public static uint TokenWord(int kind) { using(var identity=WindowsIdentity.GetCurrent()) { var memory=Marshal.AllocHGlobal(4); try {uint length; if(!GetTokenInformation(identity.Token,kind,memory,4,out length)) throw Error(); return unchecked((uint)Marshal.ReadInt32(memory));} finally {Marshal.FreeHGlobal(memory);} } }
     public static uint Integrity() { using(var identity=WindowsIdentity.GetCurrent()) {uint length;GetTokenInformation(identity.Token,25,IntPtr.Zero,0,out length);var memory=Marshal.AllocHGlobal((int)length);try {if(!GetTokenInformation(identity.Token,25,memory,length,out length)) throw Error();var sid=Marshal.ReadIntPtr(memory);var count=Marshal.ReadByte(GetSidSubAuthorityCount(sid));return unchecked((uint)Marshal.ReadInt32(GetSidSubAuthority(sid,(uint)(count-1))));}finally{Marshal.FreeHGlobal(memory);}} }
@@ -42,6 +47,53 @@ public static class MoonInstallNative {
 }
 
 function Get-MoonInstallDirectory { Join-Path $env:ProgramW6432 'moon' }
+function Get-MoonStartupLinks {
+    param([string[]]$Programs,[string]$Directory=([Environment]::GetFolderPath('Startup')))
+    if (!(Test-Path -LiteralPath $Directory)) {return}
+    $shell=New-Object -ComObject WScript.Shell
+    try {
+        foreach ($file in @(Get-ChildItem -LiteralPath $Directory -Filter '*.lnk')) {
+            $hash=(Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
+            $shortcut=$shell.CreateShortcut($file.FullName)
+            try {
+                if (!$shortcut.TargetPath) {continue}
+                $target=[Environment]::ExpandEnvironmentVariables($shortcut.TargetPath)
+                $program=[IO.Path]::GetFileName($target).ToLowerInvariant()
+                if ($Programs -notcontains $program) {continue}
+                $target=[IO.Path]::GetFullPath($target)
+                if ((Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash -ne $hash) {throw 'A startup shortcut changed while its launch information was read.'}
+                [pscustomobject]@{original=$file.FullName;program=$program;target=$target;arguments=[string]$shortcut.Arguments;working_directory=[Environment]::ExpandEnvironmentVariables([string]$shortcut.WorkingDirectory);sha256=$hash}
+            } finally {[void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shortcut)}
+        }
+    } finally {[void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell)}
+}
+function Get-MoonProcessLaunch {
+    param($Process,[object[]]$StartupLinks=@())
+    # Limited-query access remains available when WMI withholds UIAccess paths.
+    # Capture path and creation time from one process handle to bind the PID.
+    $identity=[MoonInstallNative]::ProcessIdentity([uint32]$Process.ProcessId)
+    $path=[IO.Path]::GetFullPath($identity.Path)
+    if ([IO.Path]::GetFileName($path) -ine $Process.Name -or ($Process.ExecutablePath -and ![string]::Equals([IO.Path]::GetFullPath($Process.ExecutablePath),$path,[StringComparison]::OrdinalIgnoreCase))) {throw 'The previous desktop process identity changed during handover preflight.'}
+    $source='process_command_line'; $shortcutPath=$null
+    $workingDirectory=[IO.Path]::GetDirectoryName($path)
+    if ($Process.CommandLine) {
+        if ($Process.CommandLine -notmatch '^(?:"[^"]*"|\S+)\s*(.*)$') {throw "Cannot safely preserve launch arguments for $($Process.Name)."}
+        $arguments=$Matches[1]
+    } else {
+        $matched=@($StartupLinks | Where-Object {[string]::Equals($_.target,$path,[StringComparison]::OrdinalIgnoreCase)})
+        if ($matched.Count -ne 1) {throw "Cannot safely preserve launch arguments for $($Process.Name): expected one startup shortcut with the exact running image path."}
+        $shortcut=$matched[0]
+        if ((Get-FileHash -LiteralPath $shortcut.original -Algorithm SHA256).Hash -ne $shortcut.sha256) {throw 'The matching startup shortcut changed after preflight.'}
+        $source='startup_shortcut'; $shortcutPath=$shortcut.original
+        $arguments=$shortcut.arguments
+        if ($shortcut.working_directory) {$workingDirectory=$shortcut.working_directory}
+    }
+    [pscustomobject]@{name=$Process.Name.ToLowerInvariant();path=$path;arguments=$arguments;working_directory=$workingDirectory;process_id=$Process.ProcessId;process_birth=$identity.Birth;launch_source=$source;startup_shortcut=$shortcutPath}
+}
+function Assert-MoonProcessIdentity($Expected) {
+    $identity=[MoonInstallNative]::ProcessIdentity([uint32]$Expected.process_id)
+    if ($identity.Birth -ne $Expected.process_birth -or ![string]::Equals($identity.Path,$Expected.path,[StringComparison]::OrdinalIgnoreCase)) {throw 'A captured desktop process changed identity; it was not stopped.'}
+}
 function Read-MoonPathValue([Microsoft.Win32.RegistryKey]$Key) {
     $names=@()
     if ($Key) {$names=@($Key.GetValueNames() | Where-Object {$_ -ieq 'Path'} | Select-Object -First 1)}
@@ -249,8 +301,47 @@ function Assert-MoonOwnedTask($Task,$State,[string]$Target) {
     if ($principal -ne $State.owner_sid) { throw 'Unexpected startup task user.' }
 }
 function Get-MoonLayoutFingerprint {
-    $placements=@(Invoke-MoonRpc query windows)
-    (@($placements | Sort-Object id | ForEach-Object { '{0}:{1}:{2},{3},{4},{5}' -f $_.id,$_.visible,$_.rect.x,$_.rect.y,$_.rect.width,$_.rect.height }) -join '|')
+    param($World,[object[]]$Placements)
+    if (!$PSBoundParameters.ContainsKey('World')) {$World=Invoke-MoonRpc query world}
+    if (!$PSBoundParameters.ContainsKey('Placements')) {$Placements=@(Invoke-MoonRpc query windows)}
+    # Preserve tree child order, but normalize unordered maps and window lists.
+    # Revisions, process lifetimes and changing titles are not layout semantics.
+    $state=[ordered]@{
+        focused=$World.focused
+        active_monitor=$World.active_monitor
+        active=@($World.active.PSObject.Properties | Sort-Object Name | ForEach-Object {[ordered]@{monitor=$_.Name;workspace=$_.Value}})
+        workspaces=@($World.workspaces | Sort-Object id | ForEach-Object {[ordered]@{id=$_.id;monitor=$_.monitor;tree=$_.tree;focused=$_.focused}})
+        windows=@($World.windows.PSObject.Properties | Sort-Object Name | ForEach-Object {[ordered]@{id=$_.Name;workspace=$_.Value.workspace;floating=$_.Value.floating;fullscreen=$_.Value.fullscreen;suspended=$_.Value.suspended;floating_rect=$_.Value.floating_rect}})
+        placements=@($Placements | Sort-Object id | ForEach-Object {[ordered]@{id=$_.id;visible=$_.visible;rect=$_.rect;floating=$_.floating;fullscreen=$_.fullscreen}})
+    }
+    $state | ConvertTo-Json -Depth 100 -Compress
+}
+function Get-MoonUpgradeSnapshot {
+    param([string]$JournalPath,[uint32]$ProcessId,[int]$TimeoutMilliseconds=5000)
+    $identity=[MoonInstallNative]::ProcessIdentity($ProcessId)
+    $until=[DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
+    $last='The journal checkpoint has not caught up with the current layout.'
+    do {
+        try {
+            $before=Invoke-MoonRpc query world
+            $layout=Get-MoonLayoutFingerprint -World $before
+            # The writer publishes by atomic rename; preserve delete-sharing
+            # while reading one immutable opened version of the journal.
+            $stream=[IO.FileStream]::new($JournalPath,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+            $memory=[IO.MemoryStream]::new()
+            try {
+                if ($stream.Length -gt 16777216) {throw 'Recovery journal exceeds 16 MiB.'}
+                $stream.CopyTo($memory); $bytes=$memory.ToArray()
+            } finally {$memory.Dispose(); $stream.Dispose()}
+            $journal=([Text.UTF8Encoding]::new($false,$true)).GetString($bytes) | ConvertFrom-Json
+            $after=Invoke-MoonRpc query world
+            if ($journal.version -eq 1 -and $journal.owner -eq $ProcessId -and $journal.owner_birth -eq $identity.Birth -and $before.revision -eq $after.revision -and $journal.world.revision -eq $after.revision) {
+                return [pscustomobject]@{layout=$layout;journal=$bytes;revision=$after.revision}
+            }
+        } catch {$last=$_.Exception.Message}
+        Start-Sleep -Milliseconds 50
+    } while ([DateTime]::UtcNow -lt $until)
+    throw "Cannot capture a consistent upgrade recovery checkpoint; the executable was not replaced. $last"
 }
 
 function New-MoonTaskAction([string]$Target,[string]$Arguments='start --background') {

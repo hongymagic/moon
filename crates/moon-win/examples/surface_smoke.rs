@@ -85,6 +85,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         runtime::pump(0);
     }
     let after_updates = runtime::resource_stats()?;
+    let pixels_after_updates = surfaces.surface_pixel_bytes();
+    // Let outstanding composition work settle before adding the provider worker,
+    // so the burst's retained memory is measured independently of provider startup.
+    let settling = Instant::now();
+    while settling.elapsed() < Duration::from_secs(1) {
+        if !runtime::pump(20) {
+            break;
+        }
+    }
+    let settled_updates = runtime::resource_stats()?;
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let mut providers = Providers::new();
@@ -116,7 +126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .transpose()?;
     println!(
         "{}",
-        serde_json::json!({"surfaces_rendered": true, "surface_pixel_bytes_before": pixels_before, "surface_pixel_bytes_after": surfaces.surface_pixel_bytes(), "threads_before_draw": threads_before_draw, "threads_after_draw": threads_after_draw, "threads_final": thread_count()?, "bar": world.config.bar.enabled, "borders": world.config.borders.enabled, "backend": surfaces.backend(), "monitors": world.monitors.len(), "windows": world.windows.len(), "seconds": seconds, "ready_ms": ready_ms, "update_count": updates, "resize": resize, "render_median_ms": render_ms[updates / 2], "render_p99_ms": render_ms[(updates * 99).div_ceil(100) - 1], "idle_cpu_one_core_percent": idle_cpu_one_core_percent, "before_updates": before_updates, "after_updates": after_updates, "resources": runtime::resource_stats()?})
+        serde_json::json!({"surfaces_rendered": true, "surface_pixel_bytes_before": pixels_before, "surface_pixel_bytes_after_updates": pixels_after_updates, "surface_pixel_bytes_after": surfaces.surface_pixel_bytes(), "threads_before_draw": threads_before_draw, "threads_after_draw": threads_after_draw, "threads_final": thread_count()?, "bar": world.config.bar.enabled, "borders": world.config.borders.enabled, "backend": surfaces.backend(), "monitors": world.monitors.len(), "windows": world.windows.len(), "seconds": seconds, "ready_ms": ready_ms, "update_count": updates, "resize": resize, "render_median_ms": render_ms[updates / 2], "render_p99_ms": render_ms[(updates * 99).div_ceil(100) - 1], "idle_cpu_one_core_percent": idle_cpu_one_core_percent, "before_updates": before_updates, "after_updates": after_updates, "settled_updates": settled_updates, "resources": runtime::resource_stats()?})
     );
     Ok(())
 }

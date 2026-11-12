@@ -38,6 +38,32 @@ References: [BeginDeferWindowPos](https://learn.microsoft.com/en-us/windows/win3
 [SetWindowPos](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowpos)
 and [DwmFlush's caller-specific limits](https://learn.microsoft.com/en-us/windows/win32/api/dwmapi/nf-dwmapi-dwmflush).
 
+## Repaint-flag experiments
+
+Two later full-pipeline comparisons each used 128 real hook-driven resize chords
+and eight owned helpers, with the bar and borders enabled. Each pair used the
+same candidate; the two pairs were recorded at different development stages and
+should not be compared to each other as an isolated causal experiment.
+
+| Pair | Placement flags | External key-to-placement median | p99 | Working set after idle |
+|---|---|---:|---:|---:|
+| Defer erase | Default | 14.575 ms | 47.200 ms | 59,097,088 bytes |
+| Defer erase | Add `SWP_DEFERERASE` | 13.860 ms | 38.025 ms | 48,390,144 bytes |
+| Copy bits | Default | 14.415 ms | 40.263 ms | 48,586,752 bytes |
+| Copy bits | Add `SWP_NOCOPYBITS` | 11.506 ms | 36.181 ms | 53,936,128 bytes |
+
+Neither flag met the median-under-10-ms and p99-under-30-ms placement budgets.
+The no-copy variant also exceeded the 50-MB working-set limit. Neither received
+cross-application repaint/flicker acceptance, so both temporary environment
+switches were removed and the normal flag set remains unchanged. Raw records:
+`target/placement-ab-20261112/defer-{0,1}.json` and
+`target/final-validation-20261112/nocopy-{0,1}.json`.
+
+[SetWindowPos](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowpos)
+defines `SWP_DEFERERASE` as suppressing `WM_SYNCPAINT` and `SWP_NOCOPYBITS` as
+discarding the previously saved client-area contents after resize. These
+experiments did not use `SWP_NOREDRAW` or suppress `WM_WINDOWPOSCHANGING`.
+
 ## Installed WinUI 3 test candidate
 
 PowerToys Settings 0.102.3101.0 is installed at
@@ -47,9 +73,13 @@ sets `UseWinUI`, uses the Windows App SDK and builds into `WinUI3Apps`; the app
 imports `Microsoft.UI.Xaml`.
 [Project source](https://github.com/microsoft/PowerToys/blob/main/src/settings-ui/Settings.UI/PowerToys.Settings.csproj).
 
-A later native test can open the dashboard without editing a setting. A launch
-without runner arguments delegates through PowerToys and exits, so the test must
-identify the newly created Settings window rather than assuming the launcher's
-PID is the UI process. Cleanup must preserve existing PowerToys processes.
+A later test found that the current elevated PowerToys runner also launches its
+Settings window elevated. That owned window was closed through the verified
+Glaze container after the unsigned test deferred its privileged scenario; the
+existing runner survived. A launch without runner arguments delegates through
+PowerToys and exits, so the actual UI PID must be identified independently.
 [Launch behavior](https://github.com/microsoft/PowerToys/blob/main/src/settings-ui/Settings.UI/SettingsXAML/App.xaml.cs).
-This inventory is not a WinUI 3 window-management acceptance pass.
+The subsequent medium-integrity Paint scenario provides the actual WinUI 3
+window-management and three-application focus evidence in
+[application verification](validation-applications.md); elevated Settings remains
+part of installed S8 verification.

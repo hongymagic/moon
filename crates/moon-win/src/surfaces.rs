@@ -827,6 +827,48 @@ impl Drop for Drawing {
     }
 }
 
+struct NativeEdge {
+    process_id: u32,
+    original: u32,
+    current: u32,
+}
+impl NativeEdge {
+    fn owns(&self, id: WindowId) -> bool {
+        self.process_id != 0 && crate::platform::process_id(id) == self.process_id
+    }
+    fn capture(id: WindowId, process_id: u32) -> Option<Self> {
+        let mut edge = Self { process_id, original: 0xffff_ffff, current: 0xffff_ffff };
+        if !edge.owns(id) {
+            return None;
+        }
+        unsafe {
+            // BORDER_COLOR is documented for Set only. Preserve a readable
+            // original when supported; otherwise restore Windows' default.
+            let mut color = 0u32;
+            if DwmGetWindowAttribute(
+                crate::platform::hwnd(id),
+                DWMWA_BORDER_COLOR,
+                (&mut color as *mut u32).cast(),
+                size_of::<u32>() as u32,
+            )
+            .is_ok()
+            {
+                edge.original = color;
+            }
+        }
+        edge.current = edge.original;
+        edge.owns(id).then_some(edge)
+    }
+    fn apply(&mut self, id: WindowId, color: u32) -> bool {
+        if self.owns(id) && crate::platform::set_border_color(id, Some(color)).is_ok() {
+            self.current = color;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 /// Keep this on the message-loop thread, dropping it before COM is uninitialized.
 pub struct Surfaces {
     bars: BTreeMap<MonitorId, Canvas>,
@@ -835,7 +877,7 @@ pub struct Surfaces {
     commands: Arc<Mutex<Vec<String>>>,
     previous: Option<Scene>,
     _tray: Tray,
-    native_edges: BTreeMap<WindowId, (u32, u32)>,
+    native_edges: BTreeMap<WindowId, NativeEdge>,
 }
 impl Surfaces {
     /// Nominal RGBA surface pixels, excluding compositor buffers, caches and other process memory.
@@ -881,26 +923,44 @@ impl Surfaces {
             Err(_) => {
                 // Recreate the entire shared device after device loss. Window drop
                 // releases AppBar reservations before replacement windows register.
+                // Invalidate before the fallible device creation: even if that
+                // fails, the next attempt must redraw all discarded canvases.
+                self.previous = None;
                 self.bars.clear();
                 self.borders.clear();
                 self.graphics = Graphics::new()?;
-                self.previous = None;
                 self.render(world, scene)
             }
         }
     }
     fn update_native_edges(&mut self, world: &World, system_theme: Option<&str>) {
-        self.native_edges.retain(|id, (original, _)| {
-            if world.windows.contains_key(id) {
+        self.native_edges.retain(|id, edge| {
+            if !edge.owns(*id) {
+                return false;
+            }
+            if world.windows.get(id).is_some_and(|window| window.info.process_id == edge.process_id)
+            {
                 true
             } else {
-                let _ = crate::platform::set_border_color(*id, Some(*original));
+                if edge.current != edge.original {
+                    edge.apply(*id, edge.original);
+                }
                 false
             }
         });
         for (id, window) in &world.windows {
+            if crate::platform::process_id(*id) != window.info.process_id {
+                continue;
+            }
+            if !self.native_edges.contains_key(id) {
+                let Some(edge) = NativeEdge::capture(*id, window.info.process_id) else {
+                    continue;
+                };
+                self.native_edges.insert(*id, edge);
+            }
+            let edge = self.native_edges.get_mut(id).expect("captured native edge");
             let desired = if !world.config.borders.enabled || world.paused || window.suspended {
-                self.native_edges.get(id).map(|(original, _)| *original).unwrap_or(0xffff_ffff)
+                edge.original
             } else if window.fullscreen
                 || world.native_fullscreen.is_some_and(|(fullscreen, _)| fullscreen == *id)
             {
@@ -921,24 +981,30 @@ impl Surfaces {
             } else {
                 0xffff_fffe
             };
-            let entry = self.native_edges.entry(*id).or_insert_with(|| {
-                let mut original = 0xffff_ffffu32;
-                unsafe {
-                    let _ = DwmGetWindowAttribute(
-                        crate::platform::hwnd(*id),
-                        DWMWA_BORDER_COLOR,
-                        (&mut original as *mut u32).cast(),
-                        size_of::<u32>() as u32,
-                    );
-                }
-                (original, original)
-            });
-            if entry.1 != desired && crate::platform::set_border_color(*id, Some(desired)).is_ok() {
-                entry.1 = desired;
+            if edge.current != desired {
+                edge.apply(*id, desired);
             }
         }
     }
     fn render(&mut self, world: &World, scene: Scene) -> Result<()> {
+        // Border scenes contain absolute ring rectangles, not monitor bounds.
+        // A bounds change can require a new canvas even when those rings match.
+        let changed = self.previous.as_ref() != Some(&scene)
+            || world.monitors.iter().any(|monitor| {
+                scene.borders.iter().any(|border| border.monitor == monitor.id)
+                    && self
+                        .borders
+                        .get(&monitor.id)
+                        .is_none_or(|canvas| canvas.rect != monitor.bounds)
+            });
+        let wait_mode = std::env::var("MOON_COMPOSITION_WAIT");
+        let wait_after = matches!(wait_mode.as_deref(), Ok("after" | "1"));
+        let wait_before = !wait_after && wait_mode.as_deref() != Ok("0");
+        if changed && self.previous.is_some() && wait_before {
+            // Bound outstanding commits before reusing drawing resources, leaving
+            // the message loop free immediately after this scene is submitted.
+            unsafe { self.graphics.composition.WaitForCommitCompletion()? };
+        }
         self.bars.retain(|id, _| scene.bars.iter().any(|bar| bar.monitor == *id));
         self.borders.retain(|id, _| world.monitors.iter().any(|monitor| monitor.id == *id));
         for bar in &scene.bars {
@@ -972,10 +1038,8 @@ impl Surfaces {
                 self.borders.remove(&monitor.id);
                 continue;
             }
-            let recreated = self.borders.get(&monitor.id).is_none_or(|canvas| {
-                canvas.rect.width != monitor.bounds.width
-                    || canvas.rect.height != monitor.bounds.height
-            });
+            let recreated =
+                self.borders.get(&monitor.id).is_none_or(|canvas| canvas.rect != monitor.bounds);
             if recreated {
                 self.borders.remove(&monitor.id);
             }
@@ -997,10 +1061,10 @@ impl Surfaces {
                 canvas.draw_borders(&self.graphics, &rings)?;
             }
         }
-        if self.previous.as_ref() != Some(&scene) {
+        if changed {
             unsafe {
                 self.graphics.composition.Commit()?;
-                if std::env::var("MOON_COMPOSITION_WAIT").as_deref() != Ok("0") {
+                if wait_after {
                     self.graphics.composition.WaitForCommitCompletion()?;
                 }
             }
@@ -1111,8 +1175,10 @@ unsafe fn add_tray(hwnd: HWND) {
 
 impl Drop for Surfaces {
     fn drop(&mut self) {
-        for (id, (original, _)) in &self.native_edges {
-            let _ = crate::platform::set_border_color(*id, Some(*original));
+        for (id, edge) in &mut self.native_edges {
+            if edge.current != edge.original {
+                edge.apply(*id, edge.original);
+            }
         }
     }
 }
@@ -1149,6 +1215,54 @@ fn ring_regions(rect: Rect, thickness: i32, bounds: Rect) -> Vec<Rect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_edge_rejects_wrong_process_owner() {
+        struct OwnedWindow(HWND);
+        impl Drop for OwnedWindow {
+            fn drop(&mut self) {
+                unsafe {
+                    let _ = DestroyWindow(self.0);
+                }
+            }
+        }
+        let window = OwnedWindow(unsafe {
+            CreateWindowExW(
+                WS_EX_NOACTIVATE,
+                w!("STATIC"),
+                w!("moon native edge ownership test"),
+                WS_POPUP,
+                0,
+                0,
+                64,
+                64,
+                None,
+                None,
+                Some(GetModuleHandleW(None).unwrap().into()),
+                None,
+            )
+            .unwrap()
+        });
+        let id = crate::platform::window_id(window.0);
+        let process_id = crate::platform::process_id(id);
+        let wrong_owner = process_id.wrapping_add(1).max(1);
+        let initial = 0x0033_2211;
+        let replacement = 0x0066_5544;
+        crate::platform::set_border_color(id, Some(initial)).unwrap();
+        assert!(NativeEdge::capture(id, wrong_owner).is_none());
+        let mut stale =
+            NativeEdge { process_id: wrong_owner, original: replacement, current: initial };
+        assert!(!stale.apply(id, replacement));
+        let mut current = NativeEdge::capture(id, process_id).unwrap();
+        assert_eq!(current.process_id, process_id);
+        assert_eq!(stale.current, initial);
+        assert!(current.apply(id, replacement));
+        assert_eq!(current.current, replacement);
+        assert!(current.apply(id, current.original));
+        drop(window);
+        assert!(NativeEdge::capture(id, process_id).is_none());
+        assert!(!current.apply(id, replacement));
+    }
 
     #[test]
     fn atlas_slices_preserve_all_pixels_without_overlap() {

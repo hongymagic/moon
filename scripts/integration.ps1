@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$BuildDirectory,
-    [string]$ExtensionPath = (Join-Path $PSScriptRoot '..\examples\workspace-state.ps1'),
+    [string]$ExtensionPath,
     [string]$MoonPath = (Join-Path $env:LOCALAPPDATA 'moon-dev\moon.exe'),
     [string]$TestwinPath = (Join-Path $env:LOCALAPPDATA 'moon-dev\testwin.exe'),
     [string]$ReportPath = (Join-Path $env:LOCALAPPDATA 'moon-dev\integration-results.json'),
@@ -9,6 +9,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+if (!$ExtensionPath) { $ExtensionPath = Join-Path $PSScriptRoot '..\examples\workspace-state.ps1' }
 if ($BuildDirectory) {
     $MoonPath = Join-Path $BuildDirectory 'moon.exe'
     $TestwinPath = Join-Path $BuildDirectory 'testwin.exe'

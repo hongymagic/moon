@@ -44,16 +44,10 @@ if (!$daemon) {
     $unknown=@(Get-CimInstance Win32_Process -Filter "Name='moon.exe'" | Where-Object {$_.SessionId -eq $session})
     if ($unknown.Count -gt 0) { throw 'A moon process is running but did not answer IPC. Recover or stop it before installing.' }
 }
-$oldLayout=if ($daemon) {Get-MoonLayoutFingerprint} else {$null}
 $journalPath=Join-Path $env:LOCALAPPDATA ('moon\journal-v1-session'+$session+'.json')
-$oldJournal=if ($daemon) {
-    # Keep an immutable snapshot of the opened journal while permitting the
-    # daemon's writer to publish its next version by atomic replacement.
-    $stream=[IO.FileStream]::new($journalPath,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
-    $memory=[IO.MemoryStream]::new()
-    try {$stream.CopyTo($memory); ,$memory.ToArray()}
-    finally {$memory.Dispose(); $stream.Dispose()}
-} else {$null}
+$oldSnapshot=if ($daemon) {Get-MoonUpgradeSnapshot -JournalPath $journalPath -ProcessId ([uint32]$daemon.process_id)} else {$null}
+$oldLayout=if ($oldSnapshot) {$oldSnapshot.layout} else {$null}
+$oldJournal=if ($oldSnapshot) {,$oldSnapshot.journal} else {$null}
 $oldPid=if ($daemon) {[int]$daemon.process_id} else {0}
 $oldProcesses=@(Get-CimInstance Win32_Process | Where-Object {$_.ExecutablePath -and $_.ExecutablePath.StartsWith($install+'\',[StringComparison]::OrdinalIgnoreCase)} | ForEach-Object {[int]$_.ProcessId})
 $transaction=[guid]::NewGuid().ToString('N')

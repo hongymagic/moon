@@ -3,6 +3,7 @@ param(
     [string]$MoonPath=(Join-Path $env:LOCALAPPDATA 'moon-dev\moon.exe'),
     [string]$TestwinPath=(Join-Path $env:LOCALAPPDATA 'moon-dev\testwin.exe'),
     [string]$SettingsPath=(Join-Path $env:ProgramFiles 'PowerToys\WinUI3Apps\PowerToys.Settings.exe'),
+    [ValidateSet('PowerToys','Paint')][string]$ThirdApplication='PowerToys',
     [string]$ReportPath=(Join-Path $env:LOCALAPPDATA 'moon-dev\application-integration-results.json'),
     [string]$OwnedSettingsRecordPath=(Join-Path $env:LOCALAPPDATA 'moon-dev\owned-settings-recovery.json'),
     [switch]$SignedInstallation,
@@ -49,7 +50,19 @@ if ($CompileOnly) {
 }
 $MoonPath=(Resolve-Path -LiteralPath $MoonPath).ProviderPath
 $TestwinPath=(Resolve-Path -LiteralPath $TestwinPath).ProviderPath
-$SettingsPath=(Resolve-Path -LiteralPath $SettingsPath).ProviderPath
+$thirdPackage=$null
+if ($ThirdApplication -eq 'Paint') {
+    $paintPackage=Get-AppxPackage -Name Microsoft.Paint
+    if (!$paintPackage) {throw 'Microsoft Paint is not installed for this Windows account.'}
+    $paintManifest=$paintPackage | Get-AppxPackageManifest
+    $thirdPath=Join-Path $paintPackage.InstallLocation $paintManifest.Package.Applications.Application.Executable
+    $thirdPath=(Resolve-Path -LiteralPath $thirdPath).ProviderPath
+    $thirdName='mspaint'
+    $thirdPackage=[pscustomobject]@{name=$paintPackage.Name;version=$paintPackage.Version.ToString();image=$thirdPath;dependencies=@($paintPackage.Dependencies | ForEach-Object {$_.PackageFullName})}
+} else {
+    $SettingsPath=(Resolve-Path -LiteralPath $SettingsPath).ProviderPath
+    $thirdPath=$SettingsPath; $thirdName='PowerToys.Settings'
+}
 $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
 try {$currentSid=$identity.User.Value} finally {$identity.Dispose()}
 if (!$OwnerSid) {$OwnerSid=$currentSid}
@@ -60,7 +73,7 @@ if ($SignedInstallation) {
     if (!$PreviousForeground) {$PreviousForeground=[MoonElevatedNative]::GetForegroundWindow().ToInt64()}
     if (!(Test-MoonAdministrator)) {
         if ($ElevatedCoordinator) {throw 'Windows did not grant the requested elevated test coordinator.'}
-        $arguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$PSCommandPath,'-MoonPath',$MoonPath,'-TestwinPath',$TestwinPath,'-SettingsPath',$SettingsPath,'-ReportPath',$ReportPath,'-OwnedSettingsRecordPath',$OwnedSettingsRecordPath,'-OwnerSid',$OwnerSid,'-PreviousForeground',([string]$PreviousForeground),'-SignedInstallation','-ElevatedCoordinator')
+        $arguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$PSCommandPath,'-MoonPath',$MoonPath,'-TestwinPath',$TestwinPath,'-SettingsPath',$SettingsPath,'-ThirdApplication',$ThirdApplication,'-ReportPath',$ReportPath,'-OwnedSettingsRecordPath',$OwnedSettingsRecordPath,'-OwnerSid',$OwnerSid,'-PreviousForeground',([string]$PreviousForeground),'-SignedInstallation','-ElevatedCoordinator')
         $process=Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -Verb RunAs -WindowStyle Hidden -ArgumentList (($arguments | ForEach-Object {ConvertTo-MoonArgument $_}) -join ' ') -PassThru -Wait
         try {if($process.ExitCode -ne 0){throw 'The elevated application test failed; inspect its report.'}} finally {$process.Dispose()}
         Get-Content -Raw -LiteralPath $ReportPath
@@ -68,15 +81,15 @@ if ($SignedInstallation) {
     }
     if ([MoonInstallNative]::Integrity() -lt 12288) {throw 'The signed application test needs a real high-integrity coordinator for input over elevated Settings.'}
 } elseif ((Test-MoonAdministrator) -or [MoonInstallNative]::Integrity() -ne 8192) {throw 'Run development application tests with an ordinary medium-integrity Windows token.'}
-if (!$SignedInstallation) {
+if (!$SignedInstallation -and $ThirdApplication -eq 'PowerToys') {
     foreach ($runner in @(Get-Process -Name PowerToys -ErrorAction SilentlyContinue)) {
         if ([MoonElevatedNative]::Integrity([uint32]$runner.Id) -gt 8192) {throw 'PowerToys runs elevated; use the signed installation scenario before opening its Settings window.'}
     }
 }
 if (@(Get-Process -Name moon,testwin,winver,glazewm -ErrorAction SilentlyContinue).Count) {throw 'Stop and restore the installed daemon before this isolated test; no moon, testwin, winver or GlazeWM process may be active.'}
-$existingSettings=@(Get-Process -Name PowerToys.Settings -ErrorAction SilentlyContinue)
+$existingSettings=@(Get-Process -Name $thirdName -ErrorAction SilentlyContinue)
 if ($existingSettings.Count) {
-    if (!$SignedInstallation -or !(Test-Path -LiteralPath $OwnedSettingsRecordPath)) {throw 'An existing PowerToys Settings process is not owned by this test.'}
+    if ($ThirdApplication -ne 'PowerToys' -or !$SignedInstallation -or !(Test-Path -LiteralPath $OwnedSettingsRecordPath)) {throw 'The third application is already running; existing user windows were not touched.'}
     $savedSettings=Get-Content -Raw -LiteralPath $OwnedSettingsRecordPath | ConvertFrom-Json
     if ($existingSettings.Count -ne 1 -or $existingSettings[0].Id -ne $savedSettings.process_id -or [MoonApplicationNative]::Birth([uint32]$existingSettings[0].Id) -ne $savedSettings.process_birth -or ![string]::Equals([MoonApplicationNative]::ImagePath([uint32]$existingSettings[0].Id),$SettingsPath,[StringComparison]::OrdinalIgnoreCase)) {throw 'The prior test Settings process identity changed.'}
 }
@@ -88,6 +101,14 @@ if (!$PreviousForeground) {$PreviousForeground=[MoonElevatedNative]::GetForegrou
 $temporary=Join-Path ([IO.Path]::GetTempPath()) ('moon-applications-'+[guid]::NewGuid().ToString('N'))
 [void][IO.Directory]::CreateDirectory($temporary)
 $config=Join-Path $temporary 'three applications.toml'
+$bitmap=$null; $bitmapHash=$null; $winuiModule=$null
+if ($ThirdApplication -eq 'Paint') {
+    # Use Microsoft's installed blank-file template as an owned test document.
+    # No user document or saved Notepad session is opened by this scenario.
+    $bitmap=Join-Path $temporary 'moon-owned-focus-probe.bmp'
+    Copy-Item -LiteralPath (Join-Path $paintPackage.InstallLocation 'Assets\NewBitmapImage.bmp') -Destination $bitmap
+    $bitmapHash=(Get-FileHash -LiteralPath $bitmap -Algorithm SHA256).Hash
+}
 $source=@'
 config-version = 1
 cursor-jump = false
@@ -98,7 +119,7 @@ enabled = false
 enabled = false
 [[rules]]
 commands = ["ignore"]
-matches = [{process={not-regex='(?i)^(testwin|winver|PowerToys\.Settings)$'}}]
+matches = [{process={not-regex='(?i)^(testwin|winver|@THIRD_REGEX@)$'}}]
 [[rules]]
 commands = ["move-to-workspace 1"]
 matches = [{process={equals="testwin"}}]
@@ -107,8 +128,9 @@ commands = ["set-floating", "move-to-workspace 2"]
 matches = [{process={equals="winver"}}]
 [[rules]]
 commands = ["set-tiling", "move-to-workspace 3"]
-matches = [{process={equals="PowerToys.Settings"}}]
+matches = [{process={equals="@THIRD_PROCESS@"}}]
 '@
+$source=$source.Replace('@THIRD_REGEX@',[regex]::Escape($thirdName)).Replace('@THIRD_PROCESS@',$thirdName)
 [IO.File]::WriteAllText($config,$source,[Text.UTF8Encoding]::new($false))
 $owned=[Collections.Generic.List[object]]::new()
 $processes=[Collections.Generic.List[object]]::new()
@@ -169,7 +191,7 @@ function Check-WinUI([bool]$Floating) {
 function Switch-OwnedWorkspace($From,$To,[int]$Trial=-1) {
     if (!(Test-OwnedIdentity $From) -or !(Test-OwnedIdentity $To)) {throw 'A test window identity changed; input was not sent.'}
     $clock=[Diagnostics.Stopwatch]::StartNew()
-    [MoonElevatedNative]::Chord([long]$From.id,[ushort](48+$To.workspace))
+    [MoonElevatedNative]::Chord([long]$From.id,[uint16](48+$To.workspace))
     Wait-MoonCondition -Description 'hook-driven foreground matches the requested application' -Seconds 3 -Condition {
         [MoonElevatedNative]::GetForegroundWindow().ToInt64() -eq $To.id -and (Invoke-MoonRpc query world).focused -eq $To.id
     }
@@ -184,10 +206,23 @@ try {
     $winver=Join-Path $env:SystemRoot 'System32\winver.exe'
     Start-OwnedProcess $winver | Out-Null
     Add-OwnedWindow 'winver' 2 $winver
-    # PowerToys Settings forwards an argument-free launch to its existing runner.
-    # The newly enumerated window, not this short-lived launcher's PID, owns the UI.
-    Start-OwnedProcess $SettingsPath | Out-Null
-    Add-OwnedWindow 'PowerToys.Settings' 3 $SettingsPath
+    if ($ThirdApplication -eq 'Paint') {
+        Start-OwnedProcess $thirdPath (ConvertTo-MoonArgument $bitmap) | Out-Null
+    } else {
+        # Settings forwards an argument-free launch to its existing runner.
+        Start-OwnedProcess $SettingsPath | Out-Null
+    }
+    # Both packaged app activation and the PowerToys runner can delegate launch.
+    # The enumerated, identity-checked window owns the UI, not the launcher PID.
+    Add-OwnedWindow $thirdName 3 $thirdPath
+    if (!$SignedInstallation -and $owned[2].integrity_rid -ne 8192) {throw 'The third application did not launch with ordinary medium integrity.'}
+    if ($bitmap -and $owned[2].title -notlike '*moon-owned-focus-probe*') {throw 'Paint did not open the owned temporary bitmap.'}
+    Wait-MoonCondition -Description 'the third application to load the actual WinUI 3 runtime' -Condition {
+        $module=@((Get-Process -Id $owned[2].process_id).Modules | Where-Object ModuleName -eq 'Microsoft.UI.Xaml.dll')
+        if ($module.Count -ne 1 -or $module[0].FileVersionInfo.FileMajorPart -ne 3) {return $false}
+        $script:winuiModule=[pscustomobject]@{name=$module[0].ModuleName;path=$module[0].FileName;version=$module[0].FileVersionInfo.FileVersion;major=$module[0].FileVersionInfo.FileMajorPart}
+        return $true
+    }
     if (@($owned.process_id | Select-Object -Unique).Count -ne 3) {throw 'The focus test did not obtain three distinct application processes.'}
     try {
         if ($SignedInstallation) {
@@ -279,12 +314,13 @@ finally {
         $current=Get-Process -Id $runner.id -ErrorAction SilentlyContinue
         if ((!$current -or $current.StartTime.ToUniversalTime().ToString('o') -ne $runner.started) -and !$failure) {$failure='The existing PowerToys runner did not survive the test.'}
     }
+    if ($bitmap -and (Get-FileHash -LiteralPath $bitmap -Algorithm SHA256).Hash -ne $bitmapHash -and !$failure) {$failure='The owned Paint fixture changed during a focus-only test.'}
     if ([MoonElevatedNative]::IsWindow([IntPtr]$PreviousForeground)) {
         [void][MoonElevatedNative]::SetForegroundWindow([IntPtr]$PreviousForeground)
         try {Wait-MoonCondition -Description 'the previous user foreground window' -Seconds 3 -Condition {[MoonElevatedNative]::GetForegroundWindow().ToInt64() -eq $PreviousForeground}}
         catch {if(!$failure){$failure=$_}}
     }
-    $report=[pscustomobject]@{recorded_at=[DateTime]::UtcNow.ToString('o');passed=(!$failure);error=if($failure){[string]$failure}else{$null};moon_sha256=(Get-FileHash -LiteralPath $MoonPath -Algorithm SHA256).Hash;applications=$owned.ToArray();checks=$checks.ToArray();focus_transitions=$transitions.ToArray();hook_stats=$hookStats;original_frames_restored=$restored;existing_powertoys_runners=$runnerBefore;input_scope='Alt workspace chords only while a proven newly owned test HWND is foreground';evidence_directory=$temporary}
+    $report=[pscustomobject]@{recorded_at=[DateTime]::UtcNow.ToString('o');passed=(!$failure);error=if($failure){[string]$failure}else{$null};moon_sha256=(Get-FileHash -LiteralPath $MoonPath -Algorithm SHA256).Hash;applications=$owned.ToArray();third_application=$ThirdApplication;package=$thirdPackage;winui_module=$winuiModule;owned_bitmap=$bitmap;owned_bitmap_sha256=$bitmapHash;checks=$checks.ToArray();focus_transitions=$transitions.ToArray();hook_stats=$hookStats;original_frames_restored=$restored;existing_powertoys_runners=$runnerBefore;input_scope='Alt workspace chords only while a proven newly owned test HWND is foreground';evidence_directory=$temporary}
     [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($ReportPath)))
     # Evidence may live on a WSL share, which does not support Windows ACL APIs.
     # This report carries no installation authority and needs no protected ACL.

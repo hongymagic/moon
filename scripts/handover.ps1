@@ -14,8 +14,14 @@ $session=[Diagnostics.Process]::GetCurrentProcess().SessionId
 $owner=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $powershell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 $names=@('glazewm.exe','zebar.exe','tacky-borders.exe')
-if (!$InventoryPath) {$InventoryPath=Join-Path $PSScriptRoot '..\target\x86_64-pc-windows-msvc\release\examples\window_inventory.exe'}
-if (!$RecoveryPath) {$RecoveryPath=Join-Path $PSScriptRoot '..\target\x86_64-pc-windows-msvc\release\examples\recover_windows.exe'}
+if (!$InventoryPath) {
+    $InventoryPath=Join-Path $PSScriptRoot 'window_inventory.exe'
+    if (!(Test-Path -LiteralPath $InventoryPath -PathType Leaf)) {$InventoryPath=Join-Path $PSScriptRoot '..\target\x86_64-pc-windows-msvc\release\examples\window_inventory.exe'}
+}
+if (!$RecoveryPath) {
+    $RecoveryPath=Join-Path $PSScriptRoot 'recover_windows.exe'
+    if (!(Test-Path -LiteralPath $RecoveryPath -PathType Leaf)) {$RecoveryPath=Join-Path $PSScriptRoot '..\target\x86_64-pc-windows-msvc\release\examples\recover_windows.exe'}
+}
 function Get-PreviousDesktopProcesses {
     @(Get-CimInstance Win32_Process | Where-Object {$_.SessionId -eq $session -and $names -contains $_.Name.ToLowerInvariant()})
 }
@@ -46,6 +52,7 @@ function Restore-PreviousDesktop($Saved) {
                 $program=$savedProcess[0]
                 if (!(Test-Path -LiteralPath $program.path)) {throw "Previous desktop application is missing: $($program.path)"}
                 $start=@{FilePath=$program.path;WorkingDirectory=[IO.Path]::GetDirectoryName($program.path)}
+                if ($program.PSObject.Properties['working_directory'] -and $program.working_directory) {$start.WorkingDirectory=$program.working_directory}
                 if ($program.arguments) {$start.ArgumentList=$program.arguments}
                 Start-Process @start
             } else {
@@ -74,6 +81,9 @@ if ($Rollback) {
 }
 
 if (!$Binary) {throw 'Provide the UIAccess release executable with -Binary.'}
+foreach ($required in @('install.ps1','uninstall.ps1','verify-uiaccess.ps1')) {
+    if (!(Test-Path -LiteralPath (Join-Path $PSScriptRoot $required) -PathType Leaf)) {throw "Handover bundle is missing $required; no desktop state was changed."}
+}
 $Binary=(Resolve-Path -LiteralPath $Binary).ProviderPath
 $manifest=[xml][MoonInstallNative]::Manifest($Binary)
 $execution=$manifest.SelectSingleNode("//*[local-name()='requestedExecutionLevel']")
@@ -85,13 +95,14 @@ if (Test-Path -LiteralPath $StatePath) {
     $existing=Get-Content -Raw -LiteralPath $StatePath | ConvertFrom-Json
     if ($existing.status -ne 'rolled_back') {throw 'An earlier handover record exists. Use -Rollback to restore it, or use install.ps1 for an upgrade.'}
 }
-$directory=Join-Path $env:LOCALAPPDATA ('moon\handover-'+[guid]::NewGuid().ToString('N'))
-[void][IO.Directory]::CreateDirectory($directory)
+$startupLinks=@(Get-MoonStartupLinks -Programs $names)
 $processes=@(Get-PreviousDesktopProcesses | ForEach-Object {
-    if (!$_.ExecutablePath -or !$_.CommandLine -or $_.CommandLine -notmatch '^(?:"[^"]*"|\S+)\s*(.*)$') {throw "Cannot safely preserve launch information for $($_.Name)."}
-    [pscustomobject]@{name=$_.Name.ToLowerInvariant();path=$_.ExecutablePath;arguments=$Matches[1];process_id=$_.ProcessId}
+    Get-MoonProcessLaunch -Process $_ -StartupLinks $startupLinks
 })
 $glaze=@($processes | Where-Object {$_.name -eq 'glazewm.exe'})
+if ($glaze.Count -gt 1) {throw 'Multiple GlazeWM managers are running; no desktop state was changed.'}
+$directory=Join-Path $env:LOCALAPPDATA ('moon\handover-'+[guid]::NewGuid().ToString('N'))
+[void][IO.Directory]::CreateDirectory($directory)
 $glazeHandles=@(); $glazeInventoryPath=$null
 if ($glaze.Count -gt 0) {
     $InventoryPath=(Resolve-Path -LiteralPath $InventoryPath).ProviderPath
@@ -109,17 +120,12 @@ if ($glaze.Count -gt 0) {
     Write-MoonJsonFile $glazeInventoryPath ([pscustomobject]@{native=$inventory;glaze=$query})
 }
 $links=@()
-$shell=New-Object -ComObject WScript.Shell
-try {
-    foreach ($file in @(Get-ChildItem -LiteralPath ([Environment]::GetFolderPath('Startup')) -Filter '*.lnk')) {
-        $shortcut=$shell.CreateShortcut($file.FullName)
-        if ($names -contains [IO.Path]::GetFileName($shortcut.TargetPath).ToLowerInvariant()) {
-            $backup=Join-Path $directory $file.Name
-            Copy-Item -LiteralPath $file.FullName -Destination $backup
-            $links+=[pscustomobject]@{original=$file.FullName;backup=$backup;program=[IO.Path]::GetFileName($shortcut.TargetPath).ToLowerInvariant();sha256=(Get-FileHash -LiteralPath $backup -Algorithm SHA256).Hash}
-        }
-    }
-} finally {[void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell)}
+foreach ($shortcut in $startupLinks) {
+    $backup=Join-Path $directory ([IO.Path]::GetFileName($shortcut.original))
+    Copy-Item -LiteralPath $shortcut.original -Destination $backup
+    if ((Get-FileHash -LiteralPath $backup -Algorithm SHA256).Hash -ne $shortcut.sha256) {throw 'A startup shortcut changed before backup; no desktop state was changed.'}
+    $links+=[pscustomobject]@{original=$shortcut.original;backup=$backup;program=$shortcut.program;sha256=$shortcut.sha256}
+}
 $configs=@()
 foreach ($relative in @('.glzr\glazewm\config.yaml','.glzr\zebar\settings.json','.config\tacky-borders\config.yaml')) {
     $original=Join-Path $env:USERPROFILE $relative
@@ -133,11 +139,14 @@ $saved=[pscustomobject]@{version=1;owner_sid=$owner;session=$session;started_at=
 [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($StatePath)))
 Write-MoonJsonFile $StatePath $saved
 try {
+    foreach ($process in $processes) {Assert-MoonProcessIdentity $process}
+    foreach ($link in $links) {if ((Get-FileHash -LiteralPath $link.original -Algorithm SHA256).Hash -ne $link.sha256) {throw 'A startup shortcut changed before handover; it was not removed.'}}
     foreach ($link in $links) {Remove-Item -LiteralPath $link.original}
     $saved.status='previous_startup_disabled'; Write-MoonJsonFile $StatePath $saved
     if ($glaze.Count -gt 0) {
         $cli=Join-Path ([IO.Path]::GetDirectoryName($glaze[0].path)) 'cli\glazewm.exe'
         if (!(Test-Path -LiteralPath $cli)) {throw 'The GlazeWM command client is missing; the existing manager was not terminated.'}
+        Assert-MoonProcessIdentity $glaze[0]
         $reply=(Invoke-MoonNative $cli @('command','wm-exit')).Output | ConvertFrom-Json
         if (!$reply.success) {throw 'GlazeWM refused its normal exit command.'}
         Wait-MoonCondition -Description 'GlazeWM normal exit' -Condition {@(Get-PreviousDesktopProcesses | Where-Object {$_.Name -eq 'glazewm.exe'}).Count -eq 0}
@@ -151,9 +160,10 @@ try {
     }
     foreach ($process in @(Get-PreviousDesktopProcesses | Where-Object {$_.Name -ne 'glazewm.exe'})) {
         # These processes only draw the old bar and borders. Match the captured
-        # PID and image before stopping a companion that Glaze did not close.
-        $expected=@($processes | Where-Object {$_.process_id -eq $process.ProcessId -and $_.path -eq $process.ExecutablePath})
-        if ($expected.Count -eq 0) {throw 'A previous desktop companion changed during handover; it was not stopped.'}
+        # PID, creation time and image before stopping a companion Glaze left running.
+        $expected=@($processes | Where-Object {$_.process_id -eq $process.ProcessId})
+        if ($expected.Count -ne 1) {throw 'A previous desktop companion changed during handover; it was not stopped.'}
+        Assert-MoonProcessIdentity $expected[0]
         Stop-Process -Id $process.ProcessId
     }
     Wait-MoonCondition -Description 'the previous desktop components to exit' -Condition {@(Get-PreviousDesktopProcesses).Count -eq 0}

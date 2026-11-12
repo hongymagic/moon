@@ -111,7 +111,7 @@ try {
     for($trial=0;$trial -lt 20;$trial++) {
         $from=if($trial%2 -eq 0){$first}else{$second}; $to=if($trial%2 -eq 0){$second}else{$first}
         $key=if($horizontal){if($trial%2 -eq 0){76}else{72}}else{if($trial%2 -eq 0){74}else{75}}
-        [MoonElevatedNative]::Chord($from,[ushort]$key)
+        [MoonElevatedNative]::Chord($from,[uint16]$key)
         Wait-MoonCondition -Description 'hook-driven focus between elevated owned windows' -Condition {[MoonElevatedNative]::GetForegroundWindow().ToInt64() -eq $to -and (Invoke-MoonRpc query world).focused -eq $to} -Seconds 3
         $focusPass++
     }

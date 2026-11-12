@@ -209,7 +209,6 @@ mod native {
                         break;
                     }
                 }
-                hooks::suppress_alt_menu();
                 if shift {
                     inject(&[(VK_LSHIFT, true)]);
                 }

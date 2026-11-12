@@ -239,6 +239,13 @@ pub fn run(options: Options) -> Result<()> {
                         .with_context(|| format!("verify recovery identity for window {id}"))?
                 {
                     stale.push(id);
+                } else if !platform::can_manage_process(original.process_id) {
+                    // Preserve the complete handoff for an appropriately signed
+                    // successor instead of partially restoring it with this token.
+                    startup_recovery.armed = false;
+                    bail!(
+                        "cannot resume window {id} with this process token; use the signed UIAccess installation"
+                    );
                 }
             }
             for id in stale {
@@ -363,7 +370,6 @@ pub fn run(options: Options) -> Result<()> {
                             daemon.pending_input.pop_front();
                         }
                         daemon.pending_input.push_back(received);
-                        hooks::suppress_alt_menu();
                         daemon.dispatch_latencies.push_back(
                             received.elapsed().as_micros().min(u128::from(u64::MAX)) as u64,
                         );
@@ -475,6 +481,7 @@ impl Daemon {
             if !self.in_scope(&info.process)
                 || next.windows.contains_key(&info.id)
                 || platform::cloaked(info.id).unwrap_or(0) != 0
+                || !platform::can_manage_process(info.process_id)
             {
                 continue;
             }
@@ -573,9 +580,10 @@ impl Daemon {
             }
         }
         let previous_originals = record.windows.len();
-        record
-            .windows
-            .retain(|id, _| transition.world.windows.contains_key(id) || platform::is_window(*id));
+        record.windows.retain(|id, original| {
+            transition.world.windows.contains_key(id)
+                || platform::process_id(*id) == original.process_id
+        });
         let writer = self.journal_writer.as_ref().expect("writer exists until shutdown");
         writer.submit(record.clone())?;
         if originals_changed || record.windows.len() != previous_originals {
@@ -618,12 +626,13 @@ impl Daemon {
             self.refusals.retain(|id, _| live.contains(id));
             let mut changes = Vec::new();
             for placement in plan.placements {
+                if !self.owns_native_window(placement.id) {
+                    continue;
+                }
                 if self.applied.get(&placement.id) == Some(&placement) {
                     continue;
                 }
-                if platform::window_on_current_virtual_desktop(placement.id)
-                    .is_ok_and(|current| !current)
-                {
+                if !platform::window_on_current_virtual_desktop(placement.id).unwrap_or(false) {
                     continue;
                 }
                 let hidden = placement.visible && platform::cloaked(placement.id).unwrap_or(0) != 0;
@@ -632,6 +641,9 @@ impl Daemon {
             // Query the shell before posting native moves. Interleaving those
             // synchronous queries with async placement serializes Explorer's updates.
             for (placement, hidden) in changes {
+                if !self.owns_native_window(placement.id) {
+                    continue;
+                }
                 let result = if placement.visible {
                     let uncloak = if hidden {
                         platform::set_hidden(placement.id, false).map(|_| ())
@@ -655,6 +667,7 @@ impl Daemon {
                 }
             }
             if let Some(id) = plan.focus
+                && self.owns_native_window(id)
                 && !platform::is_minimized(id)
                 && platform::window_on_current_virtual_desktop(id).unwrap_or(false)
                 && self.world.windows.get(&id).is_some_and(|window| !window.suspended)
@@ -663,7 +676,9 @@ impl Daemon {
                 self.error = Some(format!("Focus was refused: {error}"));
             }
             for id in plan.close {
-                platform::close(id)?;
+                if self.owns_native_window(id) {
+                    platform::close(id)?;
+                }
             }
             for command in plan.launch {
                 runtime::shell_launch(&command)?;
@@ -766,6 +781,11 @@ impl Daemon {
         Ok(())
     }
     fn window_event(&mut self, id: WindowId, kind: u32) -> Result<()> {
+        // A queued event can outlive its HWND. Check its current owner before
+        // accepting placement echoes, changing suspension, or issuing effects.
+        if self.world.windows.contains_key(&id) && !self.owns_native_window(id) {
+            self.commit(Event::WindowRemoved(id), "stale-window")?;
+        }
         if kind == 3 || (kind == 0x800b && platform::foreground() == Some(id)) {
             self.sync_native_fullscreen()?;
         }
@@ -778,7 +798,7 @@ impl Daemon {
             // Name, visibility, desktop and drag-end changes have separate events.
             return Ok(());
         }
-        if self.world.windows.contains_key(&id) && platform::is_window(id) {
+        if self.world.windows.contains_key(&id) {
             self.sync_suspension(id)?;
         }
         if kind == 0x8001 || !platform::is_window(id) {
@@ -812,7 +832,10 @@ impl Daemon {
                 {
                     self.commit(Event::WindowChanged(info), "window")?;
                 }
-            } else if platform::is_manageable(id) && platform::cloaked(id).unwrap_or(0) == 0 {
+            } else if platform::is_manageable(id)
+                && platform::cloaked(id).unwrap_or(0) == 0
+                && platform::can_manage_process(info.process_id)
+            {
                 self.commit(Event::WindowAdded(info), "create")?;
             }
         }
@@ -871,7 +894,10 @@ impl Daemon {
         }
         if !self.world.paused {
             for placement in self.world.plan().placements {
-                if !placement.visible || placement.floating {
+                if !placement.visible
+                    || placement.floating
+                    || !self.owns_native_window(placement.id)
+                {
                     continue;
                 }
                 if let Ok(actual) = platform::window_rect(placement.id) {
@@ -912,13 +938,25 @@ impl Daemon {
         Ok(())
     }
     fn sync_suspension(&mut self, id: WindowId) -> Result<()> {
+        if !self.owns_native_window(id) {
+            if self.world.windows.contains_key(&id) {
+                self.commit(Event::WindowRemoved(id), "stale-window")?;
+            }
+            return Ok(());
+        }
         let suspended = platform::is_minimized(id)
-            || platform::window_on_current_virtual_desktop(id).is_ok_and(|current| !current);
+            || !platform::window_on_current_virtual_desktop(id).unwrap_or(false);
         if self.world.windows.get(&id).is_some_and(|window| window.suspended != suspended) {
             self.applied.remove(&id);
             self.commit(Event::WindowSuspended { id, suspended }, "visibility")?;
         }
         Ok(())
+    }
+    fn owns_native_window(&self, id: WindowId) -> bool {
+        self.world
+            .windows
+            .get(&id)
+            .is_some_and(|window| platform::process_id(id) == window.info.process_id)
     }
     fn sync_native_fullscreen(&mut self) -> Result<()> {
         let native = platform::native_fullscreen()?;

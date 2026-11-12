@@ -431,6 +431,11 @@ pub fn native_fullscreen() -> Result<Option<(WindowId, MonitorId)>> {
     };
     unsafe {
         let handle = hwnd(id);
+        // Explorer can foreground its new desktop during a shell restart. Its
+        // borderless monitor-sized surface is not a fullscreen application.
+        if handle == GetShellWindow() || handle == GetDesktopWindow() {
+            return Ok(None);
+        }
         if GetWindowLongPtrW(handle, GWL_STYLE) as u32 & WS_CAPTION.0 != 0
             || IsIconic(handle).as_bool()
         {
@@ -733,9 +738,9 @@ pub fn restore_placement(id: WindowId, original: &OriginalPlacement) -> Result<(
     unsafe {
         SetWindowPlacement(hwnd(id), &placement)?;
     }
-    if let Some(color) = original.border_color {
-        set_border_color(id, Some(color))?;
-    }
+    // BORDER_COLOR is documented for setting, not querying. When Windows does
+    // not expose the original, clear moon's tint back to the documented default.
+    set_border_color(id, original.border_color)?;
     Ok(())
 }
 
@@ -790,6 +795,91 @@ pub struct TokenCapabilities {
     pub ui_access: bool,
     pub elevated: bool,
     pub app_container: bool,
+}
+
+/// Check before adopting a window, so ordinary builds never record effects they
+/// cannot safely reverse across an integrity boundary. Unknown tokens stay out.
+pub fn can_manage_process(pid: u32) -> bool {
+    let Ok(caller) = token_capabilities(std::process::id()) else { return false };
+    let Ok(target) = token_capabilities(pid) else { return false };
+    token_allows_management(&caller, &target)
+}
+
+fn token_allows_management(caller: &TokenCapabilities, target: &TokenCapabilities) -> bool {
+    const SYSTEM_INTEGRITY_RID: u32 = 0x4000;
+    caller.session_id == target.session_id
+        && target.integrity_rid < SYSTEM_INTEGRITY_RID
+        && (caller.ui_access || target.integrity_rid <= caller.integrity_rid)
+}
+
+#[cfg(test)]
+mod process_management_tests {
+    use super::*;
+
+    // Well-known integrity SID RIDs from Windows' SECURITY_MANDATORY_* values.
+    const LOW: u32 = 0x1000;
+    const MEDIUM: u32 = 0x2000;
+    const MEDIUM_PLUS: u32 = 0x2100;
+    const HIGH: u32 = 0x3000;
+    const SYSTEM: u32 = 0x4000;
+
+    fn token(integrity_rid: u32) -> TokenCapabilities {
+        TokenCapabilities {
+            process_id: 1,
+            session_id: 1,
+            integrity_rid,
+            integrity: String::new(),
+            ui_access: false,
+            elevated: false,
+            app_container: false,
+        }
+    }
+
+    #[test]
+    fn admission_respects_actual_integrity_and_uiaccess() {
+        let mut ordinary = token(MEDIUM);
+        let low = token(LOW);
+        let medium_plus = token(MEDIUM_PLUS);
+        let high = token(HIGH);
+        assert!(token_allows_management(&ordinary, &ordinary));
+        assert!(token_allows_management(&ordinary, &low));
+        assert!(!token_allows_management(&ordinary, &medium_plus));
+        assert!(!token_allows_management(&ordinary, &high));
+        // An elevation flag or administrative account is not a substitute for
+        // the actual integrity label used by Windows access checks.
+        ordinary.elevated = true;
+        assert!(!token_allows_management(&ordinary, &high));
+        ordinary.ui_access = true;
+        assert!(token_allows_management(&ordinary, &high));
+        assert!(!token_allows_management(&ordinary, &token(SYSTEM)));
+        let mut other_session = token(LOW);
+        other_session.session_id += 1;
+        assert!(!token_allows_management(&ordinary, &other_session));
+        assert!(token_allows_management(&high, &high));
+    }
+
+    #[test]
+    fn native_admission_accepts_self_and_fails_closed_for_unqueryable_processes() {
+        assert!(can_manage_process(std::process::id()));
+        assert!(!can_manage_process(0));
+        assert!(!can_manage_process(u32::MAX));
+        let caller = token_capabilities(std::process::id()).unwrap();
+        // Read an already running elevated app when this host has one. This
+        // opens query-only handles and never creates or changes a window.
+        for (pid, name) in running_processes().unwrap() {
+            if name.eq_ignore_ascii_case("PowerToys.exe")
+                && let Ok(target) = token_capabilities(pid)
+                && target.integrity_rid > caller.integrity_rid
+                && !caller.ui_access
+            {
+                assert!(!can_manage_process(pid));
+                eprintln!(
+                    "read-only elevated process exclusion: pid={pid}, caller_rid={}, target_rid={}",
+                    caller.integrity_rid, target.integrity_rid
+                );
+            }
+        }
+    }
 }
 
 pub fn token_capabilities(pid: u32) -> Result<TokenCapabilities> {
@@ -878,8 +968,13 @@ pub fn set_border_color(id: WindowId, rgb: Option<u32>) -> Result<()> {
 }
 
 pub fn run_test_windows(count: usize) -> Result<()> {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
     static WINDOWS: AtomicUsize = AtomicUsize::new(0);
+    static KEY_DOWNS: AtomicU32 = AtomicU32::new(0);
+    static KEY_UPS: AtomicU32 = AtomicU32::new(0);
+    static CHARACTER_EVENTS: AtomicU32 = AtomicU32::new(0);
+    const KEY_COUNTS_MESSAGE: u32 = WM_APP + 93;
+    const CHARACTER_COUNT_MESSAGE: u32 = WM_APP + 94;
     unsafe extern "system" fn procedure(
         handle: HWND,
         message: u32,
@@ -887,6 +982,25 @@ pub fn run_test_windows(count: usize) -> Result<()> {
         lparam: LPARAM,
     ) -> LRESULT {
         match message {
+            WM_KEYDOWN | WM_SYSKEYDOWN | WM_KEYUP | WM_SYSKEYUP
+                if wparam.0 == usize::from(VK_OEM_MINUS.0) =>
+            {
+                if matches!(message, WM_KEYDOWN | WM_SYSKEYDOWN) {
+                    KEY_DOWNS.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    KEY_UPS.fetch_add(1, Ordering::Relaxed);
+                }
+                unsafe { DefWindowProcW(handle, message, wparam, lparam) }
+            }
+            KEY_COUNTS_MESSAGE => LRESULT(
+                (u64::from(KEY_DOWNS.load(Ordering::Relaxed))
+                    | (u64::from(KEY_UPS.load(Ordering::Relaxed)) << 32)) as isize,
+            ),
+            WM_CHAR | WM_SYSCHAR | WM_DEADCHAR | WM_SYSDEADCHAR | WM_UNICHAR => {
+                CHARACTER_EVENTS.fetch_add(1, Ordering::Relaxed);
+                unsafe { DefWindowProcW(handle, message, wparam, lparam) }
+            }
+            CHARACTER_COUNT_MESSAGE => LRESULT(CHARACTER_EVENTS.load(Ordering::Relaxed) as isize),
             WM_LBUTTONDOWN => {
                 unsafe {
                     SetWindowLongPtrW(
@@ -924,6 +1038,9 @@ pub fn run_test_windows(count: usize) -> Result<()> {
             "testwin count must be between 1 and 128",
         ));
     }
+    KEY_DOWNS.store(0, Ordering::Relaxed);
+    KEY_UPS.store(0, Ordering::Relaxed);
+    CHARACTER_EVENTS.store(0, Ordering::Relaxed);
     let _ = enable_dpi_awareness();
     unsafe {
         let instance = windows::Win32::System::LibraryLoader::GetModuleHandleW(None)?;

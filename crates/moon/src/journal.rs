@@ -241,6 +241,13 @@ pub fn restore(path: &Path, force: bool) -> Result<usize> {
                 return true;
             }
         }
+        if !platform::can_manage_process(window.process_id) {
+            failures.push(format!(
+                "{}: restoration requires the signed UIAccess installation or matching integrity",
+                window.id
+            ));
+            return true;
+        }
         let result = match &window.native {
             Some(native) => platform::restore_placement(window.id, native),
             None => platform::restore(window.id, window.rect),

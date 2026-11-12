@@ -38,9 +38,11 @@ intentionally excluded from source control.
 | Background resume | `start --background --resume` adopts a saved journal with identical trees, focus and target rectangles, then restores original frames on clean exit. |
 | Startup failure | A deliberately conflicting named pipe makes resumed startup fail before the main loop. An inherited recovery journal restores an owned window parked offscreen and is removed after successful recovery. |
 
-All fourteen passed in the complete local run using candidate
-`300A014A860C530C328947947C671828EB360A6749D888D08054AB47E278C06B`,
-started at `2026-11-11T22:23:21.5908320Z` (12 November local time). The test closes
+All fourteen passed again on the current normal release candidate
+`1A7F502085F9CD067C18975E76E454E75F60F28FC75C809E1541DA86F33FC5CF`,
+on 12 November 2026, including the desktop-fullscreen and held-key fixes. Full
+results and matching executable hashes are retained in
+`target/revised-release-20261112/`. The test closes
 only its own helper process and daemon; recovery runs in its cleanup path even
 after an assertion failure.
 
@@ -50,8 +52,8 @@ borderless monitor bounds, but was not the actual foreground window; moon
 correctly did not classify it as foreground fullscreen. That failed run remains
 under `target/integration-regressions/elevated-foreground`. The harness now checks
 native foreground separately after its focus command and before fullscreen
-mutation. A complete rerun of the final candidate remains required after that
-owned elevated window is cleared.
+mutation. The owned elevated window was subsequently closed by its verified GlazeWM
+container identity, and the complete current-candidate rerun above passed.
 
 The focused `-GuardOnly` run also passed on 12 November using candidate
 `DC3B2A25CEEA758939C8EA07387AE6440BB817F780A502784C82C54DA7096594`.
@@ -105,7 +107,7 @@ for its asynchronous checkpoint to match the queried world before copying it.
 
 ## Core and parser checks
 
-The Linux-native core suite passed 51 tests after the parity audit,
+The Linux-native core suite passed 52 tests after the parity and guarded-command checks,
 including 100,000 randomized command sequences that assert membership, focus,
 positive in-bounds rectangles and non-overlap. Tests cover configuration merging,
 strict unknown-field rejection, comment-preserving migration, alias-cycle
@@ -123,17 +125,20 @@ four directional monitor-move chords, pause and the cheat sheet. This checks
 configuration parity; the separate live-hook acceptance remains explicit in
 the acceptance ledger.
 
-Twelve ordinary Windows-native regression tests have passed: hotkey mapping, invalid
-hotkey rejection, delayed large responses, stalled-reader cancellation,
-subscription framing, and process liveness while a terminated process object
-still has open handles, plus temporary and permanent atomic-replacement sharing
-conflicts. The additional tests cover cached COM apartment lifetime, border-atlas
-pixel coverage, canonical modifier release and preserving the still-held side
-when the other modifier is released. The sharing tests verify retry success after
-a reader closes and preservation of the original bytes when the conflict persists.
-The separately invoked interactive hook test also passes all 22 modified/plain
-trigger checks across initial held modifiers and ten renewals, without changing
-the helper's input language; see [platform evidence](validation-platform.md).
+Sixteen ordinary Windows-native regression tests pass. They cover hotkey mapping
+and rejection, exact internal-mask identification, modifier release, bounded IPC,
+terminated-process liveness, atomic-replacement sharing conflicts, cached COM
+apartment lifetime, border-atlas coverage and native border process ownership.
+The sharing tests verify retry success after a reader closes and preservation of
+the original bytes when the conflict persists.
+
+Four separately invoked interactive checks pass: 22 modified/plain triggers
+across initial held modifiers and ten renewals; 256 triggers across 128 complete
+burst chords; exact routing for all 52 default chords; and key-pair ownership
+through modifier changes, repetition, installation and renewal. Consumed chords
+preserve the helper's current input language and do not leak trigger or character
+messages. Intentionally forwarded keys retain normal Windows behavior. These
+checks execute no daemon command effects; see [platform evidence](validation-platform.md).
 
 Nine portable CLI/journal tests pass. Five exercise the background writer's
 durable barrier, coalescing, write-error propagation, worker-panic wakeup and
