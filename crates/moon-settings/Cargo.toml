@@ -1,0 +1,22 @@
+[package]
+name = "moon-settings"
+description = "Moon's on-demand settings window"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+moon-core.workspace = true
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+
+[target.'cfg(windows)'.dependencies]
+moon-win.workspace = true
+wry = { version = "=0.57.2", default-features = false, features = ["os-webview"] }
+tao = { version = "=0.37.2", default-features = false, features = ["rwh_06"] }
+windows = { version = "=0.62.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Controls", "Win32_UI_Shell", "Win32_Graphics_Dwm", "Win32_System_Threading", "Win32_Security"] }
+

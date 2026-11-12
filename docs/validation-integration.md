@@ -8,7 +8,7 @@ GlazeWM stopped. It managed no other applications.
 Run `just integration` to reproduce the scenario. On a Windows build machine:
 
 ```powershell
-./scripts/integration.ps1 -BuildDirectory ./target/release
+./scripts/integration.ps1 -BuildDirectory ./target/x86_64-pc-windows-msvc/release
 ```
 
 The script writes `target/integration-results.json` when `-BuildDirectory` is

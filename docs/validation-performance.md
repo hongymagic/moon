@@ -91,3 +91,103 @@ trace is retained in `target/perf-failure.json`; the 128-trial run above passes
 with the correction.
 
 Reference: [Microsoft SetWindowPos flags](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowpos).
+
+## Product-polish candidate, 12 November 2026
+
+Normal candidate
+`EA798913C35FCB9CC962E08B9F4DB20719D660E502834DA1F66A97508781BBD0`
+was measured after the Settings, bar interaction and workspace-animation changes.
+The freshly rebuilt probe was
+`DB3C0B5FD939FC17347115E6024FA79E14AED6714CB3BB1B34EBD28AD2F20CDA`.
+The physical monitor was 3840×2160 at 125%; bar and borders used the default WARP
+configuration, with all transient experiment overrides removed. Settings was
+closed, and no builds or other agent desktop work ran during the sample.
+
+| Measurement | Observed value |
+|---|---:|
+| Exact eight-window placements | 128/128 |
+| Ready | 193.134 ms |
+| Independent trigger-key-to-placement median / p99 | 13.226 / 35.112 ms |
+| Internal key-to-observed-placement median / p99 | 12.924 / 34.980 ms |
+| Working set before input | 45,535,232 bytes |
+| Working set immediately after workload | 51,380,224 bytes |
+| Working set after ten seconds idle | 49,192,960 bytes |
+| Idle CPU, percentage of one core | 0.31248% |
+| Hook own work p99 / whole callback p99 | 139 / 753 µs |
+| Handles after idle / GDI objects | 348 / 8 |
+
+Readiness meets the 300 ms budget. The idle working-set sample is below
+50,000,000 bytes, but the workload sample exceeds it: this is not an unconditional
+memory-budget pass. Placement and hook latency still exceed their specified
+budgets, and literal zero idle CPU is not established. No daemon error was
+reported. All owned processes exited and the recovery journal was absent after
+cleanup.
+
+Raw metadata, distributions and cleanup are in
+`target/postpolish-performance/{metadata,full-daemon,cleanup}.json`. This candidate
+still dynamically linked the Visual C++ runtime; the final statically linked
+packaging candidate needs a separately identified measurement. This workload
+resizes tiles inside a workspace and does not time the workspace transition.
+The compositor probe's intentionally 200 ms motion is recorded separately in
+[carousel validation](validation-carousel.md).
+
+## Final static-runtime candidate, 12 November 2026
+
+The current normal candidate is
+`075E96CD3C7C95E24D04F07EC9BCFF7D53F74F60E2F6AC53B23B179C7DFBB134`.
+It statically links the C runtime so first launch does not require a separate
+Visual C++ redistributable. Fresh probe
+`980A1DD971A3A35E0476571BAAD8BA3788B2E88AAF2DDF3E52D3535D713CA794`
+used the same eight-window, 128-chord protocol, 4K/125% monitor and default
+bar/borders configuration. No concurrent builds or agent desktop actions ran.
+
+| Measurement | Observed value |
+|---|---:|
+| Exact eight-window placements | 128/128 |
+| Ready | 129.901 ms |
+| Independent trigger-key-to-placement median / p99 | 12.665 / 32.790 ms |
+| Internal key-to-observed-placement median / p99 | 12.345 / 32.646 ms |
+| Working set before input | 45,682,688 bytes |
+| Working set immediately after workload | 54,898,688 bytes |
+| Working set after ten seconds idle | 52,674,560 bytes |
+| Idle CPU, percentage of one core | 0.62497% |
+| Hook own work p99 / whole callback p99 | 140 / 719 µs |
+| Handles after idle / GDI objects | 348 / 8 |
+
+The final candidate passes readiness and placement correctness, but **fails**
+the 50,000,000-byte working-set limit and the stated placement/hook latency
+budgets. Literal zero idle CPU is not established. Earlier smaller working-set
+samples do not override this current result. `last_error` was null throughout;
+all owned processes exited and the recovery journal was absent afterward.
+Raw evidence remains in
+`target/postpolish-performance/static-crt/{metadata,full-daemon,cleanup}.json`.
+
+### Scope of the regression diagnosis
+
+The renderer reports exactly 2,865,156 nominal surface bytes in every phase of
+both polish runs; handles and GDI counts also match. The new hover-feedback
+surface contributes four nominal bytes. Workspace animation never activates in
+this resize workload, and Settings is a separate, closed process. The static
+candidate starts only 147,456 bytes above the dynamic candidate before input,
+but ends 3,481,600 bytes higher after idle. Those samples locate the growth after
+the workload; they do not establish that static linking itself caused the
+retained allocation. No working-set trimming was performed.
+
+Command reduction, journaling and submission remain small: the static candidate's
+128 command transactions have median 1.696 ms and p99 3.427 ms, with median native
+apply submission 1.341 ms. Input-to-dispatch median is 0.280 ms. Independent
+native outer-frame completion is about 12.419 ms median and 32.604 ms p99, close
+to DWM visible-frame completion. The remaining delay is therefore not explained
+by late daemon observation alone. Compared with the earlier pre-polish default
+profile (14.415/40.263 ms), current placement latency improved while still missing
+the required budget. The data does not identify a new avoidable animation loop
+or a concrete allocation fix; another measurement should test a specific cause
+rather than select a favorable sample.
+
+Separately, six four-window workspace transitions with bar and borders enabled
+were measured on the same candidate. The observed peak working set was
+47,575,040 bytes, and direct-command-to-owned-overlay-disappearance ranged from
+251.642 to 269.553 ms. These are bounded visual transitions, not the hotkey
+placement workload or proof of a universal memory bound. Their timing definition,
+sampling limits and correctness evidence are in
+[carousel validation](validation-carousel.md).

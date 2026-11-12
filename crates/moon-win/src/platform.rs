@@ -973,8 +973,10 @@ pub fn run_test_windows(count: usize) -> Result<()> {
     static KEY_DOWNS: AtomicU32 = AtomicU32::new(0);
     static KEY_UPS: AtomicU32 = AtomicU32::new(0);
     static CHARACTER_EVENTS: AtomicU32 = AtomicU32::new(0);
+    static MOUSE_UPS: AtomicU32 = AtomicU32::new(0);
     const KEY_COUNTS_MESSAGE: u32 = WM_APP + 93;
     const CHARACTER_COUNT_MESSAGE: u32 = WM_APP + 94;
+    const MOUSE_UP_COUNT_MESSAGE: u32 = WM_APP + 95;
     unsafe extern "system" fn procedure(
         handle: HWND,
         message: u32,
@@ -1001,6 +1003,11 @@ pub fn run_test_windows(count: usize) -> Result<()> {
                 unsafe { DefWindowProcW(handle, message, wparam, lparam) }
             }
             CHARACTER_COUNT_MESSAGE => LRESULT(CHARACTER_EVENTS.load(Ordering::Relaxed) as isize),
+            MOUSE_UP_COUNT_MESSAGE => LRESULT(MOUSE_UPS.load(Ordering::Relaxed) as isize),
+            WM_LBUTTONUP => {
+                MOUSE_UPS.fetch_add(1, Ordering::Relaxed);
+                unsafe { DefWindowProcW(handle, message, wparam, lparam) }
+            }
             WM_LBUTTONDOWN => {
                 unsafe {
                     SetWindowLongPtrW(
@@ -1041,6 +1048,7 @@ pub fn run_test_windows(count: usize) -> Result<()> {
     KEY_DOWNS.store(0, Ordering::Relaxed);
     KEY_UPS.store(0, Ordering::Relaxed);
     CHARACTER_EVENTS.store(0, Ordering::Relaxed);
+    MOUSE_UPS.store(0, Ordering::Relaxed);
     let _ = enable_dpi_awareness();
     unsafe {
         let instance = windows::Win32::System::LibraryLoader::GetModuleHandleW(None)?;

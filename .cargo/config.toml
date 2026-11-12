@@ -1,0 +1,4 @@
+[target.x86_64-pc-windows-msvc]
+# Keep first launch independent of a preinstalled Visual C++ redistributable.
+# The Windows APIs and the shared WebView2 Runtime remain system dependencies.
+rustflags = ["-C", "target-feature=+crt-static"]

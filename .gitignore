@@ -1,4 +1,7 @@
 /target
+/apps/settings/node_modules/
+/apps/settings/test-results/
+/apps/settings/playwright-report/
 *.pdb
 /fuzz/target
 /fuzz/corpus

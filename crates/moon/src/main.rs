@@ -46,6 +46,8 @@ fn run() -> Result<()> {
             }
         }
         #[cfg(windows)]
+        "settings" => open_settings(&options)?,
+        #[cfg(windows)]
         "doctor" => daemon::doctor(&options, &words[1..])?,
         #[cfg(windows)]
         "restore" => {
@@ -85,8 +87,11 @@ fn parse_args(arguments: Vec<String>) -> Result<(Options, Vec<String>)> {
         }
         match argument.as_str() {
             "--config" => {
-                options.config =
-                    Some(PathBuf::from(args.next().context("--config requires a path")?))
+                let path = args.next().context("--config requires a path")?;
+                options.config = Some(
+                    std::path::absolute(&path)
+                        .with_context(|| format!("resolve config path {path:?}"))?,
+                );
             }
             "--only" => {
                 options.only = Some(
@@ -132,6 +137,20 @@ pub fn load_config(options: &Options) -> Result<Config> {
     Config::load(&source).with_context(|| format!("config {}", path.display()))
 }
 
+#[cfg(windows)]
+pub fn open_settings(options: &Options) -> Result<()> {
+    let _apartment = moon_win::platform::Apartment::new()?;
+    let companion = std::env::current_exe()?.with_file_name("moon-settings.exe");
+    if !companion.is_file() {
+        bail!("Moon Settings is missing. Run Moon Setup to repair the installation.");
+    }
+    moon_win::runtime::shell_execute(
+        &companion.to_string_lossy(),
+        &format!("--config \"{}\"", config_path(options).display()),
+    )?;
+    Ok(())
+}
+
 fn config_command(options: &Options, words: &[String]) -> Result<()> {
     match words.first().map(String::as_str).unwrap_or("show") {
         "default" => print!("{DEFAULT_CONFIG}"),
@@ -173,6 +192,7 @@ fn print_help() {
         "moon {} — Windows 11 window manager\n\n\
 moon [start] [--background] [--only PROCESS] [--no-hook] [--no-surfaces] [--takeover]\n\
 moon doctor                  Check capabilities and competing managers\n\
+moon settings                Open Moon Settings\n\
 moon query [world|stats|windows|monitors|transactions|config]\n\
 moon subscribe               Stream committed state changes\n\
 moon config default|show|validate|schema|reference|migrate|path\n\
@@ -203,12 +223,30 @@ mod tests {
                 .to_vec(),
         )
         .unwrap();
-        assert_eq!(options.config, Some(PathBuf::from("settings.toml")));
+        assert_eq!(options.config, Some(std::path::absolute("settings.toml").unwrap()));
         assert_eq!(command, ["move-to-workspace", "2", "--follow"]);
         let (_, resize) =
             parse_args(["resize", "width", "-2%"].map(str::to_owned).to_vec()).unwrap();
         assert_eq!(resize, ["resize", "width", "-2%"]);
         assert!(parse_args(vec!["--only".into()]).is_err());
+    }
+
+    #[test]
+    fn selected_config_is_absolute_before_forwarding_even_for_a_new_file() {
+        let relative = "not-yet-created/selected-config.toml";
+        let (options, _) =
+            parse_args(vec!["--config".into(), relative.into(), "settings".into()]).unwrap();
+        let selected = config_path(&options);
+        assert!(selected.is_absolute());
+        assert_eq!(selected, std::env::current_dir().unwrap().join(relative));
+        let (forwarded, _) = parse_args(vec![
+            "--config".into(),
+            selected.to_string_lossy().into_owned(),
+            "start".into(),
+        ])
+        .unwrap();
+        assert_eq!(config_path(&forwarded), selected);
+        assert!(parse_args(vec!["--config".into(), String::new()]).is_err());
     }
 
     #[test]
@@ -228,7 +266,7 @@ mod tests {
                 "literal",
             ];
             let (options, command) = parse_args(arguments.map(str::to_owned).to_vec()).unwrap();
-            assert_eq!(options.config, Some(PathBuf::from("moon.toml")));
+            assert_eq!(options.config, Some(std::path::absolute("moon.toml").unwrap()));
             assert!(options.only.is_none());
             assert!(!options.background);
             assert_eq!(command, arguments[2..]);
@@ -243,7 +281,7 @@ mod tests {
                 .to_vec(),
         )
         .unwrap();
-        assert_eq!(options.config, Some(PathBuf::from("moon.toml")));
+        assert_eq!(options.config, Some(std::path::absolute("moon.toml").unwrap()));
         assert!(options.only.is_none());
         assert_eq!(command, ["custom-command", "--only", "testwin"]);
     }

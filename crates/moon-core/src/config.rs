@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const CONFIG_VERSION: u32 = 1;
+pub const MAX_CONFIG_BYTES: usize = 1_048_576;
 pub const DEFAULT_CONFIG: &str = include_str!("default.toml");
 pub type Bindings = BTreeMap<String, Vec<String>>;
 
@@ -12,6 +13,9 @@ pub type Bindings = BTreeMap<String, Vec<String>>;
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Config {
     pub config_version: u32,
+    /// Animate workspace switches without changing tiled window arrangements.
+    #[serde(default = "enabled")]
+    pub workspace_animation: bool,
     #[serde(default = "dark")]
     pub theme: String,
     #[serde(default)]
@@ -103,6 +107,9 @@ pub struct WidgetConfig {
     pub interval_seconds: u32,
     #[serde(default = "max_width")]
     pub max_width: i32,
+}
+fn enabled() -> bool {
+    true
 }
 fn dark() -> String {
     "dark".into()
@@ -230,7 +237,7 @@ impl Default for Config {
 }
 impl Config {
     pub fn load(source: &str) -> Result<Self, ConfigError> {
-        if source.len() > 1_048_576 {
+        if source.len() > MAX_CONFIG_BYTES {
             return Err("config exceeds 1 MiB".to_string().into());
         }
         let overrides: toml::Value = toml::from_str(source).map_err(|e: toml::de::Error| {
@@ -328,6 +335,14 @@ impl Config {
         }
         for commands in [&self.hooks.startup, &self.hooks.shutdown, &self.hooks.reload] {
             self.validate_commands(commands)?;
+        }
+        for command in &self.hooks.reload {
+            if self.commands(command)?.contains(&Command::Reload) {
+                return Err(
+                    "reload hooks cannot reload the configuration, including through aliases"
+                        .into(),
+                );
+            }
         }
         for rule in &self.rules {
             if rule.matches.is_empty() {
@@ -604,7 +619,7 @@ pub fn reference_markdown() -> String {
 }
 /// v0 was the pre-release draft; upgrading only adds its explicit version.
 pub fn migrate(source: &str) -> Result<String, String> {
-    if source.len() > 1_048_576 {
+    if source.len() > MAX_CONFIG_BYTES {
         return Err("config exceeds 1 MiB".into());
     }
     let mut document = source.parse::<toml_edit::DocumentMut>().map_err(|e| e.to_string())?;
@@ -651,6 +666,59 @@ mod tests {
     fn unknown_keys_and_future_versions_fail() {
         assert!(Config::load("[gaps]\ninnre=12").unwrap_err().message.contains("inner"));
         assert!(Config::load("config-version=2").is_err());
+    }
+    #[test]
+    fn settings_command_works_in_bindings_widgets_and_aliases() {
+        let config = Config::load("[aliases]\nprefs=['settings']\n[bindings]\n'alt+s'=['prefs']\n[bar]\nwidgets=[{id='preferences',format='Settings',click='settings'}]\n").unwrap();
+        assert_eq!(config.commands("prefs").unwrap(), vec![Command::Settings]);
+        assert_eq!(config.commands(&config.bindings["alt+s"][0]).unwrap(), vec![Command::Settings]);
+        assert_eq!(
+            config.commands(config.bar.widgets[0].click.as_deref().unwrap()).unwrap(),
+            vec![Command::Settings]
+        );
+        let world = crate::world::World::new(
+            config,
+            vec![crate::world::Monitor {
+                id: crate::ids::MonitorId(1),
+                name: "test".into(),
+                bounds: crate::geometry::Rect::new(0, 0, 1920, 1080),
+                work_area: crate::geometry::Rect::new(0, 0, 1920, 1080),
+                scale: 1.0,
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            crate::world::reduce(&world, crate::world::Event::Command(Command::Settings))
+                .unwrap()
+                .plan
+                .control,
+            Some(crate::world::Control::Settings)
+        );
+    }
+    #[test]
+    fn workspace_animation_defaults_on_and_requires_a_boolean() {
+        assert!(Config::load("").unwrap().workspace_animation);
+        assert!(!Config::load("workspace-animation=false").unwrap().workspace_animation);
+        assert!(Config::load("workspace-animation='false'").is_err());
+        assert!(Config::load("layout='carousel'").is_err());
+    }
+    #[test]
+    fn reload_hooks_reject_reload_after_nested_alias_expansion() {
+        for source in [
+            "[hooks]\nreload=['reload']",
+            "[aliases]\nrefresh=['reload']\n[hooks]\nreload=['refresh']",
+            "[aliases]\nrefresh=['apply']\napply=['reload']\n[hooks]\nreload=['refresh']",
+            "[aliases]\nrefresh=['prepare','reload']\nprepare=['focus left']\n[hooks]\nreload=['refresh']",
+        ] {
+            let error = Config::load(source).unwrap_err();
+            assert!(error.message.contains("reload hooks cannot reload"), "{error}");
+        }
+        let config = Config::load("[aliases]\nrefresh=['reload']\nrefocus=['focus left']\n[hooks]\nstartup=['refresh']\nreload=['refocus']").unwrap();
+        assert_eq!(config.commands(&config.hooks.startup[0]).unwrap(), vec![Command::Reload]);
+        assert_eq!(
+            config.commands(&config.hooks.reload[0]).unwrap(),
+            vec![Command::Focus(crate::geometry::Direction::Left)]
+        );
     }
     #[test]
     fn comments_survive_migration() {
@@ -732,6 +800,10 @@ reload=["arrange"]
     #[test]
     fn stock_rules_cover_office_and_dialogs() {
         let config = Config::default();
+        for process in ["moon", "moon-settings"] {
+            assert!(config.rules.iter().any(|r| r.commands == ["ignore"]
+                && r.matches.iter().any(|m| m.matches(process, "MoonSettings", "Moon Settings"))));
+        }
         assert!(config.rules.iter().any(|r| r.commands == ["ignore"]
             && r.matches.iter().any(|m| m.matches("EXCEL", "dialog", ""))));
         assert!(!config.rules.iter().any(|r| r.commands == ["ignore"]

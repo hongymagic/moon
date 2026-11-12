@@ -1,6 +1,6 @@
 # moon
 
-A native Windows 11 tiling window manager with an integrated bar and window borders. Built in Rust; no WebView, network listener, or scripting runtime.
+A native Windows 11 window manager with an integrated bar, window borders, and configurable tiling and animated workspace transitions. The Rust daemon has no WebView, network listener, or scripting runtime. A separate settings window uses the shared Windows WebView2 Runtime only while it is open.
 
 ## Build and run
 
@@ -48,6 +48,10 @@ Bindings merge by chord, rules append, and other lists replace. Invalid reloads 
 
 `moon config default`, `show`, `validate`, `schema`, `reference`, `path` and `migrate` inspect the live schema and configuration. Migration preserves comments and creates a backup before writing. The binding cheat sheet comes from the current bindings (`moon cheatsheet`).
 
+Open **Moon** from Start, choose **Settings** in the tray menu, or run `moon settings`. The settings pages cover window behavior, themes, border colors and gradients, workspaces, shortcuts, app rules, and advanced configuration. Changes remain a draft until saved; invalid changes and conflicting external edits leave the existing file intact. **Reload** reads the latest saved file after confirmation. Settings respects Windows contrast and reduced-motion preferences.
+
+The settings frontend uses pinned Bun 1.4.4 and TypeScript 7.0.2. `just settings` checks and rebuilds its bundled assets; `just settings-test` runs its browser interaction tests. Generated assets are checked in so a native Windows build does not require a web toolchain. See [settings persistence](docs/settings-editing.md) for exact merge and save behavior.
+
 ## IPC and recovery
 
 The public API is version 1, newline-delimited JSON over a named pipe restricted to the current logon session. Remote, low-integrity and AppContainer clients are refused. `moon query`, ordinary commands and `moon subscribe` use the same API. No keystrokes are exposed by the protocol or recorded in traces. See [the protocol example](examples/README.md).
@@ -56,7 +60,9 @@ Before changing a window, moon saves its original native placement, border colou
 
 ## Installation
 
-`just install` builds the UIAccess variant, requests Windows elevation for installation, creates or reuses a code-signing-only non-exportable certificate, signs the binary, verifies the signature, installs under Program Files and registers a least-privilege logon task. It adds its directory to the user's PATH for new Windows terminals, preserving existing entries. The Windows installation script also works directly. `scripts/uninstall.ps1` restores windows and removes its owned PATH entry, task, installed files and signing certificate; personal configuration is retained.
+The Windows package opens through **Install Moon.cmd**. Its guided setup handles first installation or update, progress, cancellation, and recovery. It adds a Start entry and an Installed Apps listing. See [installation and recovery](docs/installation.md).
+
+`just install` builds the UIAccess daemon and ordinary-permission Settings companion, requests Windows elevation, creates or reuses a non-exportable signing certificate, verifies signatures, installs under Program Files and registers a least-privilege logon task. It preserves existing PATH entries. Removal restores windows and removes the installation's owned entries, files and certificate; personal configuration is retained.
 
 UIAccess and resilience acceptance must be tested on the actual interactive Windows account. Elevated CI jobs cannot establish those results. The seven-day daily-driver soak in [the build plan](.claude/plans/moon-v1.md) is an elapsed-time acceptance condition, separate from compilation and automated tests. Current measured results are recorded in `docs/validation-*.md`.
 
@@ -65,6 +71,8 @@ UIAccess and resilience acceptance must be tested on the actual interactive Wind
 - `moon-core`: pure state, commands, layout, configuration, scenes and protocol.
 - `moon-win`: all Win32/COM calls, hooks, pipes, native rendering and providers.
 - `moon`: CLI, single-writer event loop, write-ahead journal and watchdog.
+- `moon-settings`: ordinary-permission settings host and atomic configuration persistence.
+- `apps/settings`: bundled TypeScript settings interface and interaction tests.
 - `testwin`: dedicated windows for integration and capability tests.
 
 This repository remains private. No project redistribution licence has been selected. Third-party asset notices are kept beside the assets. Research links and compatibility decisions are in [docs/research.md](docs/research.md).

@@ -22,6 +22,10 @@ pub struct BarScene {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BarItem {
     pub rect: Rect,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub selected: bool,
     pub text: String,
     pub foreground: String,
     pub background: Option<String>,
@@ -114,6 +118,12 @@ pub fn derive(world: &World, providers: &BTreeMap<String, String>, error: Option
                     let accent = style.color.as_deref().unwrap_or("terracotta");
                     items.push(BarItem {
                         rect: Rect::default(),
+                        label: format!(
+                            "Workspace {}{}",
+                            ws.name,
+                            if selected { " · Current" } else { "" }
+                        ),
+                        selected,
                         text: style.icon.clone().unwrap_or_else(|| ws.name.clone()),
                         foreground: color(if selected { "crust" } else { accent }),
                         background: Some(color(if selected {
@@ -149,9 +159,30 @@ pub fn derive(world: &World, providers: &BTreeMap<String, String>, error: Option
             let width = ((text.chars().count() as f32 * config.bar.font_size * 0.62 + 20.0)
                 * scale)
                 .min(widget.max_width as f32 * scale);
+            let label = if widget.id == "logo" {
+                "Moon".to_owned()
+            } else {
+                let name = match widget.id.as_str() {
+                    "cpu" => "Processor usage",
+                    "memory" => "Memory usage",
+                    "keyboard" => "Keyboard language",
+                    "network" => "Network",
+                    "battery" => "Battery",
+                    "volume" => "Volume",
+                    "weather" => "Weather",
+                    "clock" => "Date and time",
+                    "title" => "Active window",
+                    "media" => "Now playing",
+                    "state" => "Layout",
+                    _ => &widget.id,
+                };
+                format!("{name}: {text}")
+            };
             if let Some(icon) = &widget.icon {
                 items.push(BarItem {
                     rect: Rect::default(),
+                    label: label.clone(),
+                    selected: false,
                     text: icon.clone(),
                     foreground: color("base"),
                     background: Some(color(widget.icon_color.as_deref().unwrap_or("terracotta"))),
@@ -162,6 +193,8 @@ pub fn derive(world: &World, providers: &BTreeMap<String, String>, error: Option
             }
             items.push(BarItem {
                 rect: Rect::default(),
+                label,
+                selected: false,
                 text,
                 foreground: color(widget.color.as_deref().unwrap_or(&config.bar.foreground)),
                 background: widget.background.as_deref().map(color),
@@ -180,6 +213,8 @@ pub fn derive(world: &World, providers: &BTreeMap<String, String>, error: Option
             alignments.clear();
             items.push(BarItem {
                 rect,
+                label: format!("Configuration error: {error}. Click to reload."),
+                selected: false,
                 text: format!(
                     "moon: {}",
                     error.lines().map(str::trim).collect::<Vec<_>>().join(" ")

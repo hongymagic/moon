@@ -1,5 +1,6 @@
 # moon defaults. User bindings merge by chord, rules append, other lists replace.
 config-version = 1
+workspace-animation = true
 theme = "dark"
 cursor-jump = true
 focus-follows-cursor = false
@@ -150,7 +151,7 @@ steel = "#596c83"
 commands = ["ignore"]
 matches = [
   {process={equals="Arc"}, title={regex="[Pp]icture in [Pp]icture"}},
-  {process={regex="^(zebar|tacky-borders|moon)$"}},
+  {process={regex="^(zebar|tacky-borders|moon|moon-settings)$"}},
   {title={regex="[Pp]icture.in.[Pp]icture|Mini Player"}, class={regex="Chrome_WidgetWin_1|MozillaDialogClass"}},
   {class={equals="OperationStatusWindow"}},
   {process={regex="ScreenClippingHost|SnippingTool"}},

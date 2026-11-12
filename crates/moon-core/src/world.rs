@@ -92,6 +92,7 @@ pub enum Control {
     Exit,
     Restore,
     CheatSheet,
+    Settings,
 }
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Plan {
@@ -201,11 +202,9 @@ impl World {
             let Some(monitor) = self.monitor(workspace.monitor) else { continue };
             let gaps = self.config.gaps_for(workspace.id.index(), &monitor.name);
             let gap = (f64::from(gaps.inner) * monitor.scale).round() as i32;
-            let layout: BTreeMap<_, _> = self
-                .layout_tree(workspace)
-                .layout(self.tiling_area(workspace.id), gap)
-                .into_iter()
-                .collect();
+            let area = self.tiling_area(workspace.id);
+            let tree = self.layout_tree(workspace);
+            let layout: BTreeMap<_, _> = tree.layout(area, gap).into_iter().collect();
             for (&id, window) in
                 self.windows.iter().filter(|(_, w)| w.workspace == workspace.id && !w.suspended)
             {
@@ -627,6 +626,7 @@ impl World {
             Command::Exit => effects.control = Some(Control::Exit),
             Command::Restore => effects.control = Some(Control::Restore),
             Command::CheatSheet => effects.control = Some(Control::CheatSheet),
+            Command::Settings => effects.control = Some(Control::Settings),
         }
         Ok(())
     }
@@ -1113,6 +1113,115 @@ matches=[{process={equals="testwin"},class={equals="#32770"}}]
             assert!(fixture.config.bindings.contains_key(&format!("alt+{n}")));
             assert!(fixture.config.bindings.contains_key(&format!("alt+shift+{n}")));
         }
+    }
+    #[test]
+    fn focusing_a_hidden_workspace_restores_all_its_tiles_without_reordering() {
+        let mut w = world();
+        apply(&mut w, Event::WindowAdded(window(1)));
+        apply(&mut w, Event::Command(Command::ToggleDirection));
+        for id in 2..=3 {
+            apply(&mut w, Event::WindowAdded(window(id)));
+        }
+        let original_tiles = w.plan().placements;
+        let original_tree = w.workspaces[0].tree.snapshot();
+        apply(&mut w, Event::Command(Command::Workspace("2".into())));
+        for id in 4..=5 {
+            apply(&mut w, Event::WindowAdded(window(id)));
+        }
+        let other_tree = w.workspaces[1].tree.snapshot();
+        let transition = reduce(&w, Event::WindowFocused(WindowId(1))).unwrap();
+        assert_eq!(transition.plan.focus, Some(WindowId(1)));
+        w = transition.world;
+        assert_eq!(w.current_workspace(), WorkspaceId(0));
+        assert_eq!(w.recent_workspace, Some(WorkspaceId(1)));
+        assert_eq!(w.workspaces[0].tree.snapshot(), original_tree);
+        assert_eq!(w.workspaces[1].tree.snapshot(), other_tree);
+        assert_eq!(
+            w.plan().placements.into_iter().filter(|p| p.visible).collect::<Vec<_>>(),
+            original_tiles
+        );
+        assert!(original_tiles.iter().all(|p| p.rect != w.tiling_area(WorkspaceId(0))));
+        w.check().unwrap();
+    }
+    #[test]
+    fn focusing_within_a_workspace_preserves_active_workspaces_and_tile_order() {
+        let mut w = World::new(Config::default(), vec![monitor(1, 0), monitor(2, 1920)]).unwrap();
+        for id in 1..=4 {
+            let mut info = window(id);
+            if id > 2 {
+                info.monitor = MonitorId(2);
+                info.rect.x += 1920;
+            }
+            apply(&mut w, Event::WindowAdded(info));
+        }
+        let active = w.active.clone();
+        let recent = w.recent_workspace;
+        let trees: Vec<_> = w.workspaces.iter().map(|ws| ws.tree.snapshot()).collect();
+        let placements = w.plan().placements;
+        for id in [3, 4, 1, 2] {
+            apply(&mut w, Event::WindowFocused(WindowId(id)));
+            assert_eq!(w.focused, Some(WindowId(id)));
+            assert_eq!(w.active, active);
+            assert_eq!(w.recent_workspace, recent);
+            assert_eq!(w.plan().placements, placements);
+            assert_eq!(w.workspaces.iter().map(|ws| ws.tree.snapshot()).collect::<Vec<_>>(), trees);
+        }
+        apply(&mut w, Event::Command(Command::Focus(Direction::Left)));
+        assert_eq!(w.focused, Some(WindowId(1)));
+        w.check().unwrap();
+    }
+    #[test]
+    fn animation_reload_and_restart_preserve_resized_tiling_and_membership() {
+        let mut w = world();
+        for id in 1..=3 {
+            apply(&mut w, Event::WindowAdded(window(id)));
+        }
+        let before = w.workspaces[0].tree.snapshot();
+        apply(&mut w, Event::Command(Command::Resize { axis: Axis::Horizontal, delta: 0.1 }));
+        let resized = w.workspaces[0].tree.snapshot();
+        assert_ne!(before, resized);
+        let plan = w.plan();
+        for enabled in [false, true] {
+            let mut config = w.config.clone();
+            config.workspace_animation = enabled;
+            apply(&mut w, Event::ConfigChanged(Box::new(config)));
+            assert_eq!(w.workspaces[0].tree.snapshot(), resized);
+            assert_eq!(w.plan(), plan);
+            let restored: World =
+                serde_json::from_value(serde_json::to_value(&w).unwrap()).unwrap();
+            assert_eq!(restored.config.workspace_animation, enabled);
+            assert_eq!(restored.plan(), plan);
+            restored.check().unwrap();
+        }
+        let mut old = serde_json::to_value(&w).unwrap();
+        old["config"].as_object_mut().unwrap().remove("workspace-animation");
+        let restored: World = serde_json::from_value(old).unwrap();
+        assert!(restored.config.workspace_animation);
+        assert_eq!(restored.plan(), plan);
+    }
+    #[test]
+    fn focusing_a_hidden_floating_window_preserves_fullscreen_and_tiled_siblings() {
+        let mut w = world();
+        for id in 1..=3 {
+            apply(&mut w, Event::WindowAdded(window(id)));
+        }
+        apply(&mut w, Event::Command(Command::SetFloating));
+        apply(&mut w, Event::Command(Command::ToggleFullscreen));
+        let before = w.plan().placements;
+        let tree = w.workspaces[0].tree.snapshot();
+        let floating = w.windows[&WindowId(3)].floating_rect;
+        apply(&mut w, Event::Command(Command::Workspace("2".into())));
+        apply(&mut w, Event::WindowAdded(window(4)));
+        apply(&mut w, Event::WindowFocused(WindowId(3)));
+        assert_eq!(w.current_workspace(), WorkspaceId(0));
+        assert_eq!(w.workspaces[0].tree.snapshot(), tree);
+        assert_eq!(
+            w.plan().placements.into_iter().filter(|p| p.visible).collect::<Vec<_>>(),
+            before
+        );
+        assert_eq!(w.windows[&WindowId(3)].floating_rect, floating);
+        assert!(w.windows[&WindowId(3)].floating && w.windows[&WindowId(3)].fullscreen);
+        w.check().unwrap();
     }
     #[test]
     fn one_hundred_thousand_command_sequences_keep_invariants() {

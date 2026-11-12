@@ -15,4 +15,5 @@ pub mod config;
 pub mod layout;
 pub mod protocol;
 pub mod scene;
+pub mod settings;
 pub mod world;

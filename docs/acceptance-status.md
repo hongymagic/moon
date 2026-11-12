@@ -5,6 +5,33 @@ It was reviewed on 12 November 2026. Implemented event handling and passing
 simulated tests do not establish that the corresponding physical Windows event
 has been exercised.
 
+## Product polish candidate, 12 November 2026
+
+The current normal-permission Windows candidate is
+`075E96CD3C7C95E24D04F07EC9BCFF7D53F74F60E2F6AC53B23B179C7DFBB134`.
+Settings is
+`7901563646D88335A3882DC0604691F5868D5F4BEA625D9C0D1479368A7BE050`.
+The corresponding UIAccess installation image is
+`9B85EBEEFD8404AC8E1FCB2F5395883D81CF1ADD8E7CCFE79488F7DD503B1546`;
+it has been built, but has not been signed, installed or run with UIAccess.
+All four distribution executables use the static C runtime. Setup checks the
+separate WebView2 Evergreen prerequisite for Settings.
+
+| Area | Recorded result |
+|---|---|
+| Configuration and persistence | 86 portable tests pass: 70 core, 10 CLI and six store cases. Windows adds five store cases and 18 native unit checks; four interactive hook cases are explicitly excluded from this run and retain their earlier separate evidence. |
+| Settings interaction | 13 browser scenarios and eight live Windows checks pass. The native run proves comment-preserving save, applying the expected effective configuration, conflict retention, reload confirmation, Appearance rendering and refusing to reload a daemon using another file. Report: `target/polish-settings-ui/report.json`. |
+| Native layout and recovery | All 14 integration scenarios pass on the current static-runtime candidate, including guarded close, restart, watchdog recovery and failed-startup recovery. Report: `target/polish-static-integration-results.json`. |
+| Workspace motion | Workspaces are the carousel pages. A focused window activates its containing workspace; focus within that workspace does not animate. Ten native integration cases and nine grouped-thumbnail probe cases cover the behavior described in [carousel validation](validation-carousel.md). |
+| Icons and setup | Two binary-resource checks and 60 isolated installer/registration/handover checks pass. Setup preview checks do not invoke Install or Remove. Multi-size icons and product identity are embedded in both application images. |
+| Distribution | The packaging validator passes 14 isolated cases, including deterministic archive readback, input tampering, permission declarations, external-runtime rejection and partial-publication cleanup. [Packaging](packaging.md) describes strict validation of the final inputs. |
+| Build and dependencies | Portable and Windows Clippy pass with warnings denied; frontend type checking, generated assets and formatting pass. Windows-target dependency policy checks pass. The cross-platform lockfile's two unused Linux dependency advisories are documented in [product polish](product-polish.md). |
+
+The user's deferred Windows installation approval remains in effect. This
+candidate does not establish signed-install, elevated-window, physical resilience
+or seven-day-soak acceptance. Earlier rows below retain their candidate identity;
+they are not silently promoted to measurements of the new binary.
+
 ## Milestone checks
 
 | Check | Observed evidence | Acceptance still requiring a measured result |
@@ -50,12 +77,21 @@ must stay usable and every owned test window must be recoverable afterward.
 
 | Budget | Evidence available |
 |---|---|
-| Hook callback p99 under 50 µs | The final ordered E8 mask measures 135 µs p99 for moon's own work, including masking, and 741 µs for the whole callback in the 128-chord native regression. Both exceed the budget. The earlier 9 µs sample predates the correctness fix. |
-| Eight-window key-to-placement median under 10 ms, p99 under 30 ms | 128/128 exact placements pass. The latest default-profile run measured independent median/p99 14.415/40.263 ms; latency remains above budget. |
+| Hook callback p99 under 50 µs | Current static-runtime candidate: 140 µs p99 for Moon's own work and 719 µs for the whole callback. Both exceed the budget. The earlier 9 µs sample predates the key-pair correctness fix. |
+| Eight-window key-to-placement median under 10 ms, p99 under 30 ms | 128/128 exact placements pass. Current independent median/p99 are 12.665/32.790 ms; latency remains above budget. |
 | 50-window reducer plus layout under 100 µs | Passed: 22.59–22.93 µs in the recorded Criterion run. |
-| Idle CPU 0%, no timer faster than 1 Hz | Latest pre-draw-wait full-process idle sample is 0.156% of one core over ten seconds. Providers run at 1 Hz and unchanged scenes do not redraw; literal zero CPU is not established. |
-| Working set under 50 MB, bar and borders on one 4K monitor | Full release process with eight windows, bar and borders: 48,586,752 bytes after the workload/idle interval with pre-draw completion waits. The separate 128-update burst had a 42,819,584-byte peak. These measured profiles pass; the final signed candidate still needs measurement. |
-| Ready in under 300 ms | Full eight-window pre-draw-wait release candidate measured 114.233 ms. The actual signed installation still needs its own result. |
+| Idle CPU 0%, no timer faster than 1 Hz | Current ten-second sample is 0.625% of one core. Providers run at 1 Hz and unchanged scenes do not redraw; animation uses a bounded active-only timer. Literal zero CPU is not established. |
+| Working set under 50 MB, bar and borders on one 4K monitor | Current eight-window process: 45,682,688 bytes before the workload, 54,898,688 after it and 52,674,560 after idle. The current candidate fails the budget. Earlier lower measurements do not establish a pass for it. |
+| Ready in under 300 ms | Current eight-window candidate measured 129.901 ms and passes. The signed installation still needs its own result. |
+
+These results use normal-permission candidate `075E96CD…`, eight owned helpers,
+the default WARP renderer, and a 3840×2160 display at 125% scaling, with the bar
+and borders enabled. Raw records are in
+`target/postpolish-performance/static-crt/`. A separate four-window workspace
+sample observed all six full-width animations below the 50-pixel bar, with
+47,575,040 bytes peak working set. Its command-to-overlay-disappearance interval
+was 251.64–269.55 ms; this includes command handling and external sampling, not
+just the nominal 200 ms easing. It does not replace the eight-window budget test.
 
 Detailed results are in [native integration](validation-integration.md),
 [platform verification](validation-platform.md),

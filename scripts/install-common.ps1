@@ -164,6 +164,47 @@ function Test-MoonAdministrator {
     try { ([Security.Principal.WindowsPrincipal]::new($identity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) }
     finally { $identity.Dispose() }
 }
+function New-MoonInstallMutexSecurity {
+    $security=[Security.AccessControl.MutexSecurity]::new()
+    $security.SetAccessRuleProtection($true,$false)
+    $security.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
+    foreach ($sid in @('S-1-5-32-544','S-1-5-18')) {
+        $rule=[Security.AccessControl.MutexAccessRule]::new([Security.Principal.SecurityIdentifier]::new($sid),[Security.AccessControl.MutexRights]::FullControl,[Security.AccessControl.AccessControlType]::Allow)
+        [void]$security.AddAccessRule($rule)
+    }
+    $security
+}
+function Enter-MoonInstallLock {
+    param([string]$Name='Global\moon-install-v1',[Security.AccessControl.MutexSecurity]$Security=(New-MoonInstallMutexSecurity))
+    # One installation is shared by every account and Windows session. Acquire
+    # only after elevation, before reading state; keep it through recovery.
+    $created=$false
+    $mutex=[Threading.Mutex]::new($false,$Name,[ref]$created,$Security)
+    try {
+        try {$acquired=$mutex.WaitOne(0)} catch [Threading.AbandonedMutexException] {$acquired=$true}
+        if (!$acquired) {throw 'Another Moon setup or removal is already running. Wait for it to finish, then try again.'}
+        return $mutex
+    } catch {$mutex.Dispose();throw}
+}
+function Exit-MoonInstallLock([Threading.Mutex]$Mutex) {
+    if ($null -ne $Mutex) {try {$Mutex.ReleaseMutex()} finally {$Mutex.Dispose()}}
+}
+function New-MoonHandoverMutexSecurity {
+    $security=New-MoonInstallMutexSecurity
+    $user=[Security.Principal.WindowsIdentity]::GetCurrent().User
+    $security.SetOwner($user)
+    [void]$security.AddAccessRule([Security.AccessControl.MutexAccessRule]::new($user,[Security.AccessControl.MutexRights]::FullControl,[Security.AccessControl.AccessControlType]::Allow))
+    $security
+}
+function Test-MoonHandoverInstallation($Saved,$State) {
+    if (!$State -or !$Saved.PSObject.Properties['handover_id'] -or $Saved.handover_id -notmatch '^[a-f0-9]{32}$' -or !$State.PSObject.Properties['handover_id'] -or $State.handover_id -cne $Saved.handover_id) {return $false}
+    if ($Saved.PSObject.Properties['installation_id'] -and $Saved.installation_id -and $State.install_id -cne $Saved.installation_id) {return $false}
+    return $true
+}
+function Assert-MoonExpectedInstallation($State,[string]$InstallId,[string]$HandoverId) {
+    if ($InstallId -and $State.install_id -cne $InstallId) {throw 'The installation changed before removal. The newer installation was left unchanged.'}
+    if ($HandoverId -and (!$State.PSObject.Properties['handover_id'] -or $State.handover_id -cne $HandoverId)) {throw 'A different setup operation owns this installation. It was left unchanged.'}
+}
 function ConvertTo-MoonArgument([string]$Value) {
     if ($Value.Length -gt 0 -and $Value -notmatch '[\s"]') { return $Value }
     $result = [Text.StringBuilder]::new(); [void]$result.Append('"'); $slashes = 0
@@ -270,6 +311,7 @@ function Read-MoonInstallState([string]$Directory) {
 function Write-MoonJsonFile([string]$Path,$Value) {
     $directory=[IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($Path))
     $temporary=Join-Path $directory ('moon-write.'+[guid]::NewGuid().ToString('N')+'.tmp')
+    try {
     [IO.File]::WriteAllText($temporary,($Value | ConvertTo-Json -Depth 20),[Text.UTF8Encoding]::new($false))
     # The directory is Administrators-owned in a real install. Set the same
     # owner explicitly so a creator's token default cannot leave user-owned
@@ -278,6 +320,7 @@ function Write-MoonJsonFile([string]$Path,$Value) {
     $security.SetOwner((Get-Acl -LiteralPath $directory).GetOwner([Security.Principal.SecurityIdentifier]))
     Set-Acl -LiteralPath $temporary -AclObject $security
     if (Test-Path -LiteralPath $Path) { [IO.File]::Replace($temporary,$Path,[NullString]::Value) } else { [IO.File]::Move($temporary,$Path) }
+    } finally {if (Test-Path -LiteralPath $temporary) {Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue}}
 }
 function Write-MoonInstallState([string]$Directory,$State) { Write-MoonJsonFile (Join-Path $Directory 'installation.json') $State }
 function Assert-MoonCertificate($Certificate,[string]$InstallId) {
@@ -362,4 +405,179 @@ function Start-MoonLimitedOnce([string]$Target,[string]$Arguments,$State) {
             $running -and [string]::Equals($running.executable,$Target,[StringComparison]::OrdinalIgnoreCase) -and $running.token.ui_access
         }
     } finally {Unregister-ScheduledTask -TaskName $name -Confirm:$false}
+}
+
+# Shell integration uses a private product key and one recorded shortcut. The
+# optional roots let regression checks exercise real APIs in isolated locations.
+function Get-MoonShellPaths($State,[string]$ProgramsDirectory=([Environment]::GetFolderPath('Programs'))) {
+    if ($State.install_id -notmatch '^[a-f0-9]{32}$') {throw 'Invalid Moon installation identity.'}
+    [pscustomobject]@{shortcut=(Join-Path $ProgramsDirectory 'Moon.lnk');registry=('Software\Microsoft\Windows\CurrentVersion\Uninstall\moon-'+$State.install_id)}
+}
+function Read-MoonShellRegistry([Microsoft.Win32.RegistryKey]$Root,[string]$Path) {
+    $key=$Root.OpenSubKey($Path)
+    if (!$key) {return [pscustomobject]@{exists=$false;values=@()}}
+    try {
+        if ($key.GetSubKeyNames().Count) {throw 'Unexpected nested application registration; it was left unchanged.'}
+        $values=@($key.GetValueNames() | Sort-Object | ForEach-Object {
+            [pscustomobject]@{name=$_;kind=$key.GetValueKind($_).ToString();value=$key.GetValue($_,$null,[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)}
+        })
+        [pscustomobject]@{exists=$true;values=$values}
+    } finally {$key.Dispose()}
+}
+function Assert-MoonShellRegistryOwner($Snapshot,$State) {
+    if (!$Snapshot.exists) {return}
+    $id=@($Snapshot.values | Where-Object name -eq 'MoonInstallId')
+    $owner=@($Snapshot.values | Where-Object name -eq 'MoonOwnerSid')
+    if ($id.Count -ne 1 -or $owner.Count -ne 1 -or $id[0].value -ne $State.install_id -or $owner[0].value -ne $State.owner_sid) {throw 'An unrelated application owns this installed-apps entry; it was left unchanged.'}
+}
+function Get-MoonBytesHash([byte[]]$Bytes) {
+    $sha=[Security.Cryptography.SHA256]::Create()
+    try {([BitConverter]::ToString($sha.ComputeHash($Bytes))).Replace('-','')} finally {$sha.Dispose()}
+}
+function New-MoonShellPlan {
+    param([string]$Directory,$State,[string]$Version,[string]$ShortcutArguments,[string]$UninstallCommand,
+        [string]$ProgramsDirectory=([Environment]::GetFolderPath('Programs')),
+        [Microsoft.Win32.RegistryKey]$RegistryRoot=[Microsoft.Win32.Registry]::CurrentUser)
+    $paths=Get-MoonShellPaths $State $ProgramsDirectory
+    Assert-MoonNoReparse $paths.shortcut
+    $beforeRegistry=Read-MoonShellRegistry $RegistryRoot $paths.registry
+    Assert-MoonShellRegistryOwner $beforeRegistry $State
+    $prior=if ($State.PSObject.Properties['shell']) {$State.shell} else {$null}
+    if ($beforeRegistry.exists -and !$prior) {throw 'Existing Moon application registration has no installation ownership record.'}
+    $beforeShortcut=$null
+    if (Test-Path -LiteralPath $paths.shortcut) {
+        $beforeShortcut=[IO.File]::ReadAllBytes($paths.shortcut)
+        if (!$prior -or $prior.shortcut_path -ne $paths.shortcut -or (Get-MoonBytesHash $beforeShortcut) -ne $prior.shortcut_sha256) {throw 'A different or edited Moon Start menu shortcut already exists; it was left unchanged.'}
+    }
+    $target=Join-Path $Directory 'moon.exe'
+    $temporary=Join-Path ([IO.Path]::GetTempPath()) ('moon-shortcut-'+[guid]::NewGuid().ToString('N')+'.lnk')
+    $shell=New-Object -ComObject WScript.Shell
+    try {
+        $shortcut=$shell.CreateShortcut($temporary)
+        try {
+        $shortcut.TargetPath=(Join-Path $Directory 'moon-settings.exe'); $shortcut.Arguments=$ShortcutArguments
+            $shortcut.WorkingDirectory=$Directory; $shortcut.Description='A calmer place for your windows.'
+            $shortcut.IconLocation=$target+',0'; $shortcut.WindowStyle=1; $shortcut.Save()
+            $bytes=[IO.File]::ReadAllBytes($temporary)
+        } finally {[void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shortcut)}
+    } finally {
+        [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell)
+        if (Test-Path -LiteralPath $temporary) {Remove-Item -LiteralPath $temporary -Force}
+    }
+    $fields=[ordered]@{
+        DisplayName='Moon';DisplayVersion=$Version;Publisher='Moon';DisplayIcon=($target+',0')
+        InstallLocation=$Directory;InstallDate=[DateTime]::UtcNow.ToString('yyyyMMdd')
+        UninstallString=$UninstallCommand;NoModify=1;NoRepair=1
+        MoonInstallId=$State.install_id;MoonOwnerSid=$State.owner_sid
+    }
+    $size=0L
+    foreach ($file in $State.files) { $path=Join-Path $Directory $file; if (Test-Path -LiteralPath $path -PathType Leaf) {$size+=(Get-Item -LiteralPath $path).Length} }
+    $fields.EstimatedSize=[int][Math]::Min([int]::MaxValue,[Math]::Ceiling($size/1024.0))
+    $values=@($fields.GetEnumerator() | Sort-Object Key | ForEach-Object {[pscustomobject]@{name=$_.Key;value=$_.Value;kind=if ($_.Value -is [int]) {'DWord'} else {'String'}}})
+    [pscustomobject]@{
+        paths=$paths;before_registry=$beforeRegistry;before_shortcut=$beforeShortcut
+        registry=[pscustomobject]@{exists=$true;values=$values};shortcut=$bytes
+        ownership=[pscustomobject]@{shortcut_path=$paths.shortcut;shortcut_sha256=(Get-MoonBytesHash $bytes);uninstall_key=$paths.registry}
+    }
+}
+function Set-MoonShellRegistry([Microsoft.Win32.RegistryKey]$Root,[string]$Path,$Snapshot) {
+    if (!$Snapshot.exists) {$Root.DeleteSubKeyTree($Path,$false);return}
+    $key=$Root.CreateSubKey($Path)
+    try {
+        foreach ($name in @($key.GetValueNames())) {if ($Snapshot.values.name -notcontains $name) {$key.DeleteValue($name,$false)}}
+        foreach ($entry in @($Snapshot.values|Sort-Object @{Expression={if($_.name -in @('MoonInstallId','MoonOwnerSid')){0}else{1}}},name)) {$key.SetValue($entry.name,$entry.value,[Microsoft.Win32.RegistryValueKind]$entry.kind)}
+    } finally {$key.Dispose()}
+}
+function Publish-MoonShellPlan($Plan,$State,[Microsoft.Win32.RegistryKey]$RegistryRoot=[Microsoft.Win32.Registry]::CurrentUser) {
+    $current=Read-MoonShellRegistry $RegistryRoot $Plan.paths.registry
+    if (($current | ConvertTo-Json -Depth 10 -Compress) -cne ($Plan.before_registry | ConvertTo-Json -Depth 10 -Compress)) {throw 'The installed-apps entry changed during setup; the newer entry was preserved.'}
+    Assert-MoonNoReparse $Plan.paths.shortcut
+    if (Test-Path -LiteralPath $Plan.paths.shortcut) {
+        if ($null -eq $Plan.before_shortcut -or (Get-FileHash -LiteralPath $Plan.paths.shortcut -Algorithm SHA256).Hash -ne (Get-MoonBytesHash $Plan.before_shortcut)) {throw 'The Start menu shortcut changed during setup; the newer shortcut was preserved.'}
+    } elseif ($null -ne $Plan.before_shortcut) {throw 'The Start menu shortcut was removed during setup; it was not recreated.'}
+    # All callers persist Plan.ownership in protected metadata before publication.
+    Set-MoonShellRegistry $RegistryRoot $Plan.paths.registry $Plan.registry
+    [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($Plan.paths.shortcut))
+    [IO.File]::WriteAllBytes($Plan.paths.shortcut,$Plan.shortcut)
+}
+function Undo-MoonShellPlan($Plan,$State,[Microsoft.Win32.RegistryKey]$RegistryRoot=[Microsoft.Win32.Registry]::CurrentUser) {
+    $current=Read-MoonShellRegistry $RegistryRoot $Plan.paths.registry
+    if ($current.exists) {Assert-MoonShellRegistryOwner $current $State}
+    Set-MoonShellRegistry $RegistryRoot $Plan.paths.registry $Plan.before_registry
+    Assert-MoonNoReparse $Plan.paths.shortcut
+    if (Test-Path -LiteralPath $Plan.paths.shortcut) {
+        $hash=(Get-FileHash -LiteralPath $Plan.paths.shortcut -Algorithm SHA256).Hash
+        if ($hash -ne $Plan.ownership.shortcut_sha256) {
+            if ($null -ne $Plan.before_shortcut -and $hash -eq (Get-MoonBytesHash $Plan.before_shortcut)) {return}
+            Write-Warning 'A changed Start menu shortcut was preserved during recovery.';return
+        }
+    }
+    if ($null -ne $Plan.before_shortcut) {[IO.File]::WriteAllBytes($Plan.paths.shortcut,$Plan.before_shortcut)}
+    elseif (Test-Path -LiteralPath $Plan.paths.shortcut) {Remove-Item -LiteralPath $Plan.paths.shortcut -Force}
+}
+function Remove-MoonShellIntegration($State,[string]$ProgramsDirectory=([Environment]::GetFolderPath('Programs')),[Microsoft.Win32.RegistryKey]$RegistryRoot=[Microsoft.Win32.Registry]::CurrentUser) {
+    if (!$State.PSObject.Properties['shell'] -or !$State.shell) {return}
+    $paths=Get-MoonShellPaths $State $ProgramsDirectory
+    if ($State.shell.uninstall_key -ne $paths.registry -or $State.shell.shortcut_path -ne $paths.shortcut) {throw 'The saved Moon application registration points outside its owned locations.'}
+    $current=Read-MoonShellRegistry $RegistryRoot $paths.registry
+    Assert-MoonShellRegistryOwner $current $State
+    Assert-MoonNoReparse $paths.shortcut
+    if (Test-Path -LiteralPath $paths.shortcut) {
+        if ((Get-FileHash -LiteralPath $paths.shortcut -Algorithm SHA256).Hash -eq $State.shell.shortcut_sha256) {Remove-Item -LiteralPath $paths.shortcut -Force}
+        else {Write-Warning 'Your edited Moon Start menu shortcut was preserved.'}
+    }
+    if ($current.exists) {$RegistryRoot.DeleteSubKeyTree($paths.registry,$false)}
+}
+
+function Get-MoonSetupFiles([string]$OperationId) {
+    if ($OperationId -notmatch '^[a-f0-9]{32}$') {throw 'Invalid setup operation identity.'}
+    $directory=Join-Path $env:LOCALAPPDATA 'moon\setup'
+    Assert-MoonNoReparse $directory
+    [pscustomobject]@{directory=$directory;status=(Join-Path $directory ($OperationId+'.json'));cancel=(Join-Path $directory ($OperationId+'.cancel'))}
+}
+function Test-MoonApprovalCancelled($ErrorRecord) {
+    $exception=$ErrorRecord.Exception
+    while ($exception) {
+        if ($exception -is [ComponentModel.Win32Exception] -and $exception.NativeErrorCode -eq 1223) {return $true}
+        $exception=$exception.InnerException
+    }
+    return $false
+}
+function Write-MoonSetupStatus([string]$OperationId,[string]$Status,[string]$Message,[string]$Detail='') {
+    if (!$OperationId) {return}
+    try {
+    $files=Get-MoonSetupFiles $OperationId
+    [void][IO.Directory]::CreateDirectory($files.directory)
+    Assert-MoonNoReparse $files.status
+    Write-MoonJsonFile $files.status ([pscustomobject]@{version=1;operation=$OperationId;status=$Status;message=$Message;detail=$Detail;updated_at=[DateTime]::UtcNow.ToString('o')})
+    } catch {
+        # Progress is advisory. A locked file, full disk, or closed UI must never
+        # stop installation recovery or replace the original transaction error.
+        Write-Warning ('Setup progress could not be updated: '+$_.Exception.Message) -WarningAction Continue
+    }
+}
+function Read-MoonSetupStatus([string]$OperationId) {
+    $files=Get-MoonSetupFiles $OperationId
+    if (!(Test-Path -LiteralPath $files.status)) {return $null}
+    $stream=[IO.FileStream]::new($files.status,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+    try {
+        if ($stream.Length -gt 1048576) {throw 'Setup progress exceeds its expected size.'}
+        $reader=[IO.StreamReader]::new($stream,[Text.UTF8Encoding]::new($false,$true))
+        try {$reader.ReadToEnd() | ConvertFrom-Json} finally {$reader.Dispose()}
+    } finally {$stream.Dispose()}
+}
+function Test-MoonSetupCancellation([string]$OperationId) {
+    if ($OperationId -and (Test-Path -LiteralPath (Get-MoonSetupFiles $OperationId).cancel)) {throw [OperationCanceledException]::new('Setup was canceled. Previous installation changes were restored.')}
+}
+function Get-MoonWebViewRuntime {
+    # Microsoft's documented Evergreen runtime identity; Edge browser versions
+    # are deliberately not treated as an installed WebView2 runtime.
+    $client='Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+    foreach ($entry in @(@([Microsoft.Win32.Registry]::CurrentUser,('Software\'+$client)),@([Microsoft.Win32.Registry]::LocalMachine,('Software\WOW6432Node\'+$client)))) {
+        $key=$entry[0].OpenSubKey($entry[1])
+        if (!$key) {continue}
+        try {$version=$null;if ([version]::TryParse([string]$key.GetValue('pv'),[ref]$version) -and $version -gt [version]'0.0.0.0') {return $version.ToString()}}
+        finally {$key.Dispose()}
+    }
+    return $null
 }

@@ -1,5 +1,7 @@
 [graph]
-targets = ["x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"]
+# The shipped application is Windows-only. Linux runs the portable core tests;
+# it does not build the settings host's GTK/WebKit dependencies.
+targets = ["x86_64-pc-windows-msvc"]
 
 [advisories]
 version = 2

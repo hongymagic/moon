@@ -29,6 +29,7 @@ pub enum Command {
     Exit,
     Restore,
     CheatSheet,
+    Settings,
     Mode(String),
     Exec(String),
     Ignore,
@@ -94,6 +95,7 @@ impl FromStr for Command {
             ["exit" | "quit" | "wm-exit"] => Ok(Self::Exit),
             ["restore"] => Ok(Self::Restore),
             ["cheatsheet" | "help-bindings"] => Ok(Self::CheatSheet),
+            ["settings"] => Ok(Self::Settings),
             ["mode", name] => Ok(Self::Mode((*name).into())),
             ["ignore"] => Ok(Self::Ignore),
             ["exec" | "shell-exec", ..] if words.len() > 1 => {

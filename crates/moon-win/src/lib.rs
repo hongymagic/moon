@@ -1,5 +1,6 @@
 #![cfg(windows)]
 
+pub mod carousel;
 pub mod hooks;
 pub mod ipc;
 pub mod platform;

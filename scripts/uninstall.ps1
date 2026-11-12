@@ -1,23 +1,47 @@
 [CmdletBinding()]
-param([string]$OwnerSid)
+param([string]$OwnerSid,[switch]$Interactive,[string]$OperationId,
+    [ValidatePattern('^[a-f0-9]{32}$')][string]$ExpectedInstallId,
+    [ValidatePattern('^[a-f0-9]{32}$')][string]$ExpectedHandoverId)
 . (Join-Path $PSScriptRoot 'install-common.ps1')
+if ($Interactive) {& (Join-Path $PSScriptRoot 'setup.ps1') -Mode Uninstall;return}
+$removalStarted=$false
+trap {
+    $cancelled=$_.Exception -is [OperationCanceledException]
+    $status=if($cancelled){'cancelled'}elseif($removalStarted){'recovery_required'}else{'failed'}
+    $message=if($cancelled){'Moon is still installed.'}elseif($removalStarted){'Removal could not finish. Your recovery files were kept.'}else{'Moon could not be removed. Nothing has been deleted.'}
+    Write-MoonSetupStatus $OperationId $status $message ($_ | Out-String)
+    Write-Error $_ -ErrorAction Continue
+    exit $(if($cancelled){1223}else{1})
+}
 $currentSid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 if (!$OwnerSid) {$OwnerSid=$currentSid}
 if ($OwnerSid -ne $currentSid) {throw 'Uninstall must be elevated by the same Windows account that owns moon.'}
+Test-MoonSetupCancellation $OperationId
 if (!(Test-MoonAdministrator)) {
     $arguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$PSCommandPath,'-OwnerSid',$OwnerSid)
-    $process=Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -Verb RunAs -ArgumentList (($arguments | ForEach-Object {ConvertTo-MoonArgument $_}) -join ' ') -Wait -PassThru
+    if ($OperationId) {$arguments+=@('-OperationId',$OperationId)}
+    if ($ExpectedInstallId) {$arguments+=@('-ExpectedInstallId',$ExpectedInstallId)}
+    if ($ExpectedHandoverId) {$arguments+=@('-ExpectedHandoverId',$ExpectedHandoverId)}
+    Write-MoonSetupStatus $OperationId 'waiting' 'Approve the Windows prompt to remove Moon.'
+    try {$process=Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -Verb RunAs -WindowStyle Hidden -ArgumentList (($arguments | ForEach-Object {ConvertTo-MoonArgument $_}) -join ' ') -Wait -PassThru}
+    catch {if (Test-MoonApprovalCancelled $_) {throw [OperationCanceledException]::new('The Windows approval prompt was canceled.')}else{throw}}
     exit $process.ExitCode
 }
+$installationLock=Enter-MoonInstallLock
+try {
 $install=Get-MoonInstallDirectory
-if (!(Test-Path -LiteralPath $install)) {Write-Output 'moon is not installed.'; return}
+if (!(Test-Path -LiteralPath $install)) {Write-MoonSetupStatus $OperationId 'succeeded' 'Moon is already removed.';Write-Output 'moon is not installed.'; return}
 $state=Read-MoonInstallState $install
+Assert-MoonExpectedInstallation $state $ExpectedInstallId $ExpectedHandoverId
 $target=Join-Path $install 'moon.exe'
 $task=Get-ScheduledTask -TaskName $state.task_name -ErrorAction SilentlyContinue
 Assert-MoonOwnedTask $task $state $target
 $session=[Diagnostics.Process]::GetCurrentProcess().SessionId
 $otherSessions=@(Get-CimInstance Win32_Process | Where-Object {$_.SessionId -ne $session -and $_.ExecutablePath -and $_.ExecutablePath.StartsWith($install+'\',[StringComparison]::OrdinalIgnoreCase)})
 if ($otherSessions.Count -gt 0) {throw 'moon is running in another Windows session. Close it there before uninstalling this shared executable.'}
+if (@(Get-Process -Name moon-settings -ErrorAction SilentlyContinue | Where-Object {$_.Path -and [string]::Equals($_.Path,(Join-Path $install 'moon-settings.exe'),[StringComparison]::OrdinalIgnoreCase)}).Count) {throw 'Close Moon Settings, then try removing Moon again.'}
+Test-MoonSetupCancellation $OperationId
+Write-MoonSetupStatus $OperationId 'working' 'Restoring your windows before Moon leaves.'
 $daemon=Get-MoonDaemon
 if ($daemon) {
     if (![string]::Equals($daemon.executable,$target,[StringComparison]::OrdinalIgnoreCase)) {throw 'A different development daemon is running; its windows and process were left unchanged.'}
@@ -40,7 +64,7 @@ Wait-MoonCondition -Description 'installed moon processes and watchdogs to exit'
 }
 # Validate the entire removal list before changing startup, trust or files.
 foreach ($file in $state.files) {
-    if ($file -ne 'moon.exe' -and $file -notmatch '^moon\.(previous|next)\.[a-f0-9]{32}\.exe$') {throw "Unrecognised owned installation file: $file"}
+    if ($file -notin @('moon.exe','moon-settings.exe','install-common.ps1','uninstall.ps1','setup.ps1') -and $file -notmatch '^(moon\.(previous|next)\.[a-f0-9]{32}\.exe|moon-settings\.next\.[a-f0-9]{32}\.exe|(install-common|uninstall|setup)\.next\.[a-f0-9]{32}\.ps1)$') {throw "Unrecognised owned installation file: $file"}
     Assert-MoonNoReparse (Join-Path $install $file)
 }
 foreach ($thumbprint in $state.certificate_thumbprints) {
@@ -52,6 +76,12 @@ foreach ($thumbprint in $state.certificate_thumbprints) {
         }
     }
 }
+Test-MoonSetupCancellation $OperationId
+# Removal becomes irreversible only after every recovery and ownership check.
+# A cancellation after this boundary waits for safe completion.
+$removalStarted=$true
+Write-MoonSetupStatus $OperationId 'removing' 'Removing Moon. Your personal settings will stay.'
+Remove-MoonShellIntegration $state
 if ($state.PSObject.Properties['user_path']) {Remove-MoonOwnedUserPath $state.user_path}
 if ($task) {Unregister-ScheduledTask -TaskName $state.task_name -Confirm:$false}
 foreach ($thumbprint in $state.certificate_thumbprints) {
@@ -63,4 +93,6 @@ foreach ($thumbprint in $state.certificate_thumbprints) {
 foreach ($file in $state.files) { $path=Join-Path $install $file; if (Test-Path -LiteralPath $path) {Remove-Item -LiteralPath $path -Force} }
 Remove-Item -LiteralPath (Join-Path $install 'installation.json') -Force
 if (@(Get-ChildItem -Force -LiteralPath $install).Count -eq 0) {Remove-Item -LiteralPath $install}
+Write-MoonSetupStatus $OperationId 'succeeded' 'Moon has been removed. Your settings are still on this PC.'
 Write-Output 'moon, its owned PATH entry, startup task and signing trust were removed. Your configuration and validation records remain in your profile.'
+} finally {Exit-MoonInstallLock $installationLock}

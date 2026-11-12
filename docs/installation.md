@@ -1,5 +1,77 @@
 # Installation and recovery
 
+## Guided setup
+
+The complete Windows package includes **Install Moon.cmd**. Open it from the
+ordinary Windows account that will use Moon. The setup window offers one install
+action, explains the Windows approval prompt, reports progress and ends with
+**Open Settings**. A first installation uses the existing controlled desktop
+handover; an update preserves the active window layout. Cancellation requests a
+safe transaction checkpoint and rollback instead of terminating the worker.
+After removal has crossed its final deletion boundary, the window waits for safe
+completion. Diagnostics are available through a separate **Details** action.
+
+Only one elevated installation or removal can run at a time, across accounts and
+Windows sessions. Its named mutex permits Administrators and SYSTEM and stays held
+through recovery. Ordinary handovers have a separate account/session lock so they
+cannot race while saving or stopping the previous desktop. An interrupted process
+releases its lock; the next operation still validates the saved ownership record.
+Progress files are advisory: their readers allow replacement, and a progress I/O
+failure cannot interrupt rollback or keep the setup window waiting after its worker
+exits. Support files enter the rollback list before replacement is attempted.
+
+Setup uses Windows' built-in WPF so it can run before WebView2 is available. It
+checks the documented Evergreen runtime registration. If the runtime is absent,
+it explains that Settings needs it and links to
+[Microsoft's WebView2 download page](https://developer.microsoft.com/en-us/microsoft-edge/webview2/consumer/).
+It does not download or run a third-party installer automatically. Native keyboard
+focus, readable contrast, high-contrast colors and the system animation preference
+are respected. The dialog is bounded and non-resizable so an existing tiling
+manager does not stretch a simple setup page across a whole monitor.
+
+Moon appears in **Start** and **Settings → Apps → Installed apps**. The Start
+entry opens the separate, ordinary-permission `moon-settings.exe`; both entries
+use the product icon embedded in `moon.exe`. The app listing includes its version,
+location and removal command. Removal asks for confirmation, restores managed
+windows first and keeps personal configuration. The installed protected scripts
+make this entry independent of the original download folder.
+
+Shell registration belongs to the installation's recorded identity. Setup refuses
+to replace an unrelated or edited Start-menu shortcut. Upgrade rollback restores
+its prior exact bytes and app-list metadata; uninstall preserves a shortcut the
+user edited later. The private per-user app-list key must still have matching
+installation and Windows-account markers before removal.
+
+Handover also records a unique operation identity in the protected installation
+metadata. Cleanup removes only that operation's result, even if the installer's
+success response was lost. Removal rechecks both the installation and operation
+identities while holding its own lock. A later independent update is no longer
+owned by the earlier handover: remove that installation explicitly before using
+the earlier handover record to restore the previous desktop.
+
+These conventions follow Microsoft's [shell-link contract](https://learn.microsoft.com/en-us/windows/win32/shell/links),
+[installed-app metadata](https://learn.microsoft.com/en-us/windows/win32/msi/uninstall-registry-key),
+[WebView2 distribution guidance](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/distribution)
+and [keyboard-accessibility guidance](https://learn.microsoft.com/en-us/windows/apps/design/accessibility/keyboard-accessibility).
+The older [setup design guide](https://learn.microsoft.com/en-us/windows/win32/uxguide/exper-setup)
+supports the simple flow; Microsoft explicitly identifies its visual examples as
+Windows 7-era material, so they are not used as current Windows 11 styling guidance.
+
+The transaction helpers use the Windows PowerShell 5.1/.NET Framework
+[mutex access-control constructor](https://learn.microsoft.com/en-us/dotnet/api/system.threading.mutex.-ctor?view=netframework-4.8.1#system-threading-mutex-ctor(system-boolean-system-string-system-boolean@-system-security-accesscontrol-mutexsecurity)),
+available without another runtime. Recovery accounts for the documented
+[ReplaceFile failure states](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-replacefilew#return-value),
+including failure after the original destination has disappeared.
+
+`scripts/validate-install-recovery.ps1` passed 14 isolated Windows checks on
+2026-11-12. It exercises real cross-process mutex exclusion and abandonment, file
+sharing, the actual setup completion handler, and the actual installation and
+handover recovery bodies with injected failures. Files and mutexes belong only to
+the test; desktop RPC, signing, and elevation are substituted. This is recovery
+logic evidence, not a completed elevated installation or uninstall.
+
+## Installation boundaries
+
 The personal installer builds on Windows' documented UIAccess requirements:
 the executable has an `asInvoker`, `uiAccess=true` manifest, an Authenticode
 signature trusted by this machine, and an installation under Program Files.
@@ -47,9 +119,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass \
   -Binary "$(wslpath -w "$PWD/target/x86_64-pc-windows-msvc/release/moon.exe")"
 ```
 
-When copying the candidate to a Windows-local folder, keep `handover.ps1`,
-`install-common.ps1`, `install.ps1`, `uninstall.ps1`, `verify-uiaccess.ps1`,
-`window_inventory.exe` and `recover_windows.exe` beside the candidate `moon.exe`.
+When copying the candidate to a Windows-local folder, keep `moon-settings.exe`,
+`Install Moon.cmd`, `setup.ps1`, `handover.ps1`, `install-common.ps1`, `install.ps1`,
+`uninstall.ps1`, `verify-uiaccess.ps1`, `window_inventory.exe` and
+`recover_windows.exe` beside the candidate `moon.exe`.
 Handover checks its required scripts before stopping the old desktop and resolves
 the inventory/recovery helpers beside the script before checking the repository
 build directory. Explicit `-InventoryPath` and `-RecoveryPath` remain available.
@@ -118,6 +191,24 @@ configuration and validation records. Use `handover.ps1 -Rollback` when the old
 desktop's startup and processes should also return.
 
 ## Verification performed so far
+
+The guided setup additions passed nine isolated shell-registration checks and four
+status/cancellation checks. They exercised actual registry and shell-link APIs in
+private test locations, including exact upgrade rollback, unowned-entry refusal,
+concurrent shortcut edits and preservation of a user-modified shortcut. Evidence:
+`target/install-shell-checks.json` and `target/setup-state-checks.json`. Existing
+eleven-case handover and eight-case consistent-upgrade-snapshot checks also pass.
+
+The real installation/removal confirmation views were previewed on the Windows
+desktop without invoking either action. UI Automation verified accessible primary
+actions and Tab movement to **Not now**/**Keep Moon**; both owned windows closed
+and the prior foreground returned. Screenshots and the report are in
+`target/setup-preview-final`. Both views passed again with the final static-runtime
+image, including its actual embedded crescent icon in the header and title bar.
+A first preview exposed stretching by the existing tiling manager; the bounded
+dialog corrected it. The polished transaction has not yet been run elevated:
+the user's deferred Windows approval still applies, and none of these checks
+constitute installed signed acceptance.
 
 `scripts/validate-install.ps1` passes fourteen checks on Windows PowerShell
 5.1.26100.9818: all installation and handover scripts parse; native token access

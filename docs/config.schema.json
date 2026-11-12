@@ -575,6 +575,11 @@
       ],
       "default": null
     },
+    "workspace-animation": {
+      "default": true,
+      "description": "Animate workspace switches without changing tiled window arrangements.",
+      "type": "boolean"
+    },
     "workspaces": {
       "items": {
         "$ref": "#/$defs/WorkspaceConfig"

@@ -1,0 +1,16 @@
+{
+  "name": "@moon/settings",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "packageManager": "bun@1.4.4",
+  "scripts": {
+    "build": "bun build src/app.ts --outdir dist --target browser --format iife --minify && bun run build.ts",
+    "check": "bun fmt --check src tests build.ts playwright.config.ts package.json tsconfig.json && tsc --noEmit",
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2",
+    "@playwright/test": "1.65.0"
+  }
+}

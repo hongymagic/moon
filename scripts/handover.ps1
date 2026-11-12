@@ -1,17 +1,30 @@
 [CmdletBinding()]
 param(
     [string]$Binary,
+    [string]$SettingsBinary,
     [string]$InventoryPath,
     [string]$RecoveryPath,
     [switch]$Rollback,
-    [string]$StatePath=(Join-Path $env:LOCALAPPDATA 'moon\handover.json')
+    [string]$StatePath=(Join-Path $env:LOCALAPPDATA 'moon\handover.json'),
+    [string]$OperationId
 )
 . (Join-Path $PSScriptRoot 'install-common.ps1')
+trap {
+    $current=if(Test-Path -LiteralPath $StatePath){Get-Content -Raw -LiteralPath $StatePath|ConvertFrom-Json}else{$null}
+    $restored=$current -and $current.status -eq 'rolled_back'
+    $operationState=$null
+    if ($OperationId) {try {$operationState=Read-MoonSetupStatus $OperationId} catch { }}
+    $cancelled=$restored -and ($_.Exception -is [OperationCanceledException] -or ($operationState -and $operationState.status -eq 'cancelled'))
+    Write-MoonSetupStatus $OperationId $(if($cancelled){'cancelled'}elseif($current -and $current.status -eq 'recovery_required'){'recovery_required'}else{'failed'}) $(if($restored){'Your previous desktop has been restored.'}else{'Setup could not finish. Open details before trying again.'}) ($_|Out-String)
+    Write-Error $_ -ErrorAction Continue;exit $(if($cancelled){1223}else{1})
+}
 if ((Test-MoonAdministrator) -or [MoonInstallNative]::Integrity() -ne 8192) {
     throw 'Run handover from ordinary PowerShell so restored desktop applications keep ordinary privileges. The installer requests its own elevation.'
 }
 $session=[Diagnostics.Process]::GetCurrentProcess().SessionId
 $owner=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$handoverLock=Enter-MoonInstallLock -Name ('Local\moon-handover-'+$owner+'-'+$session) -Security (New-MoonHandoverMutexSecurity)
+try {
 $powershell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 $names=@('glazewm.exe','zebar.exe','tacky-borders.exe')
 if (!$InventoryPath) {
@@ -71,7 +84,9 @@ if ($Rollback) {
     if ($saved.version -ne 1 -or $saved.owner_sid -ne $owner -or $saved.session -ne $session) {throw 'The handover record belongs to another user or session.'}
     $installation=Get-MoonInstallDirectory
     if (Test-Path -LiteralPath (Join-Path $installation 'installation.json')) {
-        Invoke-MoonNative $powershell @('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $PSScriptRoot 'uninstall.ps1')) -TimeoutSeconds 0 | Out-Null
+        $installedState=Read-MoonInstallState $installation
+        if (!(Test-MoonHandoverInstallation $saved $installedState)) {throw 'The current installation is not owned by this handover. Remove it explicitly before restoring the saved desktop.'}
+        Invoke-MoonNative $powershell @('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $PSScriptRoot 'uninstall.ps1'),'-ExpectedInstallId',$installedState.install_id,'-ExpectedHandoverId',$saved.handover_id) -TimeoutSeconds 0 | Out-Null
     }
     Restore-PreviousDesktop $saved
     $saved.status='rolled_back'; $saved.finished_at=[DateTime]::UtcNow.ToString('o')
@@ -81,10 +96,13 @@ if ($Rollback) {
 }
 
 if (!$Binary) {throw 'Provide the UIAccess release executable with -Binary.'}
-foreach ($required in @('install.ps1','uninstall.ps1','verify-uiaccess.ps1')) {
+foreach ($required in @('install.ps1','uninstall.ps1','setup.ps1','verify-uiaccess.ps1')) {
     if (!(Test-Path -LiteralPath (Join-Path $PSScriptRoot $required) -PathType Leaf)) {throw "Handover bundle is missing $required; no desktop state was changed."}
 }
 $Binary=(Resolve-Path -LiteralPath $Binary).ProviderPath
+if (!$SettingsBinary) {$SettingsBinary=Join-Path ([IO.Path]::GetDirectoryName($Binary)) 'moon-settings.exe'}
+$SettingsBinary=(Resolve-Path -LiteralPath $SettingsBinary).ProviderPath
+$settingsHash=(Get-FileHash -LiteralPath $SettingsBinary -Algorithm SHA256).Hash
 $manifest=[xml][MoonInstallNative]::Manifest($Binary)
 $execution=$manifest.SelectSingleNode("//*[local-name()='requestedExecutionLevel']")
 if (!$execution -or $execution.uiAccess -ne 'true' -or $execution.level -ne 'asInvoker') {throw 'Handover requires the UIAccess release build.'}
@@ -135,10 +153,12 @@ foreach ($relative in @('.glzr\glazewm\config.yaml','.glzr\zebar\settings.json',
         $configs+=[pscustomobject]@{original=$original;backup=$backup;sha256=(Get-FileHash -LiteralPath $backup -Algorithm SHA256).Hash}
     }
 }
-$saved=[pscustomobject]@{version=1;owner_sid=$owner;session=$session;started_at=[DateTime]::UtcNow.ToString('o');finished_at=$null;status='prepared';source_sha256=(Get-FileHash -LiteralPath $Binary -Algorithm SHA256).Hash;processes=$processes;startup_links=$links;config_backups=$configs;glaze_inventory=$glazeInventoryPath;glaze_owned_handles=$glazeHandles;glaze_recovery=$null;installed_stats=$null;uiaccess_report=$null}
+$saved=[pscustomobject]@{version=1;owner_sid=$owner;session=$session;handover_id=[guid]::NewGuid().ToString('N');installation_id=$null;started_at=[DateTime]::UtcNow.ToString('o');finished_at=$null;status='prepared';source_sha256=(Get-FileHash -LiteralPath $Binary -Algorithm SHA256).Hash;processes=$processes;startup_links=$links;config_backups=$configs;glaze_inventory=$glazeInventoryPath;glaze_owned_handles=$glazeHandles;glaze_recovery=$null;installed_stats=$null;uiaccess_report=$null}
 [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($StatePath)))
 Write-MoonJsonFile $StatePath $saved
 try {
+    Test-MoonSetupCancellation $OperationId
+    Write-MoonSetupStatus $OperationId 'working' 'Saving your current desktop before the switch.'
     foreach ($process in $processes) {Assert-MoonProcessIdentity $process}
     foreach ($link in $links) {if ((Get-FileHash -LiteralPath $link.original -Algorithm SHA256).Hash -ne $link.sha256) {throw 'A startup shortcut changed before handover; it was not removed.'}}
     foreach ($link in $links) {Remove-Item -LiteralPath $link.original}
@@ -170,24 +190,35 @@ try {
     $saved.status='previous_stopped'; Write-MoonJsonFile $StatePath $saved
     # Installation owns its elevation prompt and must finish or roll back itself;
     # killing its waiting parent would abandon the elevated transaction.
-    Invoke-MoonNative $powershell @('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $PSScriptRoot 'install.ps1'),'-Binary',$Binary,'-ExpectedSha256',$saved.source_sha256) -TimeoutSeconds 0 | Out-Null
+    $installArguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $PSScriptRoot 'install.ps1'),'-Binary',$Binary,'-SettingsBinary',$SettingsBinary,'-ExpectedSha256',$saved.source_sha256,'-ExpectedSettingsSha256',$settingsHash,'-HandoverId',$saved.handover_id)
+    if ($OperationId) {$installArguments+=@('-OperationId',$OperationId)}
+    Invoke-MoonNative $powershell $installArguments -TimeoutSeconds 0 | Out-Null
+    $installedState=Read-MoonInstallState (Get-MoonInstallDirectory)
+    if (!(Test-MoonHandoverInstallation $saved $installedState)) {throw 'The installed result belongs to a different setup operation; it was not claimed.'}
+    $saved.installation_id=$installedState.install_id
+    Write-MoonJsonFile $StatePath $saved
     $saved.installed_stats=Invoke-MoonRpc query stats
     $report=Join-Path $directory 'uiaccess-results.json'
     $verification=Invoke-MoonNative $powershell @('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $PSScriptRoot 'verify-uiaccess.ps1'),'-ReportPath',$report) -TimeoutSeconds 60
     $saved.uiaccess_report=$report
     $saved.status='installed'; $saved.finished_at=[DateTime]::UtcNow.ToString('o')
     Write-MoonJsonFile $StatePath $saved
+    Write-MoonSetupStatus $OperationId 'succeeded' 'Moon is ready. Make it yours in Settings.'
     $saved | ConvertTo-Json -Depth 10
 } catch {
     $failure=$_
     $saved.status='recovery_required'; Write-MoonJsonFile $StatePath $saved
-    $daemon=Get-MoonDaemon
-    if ($daemon) {Invoke-MoonRpc command -Commands @('exit') | Out-Null}
     if (Test-Path -LiteralPath (Join-Path (Get-MoonInstallDirectory) 'installation.json')) {
-        Invoke-MoonNative $powershell @('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $PSScriptRoot 'uninstall.ps1')) -TimeoutSeconds 0 | Out-Null
+        $installedState=Read-MoonInstallState (Get-MoonInstallDirectory)
+        if (Test-MoonHandoverInstallation $saved $installedState) {
+            # The remover rechecks both identities after taking its elevated
+            # transaction mutex. Presence alone never authorizes cleanup.
+            Invoke-MoonNative $powershell @('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $PSScriptRoot 'uninstall.ps1'),'-ExpectedInstallId',$installedState.install_id,'-ExpectedHandoverId',$saved.handover_id) -TimeoutSeconds 0 | Out-Null
+        }
     }
     Restore-PreviousDesktop $saved
     $saved.status='rolled_back'; $saved.finished_at=[DateTime]::UtcNow.ToString('o')
     Write-MoonJsonFile $StatePath $saved
     throw $failure
 }
+} finally {Exit-MoonInstallLock $handoverLock}

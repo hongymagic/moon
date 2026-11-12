@@ -9,6 +9,7 @@ use moon_core::{
     world::{self, Control, Event, Placement, Plan, World},
 };
 use moon_win::{
+    carousel::{Carousel, PageWindow, Transition as CarouselTransition, WindowRef},
     hooks::{self, HookBinding, Hooks, PlatformEvent, SystemEvent},
     ipc::{self, PipeRequest, PipeServer},
     platform,
@@ -42,6 +43,7 @@ struct Daemon {
     applied: BTreeMap<WindowId, Placement>,
     hooks: Hooks,
     surfaces: Option<Surfaces>,
+    carousel: Carousel,
     values: BTreeMap<String, String>,
     error: Option<String>,
     transactions: VecDeque<Value>,
@@ -326,6 +328,7 @@ pub fn run(options: Options) -> Result<()> {
         applied: BTreeMap::new(),
         hooks: hook,
         surfaces,
+        carousel: Carousel::new()?,
         values: BTreeMap::new(),
         error: None,
         transactions: VecDeque::new(),
@@ -355,7 +358,9 @@ pub fn run(options: Options) -> Result<()> {
         );
         let mut maintenance = Instant::now();
         while !daemon.quit {
-            if !runtime::pump(1000) || runtime::shutdown_requested() {
+            if !runtime::pump(if daemon.carousel.is_active() { 16 } else { 1000 })
+                || runtime::shutdown_requested()
+            {
                 break;
             }
             let mut changed = BTreeMap::new();
@@ -413,6 +418,10 @@ pub fn run(options: Options) -> Result<()> {
                 }
             }
             daemon.flush_windows(&mut changed);
+            if let Err(error) = daemon.carousel.tick() {
+                daemon.carousel.cancel();
+                daemon.report(error.into());
+            }
             daemon.measure_placement();
             let clicks = daemon.surfaces.as_ref().map(Surfaces::drain_commands).unwrap_or_default();
             if let Err(error) = daemon.commands(clicks) {
@@ -426,6 +435,7 @@ pub fn run(options: Options) -> Result<()> {
         }
         Ok(())
     }));
+    daemon.carousel.cancel();
     if daemon.restart && matches!(&outcome, Ok(Ok(()))) {
         let mut restart = runtime::internal_command()?;
         restart.args(["start", "--resume", "--wait-parent", &process::id().to_string()]);
@@ -554,6 +564,7 @@ impl Daemon {
         started: Instant,
     ) -> Result<()> {
         let reduce_us = started.elapsed().as_micros();
+        let carousel = self.carousel_transitions(&transition.world, &transition.plan, kind);
         let journal_started = Instant::now();
         let previous_mode = self.world.mode.clone();
         let previous_paused = self.world.paused;
@@ -592,9 +603,49 @@ impl Daemon {
         }
         self.journal = record;
         let journal_us = journal_started.elapsed().as_micros();
+        let animated = if carousel.is_empty() {
+            // Unrelated native echo events must not cut short an active transition.
+            if self.carousel.is_active()
+                && (matches!(
+                    kind,
+                    "command"
+                        | "foreground"
+                        | "pointer-focus"
+                        | "config"
+                        | "display"
+                        | "native-fullscreen"
+                        | "visibility"
+                        | "stale-window"
+                        | "destroy"
+                        | "create"
+                ) || self.world.plan().placements != transition.plan.placements
+                    || transition.world.paused
+                    || transition.world.native_fullscreen.is_some()
+                    || transition.plan.control.is_some())
+            {
+                self.carousel.cancel();
+            }
+            false
+        } else {
+            match self.carousel.prepare(&carousel) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    self.carousel.cancel();
+                    self.report(error.into());
+                    false
+                }
+            }
+        };
         self.world = transition.world;
         let apply_started = Instant::now();
-        self.apply(transition.plan)?;
+        if let Err(error) = self.apply(transition.plan) {
+            self.carousel.cancel();
+            return Err(error);
+        }
+        if animated && let Err(error) = self.carousel.animate() {
+            self.carousel.cancel();
+            self.report(error.into());
+        }
         let apply_us = apply_started.elapsed().as_micros();
         if self.world.config.cursor_jump
             && self.world.active_monitor != previous_monitor
@@ -617,6 +668,104 @@ impl Daemon {
             });
         }
         Ok(())
+    }
+    fn carousel_transitions(
+        &self,
+        next: &World,
+        plan: &Plan,
+        kind: &str,
+    ) -> Vec<CarouselTransition> {
+        if self.session_suspended
+            || self.world.paused
+            || next.paused
+            || !self.world.config.workspace_animation
+            || !next.config.workspace_animation
+            || self.world.native_fullscreen.is_some()
+            || next.native_fullscreen.is_some()
+            || !matches!(kind, "command" | "foreground" | "pointer-focus")
+            || self.world.active == next.active
+        {
+            return Vec::new();
+        }
+        let previous = self.world.plan();
+        let mut transitions = Vec::new();
+        for monitor in &next.monitors {
+            let Some(old_monitor) = self.world.monitor(monitor.id) else { continue };
+            if old_monitor.bounds != monitor.bounds || old_monitor.work_area != monitor.work_area {
+                continue;
+            }
+            let (Some(&old_workspace), Some(&new_workspace)) =
+                (self.world.active.get(&monitor.id), next.active.get(&monitor.id))
+            else {
+                continue;
+            };
+            if old_workspace == new_workspace {
+                continue;
+            }
+            // A workspace is one canvas. Preserve tile geometry and place floating
+            // windows above tiles; the focused floating window is drawn last.
+            let page = |state: &World, placements: &[Placement], workspace| {
+                let mut placements: Vec<_> = placements
+                    .iter()
+                    .filter(|p| {
+                        p.visible
+                            && state.windows.get(&p.id).is_some_and(|w| w.workspace == workspace)
+                    })
+                    .collect();
+                placements.sort_by_key(|p| (p.floating, state.focused == Some(p.id)));
+                placements
+                    .into_iter()
+                    .map(|placement| {
+                        let window = state.windows.get(&placement.id)?;
+                        if placement.fullscreen
+                            || !self.owns_native_window(placement.id)
+                            || platform::process_id(placement.id) != window.info.process_id
+                            || !platform::window_on_current_virtual_desktop(placement.id)
+                                .unwrap_or(false)
+                        {
+                            return None;
+                        }
+                        Some(PageWindow {
+                            window: WindowRef {
+                                id: placement.id,
+                                process_id: window.info.process_id,
+                            },
+                            rect: placement.rect,
+                        })
+                    })
+                    .collect::<Option<Vec<_>>>()
+            };
+            let (Some(from), Some(to)) = (
+                page(&self.world, &previous.placements, old_workspace),
+                page(next, &plan.placements, new_workspace),
+            ) else {
+                continue;
+            };
+            if from.is_empty() && to.is_empty() {
+                continue;
+            }
+            let direction = if new_workspace.index() >= old_workspace.index() { 1 } else { -1 };
+            let mut viewport = monitor.work_area;
+            if next.config.bar_enabled_on(&monitor.name) {
+                let bottom = monitor.bounds.y
+                    + (f64::from(next.config.bar_height_on(&monitor.name)) * monitor.scale).round()
+                        as i32;
+                let inset = (bottom - viewport.y).max(0).min(viewport.height - 1);
+                viewport.y += inset;
+                viewport.height -= inset;
+            }
+            transitions.push(CarouselTransition {
+                from,
+                to,
+                viewport,
+                direction,
+                background_rgb: next
+                    .config
+                    .color_for("base", self.values.get("system.theme").map(String::as_str))
+                    .unwrap_or(0x141417),
+            });
+        }
+        transitions
     }
     fn apply(&mut self, plan: Plan) -> Result<()> {
         if !self.session_suspended {
@@ -693,6 +842,7 @@ impl Daemon {
                 }
                 Control::Reload => self.reload()?,
                 Control::CheatSheet => self.cheatsheet()?,
+                Control::Settings => crate::open_settings(&self.options)?,
             }
         }
         Ok(())
@@ -770,7 +920,7 @@ impl Daemon {
     }
     fn cheatsheet(&self) -> Result<()> {
         let mut content = String::from(
-            "moon — current bindings\r\n\r\nEmergency restore: Ctrl+Alt+Shift+F12\r\n\r\n",
+            "moon — current bindings\r\n\r\nEmergency restore: Ctrl+Alt+Shift+F12\r\nOpen Moon Settings: moon settings (or bind the settings command)\r\n\r\n",
         );
         for binding in bindings(&self.world) {
             content.push_str(&format!("{:<24} {}\r\n", binding.chord, binding.commands.join("; ")));
@@ -787,6 +937,12 @@ impl Daemon {
             self.commit(Event::WindowRemoved(id), "stale-window")?;
         }
         if kind == 3 || (kind == 0x800b && platform::foreground() == Some(id)) {
+            if kind == 3
+                && platform::foreground() == Some(id)
+                && !self.world.windows.contains_key(&id)
+            {
+                self.carousel.cancel();
+            }
             self.sync_native_fullscreen()?;
         }
         if kind == 0x800b
@@ -975,6 +1131,16 @@ impl Daemon {
         Ok(())
     }
     fn system_event(&mut self, event: SystemEvent) -> Result<()> {
+        if matches!(
+            event,
+            SystemEvent::SessionLocked | SystemEvent::Suspended | SystemEvent::SessionEnding
+        ) || (matches!(event, SystemEvent::DesktopChanged)
+            && !platform::session_interactive().unwrap_or(false))
+        {
+            self.carousel.suspend();
+        } else {
+            self.carousel.cancel();
+        }
         match event {
             SystemEvent::SessionLocked | SystemEvent::Suspended => self.session_suspended = true,
             SystemEvent::SessionEnding => self.quit = true,
@@ -1038,7 +1204,7 @@ impl Daemon {
             "config" => serde_json::to_value(&self.world.config)?,
             "transactions" => serde_json::to_value(&self.transactions)?,
             "stats" => {
-                json!({"process_id":process::id(),"executable":std::env::current_exe()?,"token":platform::token_capabilities(process::id())?,"uptime_seconds":self.started.elapsed().as_secs_f64(),"ready_us":self.ready_us,"revision":self.world.revision,"managed_windows":self.world.windows.len(),"resources":runtime::resource_stats()?,"surface_pixel_bytes":self.surfaces.as_ref().map_or(0, Surfaces::surface_pixel_bytes),"hooks":hooks::stats(),"key_to_placed_us":self.key_latencies,"key_to_dispatch_us":self.dispatch_latencies,"recent_transactions":self.transactions,"last_error":self.error})
+                json!({"process_id":process::id(),"executable":std::env::current_exe()?,"config_path":config_path(&self.options),"carousel_active":self.carousel.is_active(),"token":platform::token_capabilities(process::id())?,"uptime_seconds":self.started.elapsed().as_secs_f64(),"ready_us":self.ready_us,"revision":self.world.revision,"managed_windows":self.world.windows.len(),"resources":runtime::resource_stats()?,"surface_pixel_bytes":self.surfaces.as_ref().map_or(0, Surfaces::surface_pixel_bytes),"hooks":hooks::stats(),"key_to_placed_us":self.key_latencies,"key_to_dispatch_us":self.dispatch_latencies,"recent_transactions":self.transactions,"last_error":self.error})
             }
             _ => bail!("unknown query {query:?}"),
         })

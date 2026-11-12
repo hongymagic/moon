@@ -13,6 +13,12 @@ bootstrap:
 test:
     cargo test --workspace --locked
 
+settings:
+    cd apps/settings && bun install --frozen-lockfile && bun run check && bun run build
+
+settings-test: settings
+    cd apps/settings && bunx playwright install chromium --only-shell && bun run test
+
 check:
     cargo fmt --all --check
     cargo clippy --workspace --all-targets --locked -- -D warnings
@@ -40,13 +46,21 @@ integration: build
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$PWD/scripts/integration.ps1")" -BuildDirectory "$(wslpath -w "$PWD/target/x86_64-pc-windows-msvc/debug")"
 
 install:
+    just settings
     cargo xwin build -p moon --features uiaccess --release --target x86_64-pc-windows-msvc --locked
+    cargo xwin build -p moon-settings --release --target x86_64-pc-windows-msvc --locked
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$PWD/scripts/install.ps1")" -Binary "$(wslpath -w "$PWD/target/x86_64-pc-windows-msvc/release/moon.exe")"
 
 handover:
+    just settings
     cargo xwin build -p moon --features uiaccess --release --target x86_64-pc-windows-msvc --locked
+    cargo xwin build -p moon-settings --release --target x86_64-pc-windows-msvc --locked
     cargo xwin build -p moon-win --example window_inventory --example recover_windows --release --target x86_64-pc-windows-msvc --locked
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$PWD/scripts/handover.ps1")" -Binary "$(wslpath -w "$PWD/target/x86_64-pc-windows-msvc/release/moon.exe")"
 
 soak:
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$PWD/scripts/record-soak.ps1")"
+
+# Package already-verified inputs; this recipe neither builds nor installs.
+package binary settings inventory recovery output version="0.1.0":
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$PWD/scripts/package.ps1")" -Binary "$(wslpath -w {{quote(binary)}})" -SettingsBinary "$(wslpath -w {{quote(settings)}})" -InventoryBinary "$(wslpath -w {{quote(inventory)}})" -RecoveryBinary "$(wslpath -w {{quote(recovery)}})" -OutputDirectory "$(wslpath -w {{quote(output)}})" -Version {{quote(version)}}

@@ -66,6 +66,32 @@ journal independently preserves readable original colors for crash recovery.
 The `system` backdrop maps to Windows' automatic backdrop selection; `mica` and
 `acrylic` map to the main-window and transient-window backdrops respectively.
 
+Bar interaction uses press-and-release activation: releasing over a different
+action, dragging outside, or losing capture cancels the press. Hover feedback
+uses one reusable pixel surface and one finite compositor opacity curve per
+bar, with an 83 ms response and a 167 ms entrance. There is no animation timer
+or idle polling. New input replaces the existing curve rather than queuing
+animations. Active workspace buttons also have a short selection underline.
+Human-readable labels appear in native tooltips, with text and rectangles
+updated only when they change. Text padding, selection indicators, and icon
+sizes use the window's actual DPI.
+
+`system_accessibility()` reads the Windows client-area animation preference and
+high-contrast state. Reduced motion makes interaction changes immediate. High
+contrast uses Windows' semantic background/text/highlight pairs, disables
+backdrops, and replaces gradients with solid focus colors. Appearance messages
+invalidate these preferences without introducing a polling timer. The tray
+uses the original Moon icon family, exact DPI sizes, contrast-aware monochrome
+variants, and committed Pause/Resume state. Its Settings command opens the
+separate normal-token companion; it does not embed a web runtime in the daemon.
+The icon assets and deterministic Windows icon/version resource generator are
+documented in `crates/moon-win/assets/icons/README.md`.
+
+The following performance measurements precede this interaction polish. Its
+one-pixel feedback texture adds four nominal bytes per bar, but that does not
+account for DLL, tooltip, icon, or compositor overhead. The full-process memory
+budget must be measured again against the completed application.
+
 A separate provider worker samples local CPU, memory, network, battery, volume,
 keyboard language and clock values no faster than once a second. Media metadata
 uses pending WinRT operations and cancellation after five seconds; it never
@@ -231,6 +257,10 @@ remain to be verified; simulated geometry is not equivalent evidence.
 - [Window process ownership lookup](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getwindowthreadprocessid)
 - [Reading original DWM attributes](https://learn.microsoft.com/en-us/windows/win32/api/dwmapi/nf-dwmapi-dwmgetwindowattribute)
 - [System backdrop selection](https://learn.microsoft.com/en-us/windows/win32/api/dwmapi/ne-dwmapi-dwm_systembackdrop_type)
+- [Windows motion guidance](https://learn.microsoft.com/en-us/windows/apps/design/signature-experiences/motion)
+- [High-contrast semantic colors](https://learn.microsoft.com/en-us/windows/apps/design/accessibility/high-contrast-themes)
+- [Animation and contrast preferences](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-systemparametersinfow)
+- [Common-control class initialization](https://learn.microsoft.com/en-us/windows/win32/api/commctrl/ns-commctrl-initcommoncontrolsex)
 - [WinHTTP finite timeouts](https://learn.microsoft.com/en-us/windows/win32/api/winhttp/nf-winhttp-winhttpsettimeouts)
 - [Open-Meteo current-weather parameters](https://open-meteo.com/en/docs)
 - [Nerd Fonts v3.5.1 release](https://github.com/ryanoasis/nerd-fonts/releases/tag/v3.5.1)

@@ -1,0 +1,438 @@
+{
+  "config-version": 1,
+  "theme": "dark",
+  "monitors": [],
+  "cursor-jump": true,
+  "focus-follows-cursor": false,
+  "light-palette": {
+    "base": "#f1ede5",
+    "crust": "#ded5c8",
+    "denim": "#49637c",
+    "mantle": "#e9e2d7",
+    "olive": "#686130",
+    "overlay0": "#a397a2",
+    "overlay1": "#8c818c",
+    "overlay2": "#746b74",
+    "rust": "#873e20",
+    "slate": "#4f625b",
+    "steel": "#596c83",
+    "subtext0": "#625b64",
+    "subtext1": "#454047",
+    "surface0": "#e6dfd4",
+    "surface1": "#d7cfc3",
+    "surface2": "#c8bdae",
+    "terracotta": "#9d4b28",
+    "text": "#262326"
+  },
+  "gaps": {
+    "inner": 16,
+    "outer": 32
+  },
+  "workspaces": [
+    {
+      "name": "1"
+    },
+    {
+      "name": "2"
+    },
+    {
+      "name": "3"
+    },
+    {
+      "name": "4"
+    },
+    {
+      "name": "5"
+    },
+    {
+      "name": "6"
+    },
+    {
+      "name": "7"
+    },
+    {
+      "name": "8"
+    },
+    {
+      "name": "9"
+    },
+    {
+      "name": "10"
+    }
+  ],
+  "bindings": {
+    "alt+0": ["workspace 10"],
+    "alt+1": ["workspace 1"],
+    "alt+2": ["workspace 2"],
+    "alt+3": ["workspace 3"],
+    "alt+4": ["workspace 4"],
+    "alt+5": ["workspace 5"],
+    "alt+6": ["workspace 6"],
+    "alt+7": ["workspace 7"],
+    "alt+8": ["workspace 8"],
+    "alt+9": ["workspace 9"],
+    "alt+ctrl+h": ["move-to-monitor left"],
+    "alt+ctrl+j": ["move-to-monitor down"],
+    "alt+ctrl+k": ["move-to-monitor up"],
+    "alt+ctrl+l": ["move-to-monitor right"],
+    "alt+down": ["focus down"],
+    "alt+f": ["toggle-fullscreen"],
+    "alt+h": ["focus left"],
+    "alt+j": ["focus down"],
+    "alt+k": ["focus up"],
+    "alt+l": ["focus right"],
+    "alt+left": ["focus left"],
+    "alt+oem_question": ["toggle-direction"],
+    "alt+right": ["focus right"],
+    "alt+shift+0": ["move-to-workspace 10 --follow"],
+    "alt+shift+1": ["move-to-workspace 1 --follow"],
+    "alt+shift+2": ["move-to-workspace 2 --follow"],
+    "alt+shift+3": ["move-to-workspace 3 --follow"],
+    "alt+shift+4": ["move-to-workspace 4 --follow"],
+    "alt+shift+5": ["move-to-workspace 5 --follow"],
+    "alt+shift+6": ["move-to-workspace 6 --follow"],
+    "alt+shift+7": ["move-to-workspace 7 --follow"],
+    "alt+shift+8": ["move-to-workspace 8 --follow"],
+    "alt+shift+9": ["move-to-workspace 9 --follow"],
+    "alt+shift+down": ["move down"],
+    "alt+shift+e": ["exit"],
+    "alt+shift+h": ["move left"],
+    "alt+shift+j": ["move down"],
+    "alt+shift+k": ["move up"],
+    "alt+shift+l": ["move right"],
+    "alt+shift+left": ["move left"],
+    "alt+shift+oem_minus": ["resize width -2%", "resize height -2%"],
+    "alt+shift+oem_plus": ["resize width +2%", "resize height +2%"],
+    "alt+shift+oem_question": ["cheatsheet"],
+    "alt+shift+p": ["pause"],
+    "alt+shift+q": ["close"],
+    "alt+shift+r": ["reload"],
+    "alt+shift+right": ["move right"],
+    "alt+shift+space": ["toggle-floating"],
+    "alt+shift+tab": ["move-workspace right"],
+    "alt+shift+up": ["move up"],
+    "alt+tab": ["recent-workspace"],
+    "alt+up": ["focus up"]
+  },
+  "modes": {},
+  "aliases": {},
+  "rules": [
+    {
+      "commands": ["ignore"],
+      "matches": [
+        {
+          "process": {
+            "equals": "Arc"
+          },
+          "title": {
+            "regex": "[Pp]icture in [Pp]icture"
+          }
+        },
+        {
+          "process": {
+            "regex": "^(zebar|tacky-borders|moon|moon-settings)$"
+          }
+        },
+        {
+          "class": {
+            "regex": "Chrome_WidgetWin_1|MozillaDialogClass"
+          },
+          "title": {
+            "regex": "[Pp]icture.in.[Pp]icture|Mini Player"
+          }
+        },
+        {
+          "class": {
+            "equals": "OperationStatusWindow"
+          }
+        },
+        {
+          "process": {
+            "regex": "ScreenClippingHost|SnippingTool"
+          }
+        },
+        {
+          "process": {
+            "equals": "PowerToys"
+          },
+          "class": {
+            "regex": "HwndWrapper\\[PowerToys\\.PowerAccent.*?\\]"
+          }
+        },
+        {
+          "process": {
+            "equals": "PowerToys"
+          },
+          "title": {
+            "regex": ".*? - Peek"
+          }
+        },
+        {
+          "process": {
+            "equals": "Lively"
+          },
+          "class": {
+            "regex": "HwndWrapper"
+          }
+        },
+        {
+          "process": {
+            "equals": "EXCEL"
+          },
+          "class": {
+            "not-regex": "XLMAIN"
+          }
+        },
+        {
+          "process": {
+            "equals": "WINWORD"
+          },
+          "class": {
+            "not-regex": "OpusApp"
+          }
+        },
+        {
+          "process": {
+            "equals": "POWERPNT"
+          },
+          "class": {
+            "not-regex": "PPTFrameClass"
+          }
+        }
+      ]
+    },
+    {
+      "commands": ["set-floating"],
+      "matches": [
+        {
+          "class": {
+            "regex": "(#32770|SunAwtDialog)"
+          }
+        },
+        {
+          "process": {
+            "regex": "[Ii]nstall.*|[Ss]etup.*|[Mm]siexec|[Uu]nins.*"
+          }
+        },
+        {
+          "class": {
+            "regex": "TWizardForm|MsiDialogCloseClass"
+          }
+        },
+        {
+          "process": {
+            "equals": "Taskmgr"
+          }
+        },
+        {
+          "process": {
+            "equals": "CalculatorApp"
+          }
+        },
+        {
+          "process": {
+            "equals": "steam"
+          },
+          "title": {
+            "regex": "Steam|Friends"
+          }
+        },
+        {
+          "process": {
+            "regex": "Battle\\.net|EpicGamesLauncher|EADesktop|RiotClientUx"
+          }
+        },
+        {
+          "process": {
+            "regex": "Discord|Teams|Zoom"
+          },
+          "title": {
+            "regex": "Microsoft Teams Notification|Call in progress|Zoom Meeting"
+          }
+        },
+        {
+          "process": {
+            "regex": "1Password|Bitwarden"
+          }
+        }
+      ]
+    }
+  ],
+  "bar": {
+    "enabled": true,
+    "height": 40,
+    "font": "JetBrainsMono Nerd Font",
+    "font-size": 14.0,
+    "background": "base",
+    "foreground": "text",
+    "opacity": 1.0,
+    "backdrop": "none",
+    "widgets": [
+      {
+        "id": "logo",
+        "format": "\u263e",
+        "align": "left",
+        "color": "terracotta",
+        "click": "cheatsheet",
+        "interval-seconds": 5,
+        "max-width": 300
+      },
+      {
+        "id": "workspaces",
+        "format": "{workspaces}",
+        "align": "left",
+        "interval-seconds": 5,
+        "max-width": 300
+      },
+      {
+        "id": "clock",
+        "background": "surface0",
+        "format": "{clock}",
+        "align": "center",
+        "interval-seconds": 5,
+        "max-width": 300
+      },
+      {
+        "id": "title",
+        "background": "surface0",
+        "format": "{title}",
+        "align": "center",
+        "color": "subtext0",
+        "interval-seconds": 5,
+        "max-width": 420
+      },
+      {
+        "id": "state",
+        "background": "surface0",
+        "format": "{paused}{mode}{direction}",
+        "align": "left",
+        "color": "terracotta",
+        "click": "toggle-direction",
+        "interval-seconds": 5,
+        "max-width": 300
+      },
+      {
+        "id": "media",
+        "background": "surface0",
+        "icon": "\uf001",
+        "icon-color": "rose-dust",
+        "format": "{media}",
+        "align": "right",
+        "interval-seconds": 5,
+        "max-width": 220
+      },
+      {
+        "id": "keyboard",
+        "background": "surface0",
+        "icon": "\uf11c",
+        "icon-color": "clay",
+        "format": "{keyboard}",
+        "align": "right",
+        "interval-seconds": 5,
+        "max-width": 300
+      },
+      {
+        "id": "network",
+        "background": "surface0",
+        "icon": "\uf1eb",
+        "icon-color": "terracotta",
+        "format": "{network}",
+        "align": "right",
+        "interval-seconds": 5,
+        "max-width": 300
+      },
+      {
+        "id": "memory",
+        "background": "surface0",
+        "icon": "\uefc5",
+        "icon-color": "olive",
+        "format": "{memory}",
+        "align": "right",
+        "interval-seconds": 5,
+        "max-width": 300
+      },
+      {
+        "id": "cpu",
+        "background": "surface0",
+        "icon": "\uf4bc",
+        "icon-color": "amber",
+        "format": "{cpu}",
+        "align": "right",
+        "interval-seconds": 5,
+        "max-width": 300
+      },
+      {
+        "id": "battery",
+        "background": "surface0",
+        "icon": "\uf240",
+        "icon-color": "gold",
+        "format": "{battery}",
+        "align": "right",
+        "interval-seconds": 5,
+        "max-width": 300
+      },
+      {
+        "id": "volume",
+        "background": "surface0",
+        "icon": "\uf028",
+        "icon-color": "amber",
+        "format": "{volume}",
+        "align": "right",
+        "interval-seconds": 5,
+        "max-width": 300
+      },
+      {
+        "id": "weather",
+        "background": "surface0",
+        "icon": "\uf0c2",
+        "icon-color": "steel",
+        "format": "{weather}",
+        "align": "right",
+        "interval-seconds": 5,
+        "max-width": 300
+      }
+    ]
+  },
+  "borders": {
+    "enabled": true,
+    "width": 4,
+    "radius": 8,
+    "focused": "terracotta",
+    "focused-end": "rust",
+    "unfocused": "surface1"
+  },
+  "palette": {
+    "amber": "#dba658",
+    "base": "#141417",
+    "brick": "#a8453a",
+    "clay": "#b5754f",
+    "crust": "#08080a",
+    "denim": "#5f7387",
+    "ember": "#c1443c",
+    "gold": "#c9a876",
+    "linen": "#ece2d0",
+    "mantle": "#0f0f12",
+    "olive": "#9a9257",
+    "overlay0": "#57575f",
+    "overlay1": "#75757d",
+    "overlay2": "#93939a",
+    "rose-dust": "#c98a83",
+    "rosewood": "#b96b7a",
+    "rust": "#a8613f",
+    "slate": "#6f7d78",
+    "steel": "#8b95a1",
+    "subtext0": "#b3b0a8",
+    "subtext1": "#d3cfc4",
+    "surface0": "#1e1e22",
+    "surface1": "#29292e",
+    "surface2": "#38383f",
+    "terracotta": "#d17a4f",
+    "text": "#f0ebe0"
+  },
+  "hooks": {
+    "startup": [],
+    "shutdown": [],
+    "reload": []
+  },
+  "workspace-animation": true
+}

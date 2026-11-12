@@ -9,6 +9,7 @@ use moon_core::{
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
+    time::Instant,
 };
 use windows::{
     Win32::{
@@ -21,12 +22,24 @@ use windows::{
             DirectWrite::*,
             Dwm::*,
             Dxgi::{Common::*, *},
-            Gdi::{HBRUSH, ValidateRect},
+            Gdi::{
+                COLOR_BTNFACE, COLOR_BTNTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW,
+                COLOR_WINDOWTEXT, GetSysColor, HBRUSH, ValidateRect,
+            },
         },
         System::LibraryLoader::GetModuleHandleW,
-        UI::{Shell::*, WindowsAndMessaging::*},
+        UI::{
+            Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW},
+            Controls::*,
+            HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi},
+            Input::KeyboardAndMouse::{
+                ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+            },
+            Shell::*,
+            WindowsAndMessaging::*,
+        },
     },
-    core::{Interface, PCWSTR, Result, w},
+    core::{BOOL, Interface, PCWSTR, PWSTR, Result, w},
 };
 use windows_numerics::{Matrix3x2, Vector2};
 
@@ -119,6 +132,93 @@ impl Drop for Graphics {
     }
 }
 
+/// Current Windows accessibility choices. Query on startup and WM_SETTINGCHANGE.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AccessibilityPreferences {
+    pub motion_allowed: bool,
+    pub high_contrast: bool,
+}
+pub fn system_accessibility() -> AccessibilityPreferences {
+    unsafe {
+        let mut animations = BOOL(0);
+        let _ = SystemParametersInfoW(
+            SPI_GETCLIENTAREAANIMATION,
+            0,
+            Some((&mut animations as *mut BOOL).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        );
+        let mut contrast =
+            HIGHCONTRASTW { cbSize: size_of::<HIGHCONTRASTW>() as u32, ..Default::default() };
+        let _ = SystemParametersInfoW(
+            SPI_GETHIGHCONTRAST,
+            contrast.cbSize,
+            Some((&mut contrast as *mut HIGHCONTRASTW).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        );
+        let high_contrast = contrast.dwFlags.0 & HCF_HIGHCONTRASTON.0 != 0;
+        AccessibilityPreferences {
+            motion_allowed: animations.as_bool() && !high_contrast,
+            high_contrast,
+        }
+    }
+}
+
+#[derive(Clone, PartialEq)]
+struct Preferences {
+    animations: bool,
+    contrast: bool,
+    window: String,
+    text: String,
+    highlight: String,
+    highlight_text: String,
+    button: String,
+    button_text: String,
+}
+impl Preferences {
+    fn read() -> Self {
+        unsafe {
+            let accessibility = system_accessibility();
+            let color = |index| format!("#{:06x}", rgb_to_colorref(GetSysColor(index)));
+            Self {
+                animations: accessibility.motion_allowed,
+                contrast: accessibility.high_contrast,
+                window: color(COLOR_WINDOW),
+                text: color(COLOR_WINDOWTEXT),
+                highlight: color(COLOR_HIGHLIGHT),
+                highlight_text: color(COLOR_HIGHLIGHTTEXT),
+                button: color(COLOR_BTNFACE),
+                button_text: color(COLOR_BTNTEXT),
+            }
+        }
+    }
+    fn apply(&self, scene: &mut Scene) {
+        if !self.contrast {
+            return;
+        }
+        for bar in &mut scene.bars {
+            bar.background = self.window.clone();
+            bar.opacity = 1.0;
+            bar.backdrop = "none".into();
+            for item in &mut bar.items {
+                let (foreground, background) = if item.selected {
+                    (&self.highlight_text, &self.highlight)
+                } else if item.command.is_some() {
+                    (&self.button_text, &self.button)
+                } else {
+                    (&self.text, &self.window)
+                };
+                item.foreground = foreground.clone();
+                item.background = Some(background.clone());
+            }
+        }
+        for border in &mut scene.borders {
+            let color = if border.focused { &self.highlight } else { &self.text };
+            border.colors = [color.clone(), color.clone()];
+        }
+    }
+}
+
+#[derive(Default)]
 struct WindowData {
     hit_regions: Vec<(Rect, String)>,
     commands: Arc<Mutex<Vec<String>>>,
@@ -128,6 +228,25 @@ struct WindowData {
     appbar_registered: bool,
     taskbar_created: u32,
     tray: bool,
+    hovered: Option<Rect>,
+    pressed: Option<(Rect, String)>,
+    interaction_dirty: bool,
+    preferences_dirty: bool,
+    paused: bool,
+    tray_icon: HICON,
+    tray_tip: String,
+}
+
+impl WindowData {
+    fn press(&mut self, point: Point) {
+        self.pressed = self.hit_regions.iter().find(|(rect, _)| rect.contains(point)).cloned();
+    }
+    fn release(&mut self, point: Point) -> Option<String> {
+        let (rect, command) = self.pressed.take()?;
+        (rect.contains(point)
+            && self.hit_regions.iter().any(|hit| hit.0 == rect && hit.1 == command))
+        .then_some(command)
+    }
 }
 
 unsafe extern "system" fn window_proc(
@@ -150,16 +269,23 @@ unsafe extern "system" fn window_proc(
                     data.appbar_registered = false;
                 }
                 if data.tray {
-                    add_tray(hwnd);
+                    add_tray(hwnd, data);
+                    data.preferences_dirty = true;
                 }
             }
             if message == TRAY_MESSAGE && data.tray {
                 let notification = lparam.0 as u32 & 0xffff;
+                if (notification == NIN_SELECT || notification == (NIN_SELECT | NINF_KEY))
+                    && let Ok(mut commands) = data.commands.lock()
+                {
+                    commands.push("settings".into());
+                }
                 if notification == WM_CONTEXTMENU || notification == WM_RBUTTONUP {
                     let menu = CreatePopupMenu();
                     if let Ok(menu) = menu {
                         for (id, label) in [
-                            (1, "Pause / resume"),
+                            (6, "Settings…"),
+                            (1, if data.paused { "Resume tiling" } else { "Pause tiling" }),
                             (2, "Reload configuration"),
                             (3, "Open configuration"),
                             (4, "Keybindings"),
@@ -169,7 +295,17 @@ unsafe extern "system" fn window_proc(
                             let _ = AppendMenuW(menu, MF_STRING, id, PCWSTR(label.as_ptr()));
                         }
                         let mut point = windows::Win32::Foundation::POINT::default();
-                        let _ = GetCursorPos(&mut point);
+                        if let Ok(rect) = Shell_NotifyIconGetRect(&NOTIFYICONIDENTIFIER {
+                            cbSize: size_of::<NOTIFYICONIDENTIFIER>() as u32,
+                            hWnd: hwnd,
+                            uID: 1,
+                            ..Default::default()
+                        }) {
+                            point.x = rect.left;
+                            point.y = rect.bottom;
+                        } else {
+                            let _ = GetCursorPos(&mut point);
+                        }
                         let _ = SetForegroundWindow(hwnd);
                         let selected = TrackPopupMenu(
                             menu,
@@ -187,6 +323,7 @@ unsafe extern "system" fn window_proc(
                             3 => Some("open-config"),
                             4 => Some("cheatsheet"),
                             5 => Some("quit"),
+                            6 => Some("settings"),
                             _ => None,
                         };
                         if let Some(command) = command
@@ -196,6 +333,9 @@ unsafe extern "system" fn window_proc(
                         }
                         let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
                         let _ = DestroyMenu(menu);
+                        if selected == 0 {
+                            let _ = Shell_NotifyIconW(NIM_SETFOCUS, &tray_info(hwnd, data));
+                        }
                     }
                 }
                 return LRESULT(0);
@@ -218,6 +358,49 @@ unsafe extern "system" fn window_proc(
                 return LRESULT(0);
             }
             match message {
+                WM_SETTINGCHANGE | WM_THEMECHANGED | WM_SYSCOLORCHANGE | WM_DPICHANGED => {
+                    data.preferences_dirty = true;
+                    data.interaction_dirty = true;
+                }
+                WM_MOUSEMOVE if data.appbar => {
+                    let point = mouse_point(lparam);
+                    let hovered = data
+                        .hit_regions
+                        .iter()
+                        .find(|(rect, _)| rect.contains(point))
+                        .map(|(rect, _)| *rect);
+                    if hovered != data.hovered {
+                        data.hovered = hovered;
+                        data.interaction_dirty = true;
+                    }
+                    let _ = TrackMouseEvent(&mut TRACKMOUSEEVENT {
+                        cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+                        dwFlags: TME_LEAVE,
+                        hwndTrack: hwnd,
+                        ..Default::default()
+                    });
+                }
+                WM_MOUSELEAVE if data.appbar => {
+                    data.hovered = None;
+                    data.interaction_dirty = true;
+                }
+                WM_SETCURSOR if data.appbar && data.hovered.is_some() => {
+                    SetCursor(LoadCursorW(None, IDC_HAND).ok());
+                    return LRESULT(1);
+                }
+                WM_LBUTTONDOWN if data.appbar => {
+                    let point = mouse_point(lparam);
+                    data.press(point);
+                    if data.pressed.is_some() {
+                        SetCapture(hwnd);
+                        data.interaction_dirty = true;
+                    }
+                    return LRESULT(0);
+                }
+                WM_CAPTURECHANGED if data.appbar => {
+                    data.pressed = None;
+                    data.interaction_dirty = true;
+                }
                 WM_NCHITTEST if data.click_through => return LRESULT(HTTRANSPARENT as isize),
                 WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as isize),
                 WM_ERASEBKGND => return LRESULT(1),
@@ -225,17 +408,15 @@ unsafe extern "system" fn window_proc(
                     let _ = ValidateRect(Some(hwnd), None);
                     return LRESULT(0);
                 }
-                WM_LBUTTONUP => {
-                    let point = Point::new(
-                        (lparam.0 as u16) as i16 as i32,
-                        ((lparam.0 >> 16) as u16) as i16 as i32,
-                    );
-                    if let Some((_, command)) =
-                        data.hit_regions.iter().find(|(rect, _)| rect.contains(point))
+                WM_LBUTTONUP if data.appbar => {
+                    let point = mouse_point(lparam);
+                    if let Some(command) = data.release(point)
                         && let Ok(mut commands) = data.commands.lock()
                     {
-                        commands.push(command.clone());
+                        commands.push(command);
                     }
+                    let _ = ReleaseCapture();
+                    data.interaction_dirty = true;
                     return LRESULT(0);
                 }
                 WM_CLOSE => return LRESULT(0),
@@ -246,6 +427,248 @@ unsafe extern "system" fn window_proc(
             }
         }
         DefWindowProcW(hwnd, message, wparam, lparam)
+    }
+}
+
+fn mouse_point(lparam: LPARAM) -> Point {
+    Point::new((lparam.0 as u16) as i16 as i32, ((lparam.0 >> 16) as u16) as i16 as i32)
+}
+
+struct Motion {
+    from: f32,
+    to: f32,
+    started: Instant,
+    duration: f32,
+}
+impl Motion {
+    fn value(&self) -> f32 {
+        let t = (self.started.elapsed().as_secs_f32() / self.duration).min(1.0);
+        self.from + (self.to - self.from) * (1.0 - (1.0 - t).powi(3))
+    }
+}
+fn transition(
+    graphics: &Graphics,
+    from: f32,
+    to: f32,
+    seconds: f32,
+) -> Result<IDCompositionAnimation> {
+    unsafe {
+        let animation = graphics.composition.CreateAnimation()?;
+        let delta = to - from;
+        animation.AddCubic(
+            0.0,
+            from,
+            3.0 * delta / seconds,
+            -3.0 * delta / (seconds * seconds),
+            delta / (seconds * seconds * seconds),
+        )?;
+        animation.End(f64::from(seconds), to)?;
+        Ok(animation)
+    }
+}
+struct Feedback {
+    surface: IDCompositionSurface,
+    visual: IDCompositionVisual,
+    effect: IDCompositionEffectGroup,
+    clip: IDCompositionRectangleClip,
+    motion: Motion,
+    color: String,
+    rect: Option<Rect>,
+}
+impl Feedback {
+    fn new(graphics: &Graphics, parent: &IDCompositionVisual) -> Result<Self> {
+        unsafe {
+            let surface = graphics.composition.CreateSurface(
+                1,
+                1,
+                DXGI_FORMAT_B8G8R8A8_UNORM,
+                DXGI_ALPHA_MODE_PREMULTIPLIED,
+            )?;
+            let visual = graphics.composition.CreateVisual()?;
+            let effect = graphics.composition.CreateEffectGroup()?;
+            effect.SetOpacity2(0.0)?;
+            visual.SetEffect(&effect)?;
+            visual.SetContent(&surface)?;
+            let clip = graphics.composition.CreateRectangleClip()?;
+            clip.SetLeft2(0.0)?;
+            clip.SetTop2(0.0)?;
+            clip.SetRight2(1.0)?;
+            clip.SetBottom2(1.0)?;
+            visual.SetClip(&clip)?;
+            parent.AddVisual(&visual, true, None)?;
+            Ok(Self {
+                surface,
+                visual,
+                effect,
+                clip,
+                motion: Motion { from: 0.0, to: 0.0, started: Instant::now(), duration: 0.083 },
+                color: String::new(),
+                rect: None,
+            })
+        }
+    }
+    fn update(
+        &mut self,
+        graphics: &Graphics,
+        rect: Option<Rect>,
+        pressed: bool,
+        background: &str,
+        preferences: &Preferences,
+    ) -> Result<()> {
+        unsafe {
+            let rgb = parse_color(background, 1.0);
+            let color = if rgb.r + rgb.g + rgb.b > 1.5 { "#000000" } else { "#ffffff" };
+            if self.color != color {
+                let drawing =
+                    Drawing::begin(&graphics.context, &self.surface, Rect::new(0, 0, 1, 1))?;
+                graphics.context.Clear(Some(&parse_color(color, 1.0)));
+                drawing.finish()?;
+                self.color = color.into();
+            }
+            if let Some(bounds) = rect.filter(|bounds| !bounds.is_empty()) {
+                let radius = bounds.height as f32 * (5.0 / 28.0);
+                let rx = radius / bounds.width as f32;
+                let ry = radius / bounds.height as f32;
+                self.clip.SetTopLeftRadiusX2(rx)?;
+                self.clip.SetTopRightRadiusX2(rx)?;
+                self.clip.SetBottomLeftRadiusX2(rx)?;
+                self.clip.SetBottomRightRadiusX2(rx)?;
+                self.clip.SetTopLeftRadiusY2(ry)?;
+                self.clip.SetTopRightRadiusY2(ry)?;
+                self.clip.SetBottomLeftRadiusY2(ry)?;
+                self.clip.SetBottomRightRadiusY2(ry)?;
+                self.visual.SetTransform2(&Matrix3x2 {
+                    M11: bounds.width as f32,
+                    M12: 0.0,
+                    M21: 0.0,
+                    M22: bounds.height as f32,
+                    M31: bounds.x as f32,
+                    M32: bounds.y as f32,
+                })?;
+            }
+            let opacity = if rect.is_none() || preferences.contrast {
+                0.0
+            } else if pressed {
+                0.17
+            } else {
+                0.085
+            };
+            if opacity != self.motion.to || rect != self.rect || !preferences.animations {
+                let from =
+                    if rect != self.rect && rect.is_some() { 0.0 } else { self.motion.value() };
+                if preferences.animations {
+                    self.effect.SetOpacity(&transition(graphics, from, opacity, 0.083)?)?;
+                } else {
+                    self.effect.SetOpacity2(opacity)?;
+                }
+                self.motion =
+                    Motion { from, to: opacity, started: Instant::now(), duration: 0.083 };
+                self.rect = rect;
+            }
+            Ok(())
+        }
+    }
+}
+
+struct Tooltips {
+    hwnd: HWND,
+    parent: HWND,
+    tools: Vec<(Rect, Vec<u16>)>,
+}
+impl Tooltips {
+    fn new(parent: HWND) -> Result<Self> {
+        unsafe {
+            let controls = INITCOMMONCONTROLSEX {
+                dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
+                dwICC: ICC_BAR_CLASSES,
+            };
+            InitCommonControlsEx(&controls).ok()?;
+            let hwnd = CreateWindowExW(
+                WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+                TOOLTIPS_CLASSW,
+                w!(""),
+                WS_POPUP | WINDOW_STYLE(TTS_ALWAYSTIP | TTS_NOPREFIX),
+                0,
+                0,
+                0,
+                0,
+                Some(parent),
+                None,
+                Some(GetModuleHandleW(None)?.into()),
+                None,
+            )?;
+            SendMessageW(hwnd, TTM_SETMAXTIPWIDTH, Some(WPARAM(0)), Some(LPARAM(480)));
+            Ok(Self { hwnd, parent, tools: Vec::new() })
+        }
+    }
+    fn info(&mut self, index: usize) -> TTTOOLINFOW {
+        let (rect, text) = &mut self.tools[index];
+        TTTOOLINFOW {
+            cbSize: size_of::<TTTOOLINFOW>() as u32,
+            uFlags: TTF_SUBCLASS,
+            hwnd: self.parent,
+            uId: index + 1,
+            rect: windows::Win32::Foundation::RECT {
+                left: rect.x,
+                top: rect.y,
+                right: rect.right(),
+                bottom: rect.bottom(),
+            },
+            lpszText: PWSTR(text.as_mut_ptr()),
+            ..Default::default()
+        }
+    }
+    fn update(&mut self, bar: &BarScene) {
+        let next = bar
+            .items
+            .iter()
+            .filter(|item| !item.label.is_empty() && !item.rect.is_empty())
+            .map(|item| (item.rect.translated(-bar.rect.x, -bar.rect.y), wide(&item.label)))
+            .collect::<Vec<_>>();
+        unsafe {
+            if self.tools.len() != next.len() {
+                for index in 0..self.tools.len() {
+                    let info = self.info(index);
+                    SendMessageW(
+                        self.hwnd,
+                        TTM_DELTOOLW,
+                        Some(WPARAM(0)),
+                        Some(LPARAM((&info as *const TTTOOLINFOW) as isize)),
+                    );
+                }
+                self.tools = next;
+                for index in 0..self.tools.len() {
+                    let info = self.info(index);
+                    SendMessageW(
+                        self.hwnd,
+                        TTM_ADDTOOLW,
+                        Some(WPARAM(0)),
+                        Some(LPARAM((&info as *const TTTOOLINFOW) as isize)),
+                    );
+                }
+            } else {
+                for (index, next) in next.into_iter().enumerate() {
+                    if self.tools[index] != next {
+                        let old = std::mem::replace(&mut self.tools[index], next);
+                        let info = self.info(index);
+                        SendMessageW(
+                            self.hwnd,
+                            TTM_SETTOOLINFOW,
+                            Some(WPARAM(0)),
+                            Some(LPARAM((&info as *const TTTOOLINFOW) as isize)),
+                        );
+                        drop(old);
+                    }
+                }
+            }
+        }
+    }
+}
+impl Drop for Tooltips {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = DestroyWindow(self.hwnd);
+        }
     }
 }
 
@@ -261,6 +684,9 @@ struct Canvas {
     visual: IDCompositionVisual,
     visible: bool,
     reservation: Option<windows::Win32::Foundation::RECT>,
+    feedback: Option<Feedback>,
+    entrance: Option<IDCompositionEffectGroup>,
+    tooltip: Option<Tooltips>,
 }
 
 struct AtlasPiece {
@@ -342,6 +768,8 @@ impl Canvas {
                 appbar_registered: false,
                 taskbar_created: RegisterWindowMessageW(w!("TaskbarCreated")),
                 tray: false,
+                preferences_dirty: true,
+                ..Default::default()
             });
             let ex_style = WS_EX_NOACTIVATE
                 | WS_EX_TOOLWINDOW
@@ -400,9 +828,18 @@ impl Canvas {
                     visual.SetContent(surface)?;
                 }
                 target.SetRoot(&visual)?;
-                Ok((context, surface, target, visual))
+                let feedback = if border { None } else { Some(Feedback::new(graphics, &visual)?) };
+                let entrance = if border {
+                    None
+                } else {
+                    let effect = graphics.composition.CreateEffectGroup()?;
+                    visual.SetEffect(&effect)?;
+                    Some(effect)
+                };
+                let tooltip = if border { None } else { Some(Tooltips::new(hwnd)?) };
+                Ok((context, surface, target, visual, feedback, entrance, tooltip))
             })();
-            let (context, surface, target, visual) = match result {
+            let (context, surface, target, visual, feedback, entrance, tooltip) = match result {
                 Ok(value) => value,
                 Err(error) => {
                     let _ = DestroyWindow(hwnd);
@@ -421,6 +858,9 @@ impl Canvas {
                 visual,
                 visible: false,
                 reservation: None,
+                feedback,
+                entrance,
+                tooltip,
             })
         }
     }
@@ -532,7 +972,12 @@ impl Canvas {
         }
     }
 
-    fn draw_bar(&mut self, graphics: &Graphics, bar: &BarScene) -> Result<()> {
+    fn draw_bar(
+        &mut self,
+        graphics: &Graphics,
+        bar: &BarScene,
+        preferences: &Preferences,
+    ) -> Result<()> {
         unsafe {
             let drawing = Drawing::begin(
                 &self.context,
@@ -541,9 +986,18 @@ impl Canvas {
             )?;
             self.context.Clear(Some(&parse_color(&bar.background, bar.opacity)));
             self.data.hit_regions.clear();
+            let scale = GetDpiForWindow(self.hwnd).max(96) as f32 / 96.0;
             for item in &bar.items {
                 let bounds = item.rect.translated(-bar.rect.x, -bar.rect.y);
-                if let Some(background) = &item.background {
+                let highlighted = preferences.contrast
+                    && item.command.is_some()
+                    && self.data.hovered == Some(bounds);
+                let background = if highlighted {
+                    Some(&preferences.highlight)
+                } else {
+                    item.background.as_ref()
+                };
+                if let Some(background) = background {
                     let brush =
                         self.context.CreateSolidColorBrush(&parse_color(background, 1.0), None)?;
                     let radius = bounds.height as f32 * (5.0 / 28.0);
@@ -560,20 +1014,44 @@ impl Canvas {
                     graphics,
                     &item.text,
                     bounds.inset(moon_core::geometry::Edges {
-                        left: 7,
-                        right: 7,
+                        left: (7.0 * scale).round() as i32,
+                        right: (7.0 * scale).round() as i32,
                         top: 0,
                         bottom: 0,
                     }),
                     &bar.font,
                     item.font_size,
-                    &item.foreground,
+                    if highlighted { &preferences.highlight_text } else { &item.foreground },
                 )?;
+                if item.selected {
+                    let brush = self
+                        .context
+                        .CreateSolidColorBrush(&parse_color(&item.foreground, 1.0), None)?;
+                    let width = 10.0 * scale;
+                    let left = bounds.x as f32 + (bounds.width as f32 - width) / 2.0;
+                    let bottom = bounds.bottom() as f32 - 2.0 * scale;
+                    self.context.FillRoundedRectangle(
+                        &D2D1_ROUNDED_RECT {
+                            rect: D2D_RECT_F {
+                                left,
+                                top: bottom - scale,
+                                right: left + width,
+                                bottom,
+                            },
+                            radiusX: scale / 2.0,
+                            radiusY: scale / 2.0,
+                        },
+                        &brush,
+                    );
+                }
                 if let Some(command) = &item.command {
                     self.data.hit_regions.push((bounds, command.clone()));
                 }
             }
             drawing.finish()?;
+            if let Some(tooltip) = &mut self.tooltip {
+                tooltip.update(bar);
+            }
             let backdrop: i32 = match bar.backdrop.as_str() {
                 "system" => 0,
                 "mica" => 2,
@@ -736,6 +1214,7 @@ impl Canvas {
 
 impl Drop for Canvas {
     fn drop(&mut self) {
+        self.tooltip.take();
         unsafe {
             if self.data.appbar {
                 let mut data = APPBARDATA {
@@ -878,6 +1357,7 @@ pub struct Surfaces {
     previous: Option<Scene>,
     _tray: Tray,
     native_edges: BTreeMap<WindowId, NativeEdge>,
+    preferences: Preferences,
 }
 impl Surfaces {
     /// Nominal RGBA surface pixels, excluding compositor buffers, caches and other process memory.
@@ -890,7 +1370,8 @@ impl Surfaces {
             .filter_map(|canvas| canvas.border_atlas.as_ref())
             .map(|(capacity, _)| pixels(*capacity))
             .sum();
-        (bars + borders) * 4
+        let feedback = self.bars.values().filter(|canvas| canvas.feedback.is_some()).count() as u64;
+        (bars + borders + feedback) * 4
     }
     pub fn backend(&self) -> &'static str {
         self.graphics.backend
@@ -905,6 +1386,7 @@ impl Surfaces {
             commands,
             previous: None,
             native_edges: BTreeMap::new(),
+            preferences: Preferences::read(),
         })
     }
     pub fn drain_commands(&self) -> Vec<String> {
@@ -916,8 +1398,20 @@ impl Surfaces {
         values: &BTreeMap<String, String>,
         error: Option<&str>,
     ) -> Result<()> {
+        if self._tray._data.preferences_dirty
+            || self.bars.values().any(|canvas| canvas.data.preferences_dirty)
+        {
+            self.preferences = Preferences::read();
+            self._tray._data.preferences_dirty = false;
+            for canvas in self.bars.values_mut() {
+                canvas.data.preferences_dirty = false;
+                canvas.data.interaction_dirty = true;
+            }
+        }
+        self._tray.update(world.paused, error.is_some(), self.preferences.contrast)?;
         self.update_native_edges(world, values.get("system.theme").map(String::as_str));
-        let scene = scene::derive(world, values, error);
+        let mut scene = scene::derive(world, values, error);
+        self.preferences.apply(&mut scene);
         match self.render(world, scene.clone()) {
             Ok(()) => Ok(()),
             Err(_) => {
@@ -965,6 +1459,17 @@ impl Surfaces {
                 || world.native_fullscreen.is_some_and(|(fullscreen, _)| fullscreen == *id)
             {
                 0xffff_fffe
+            } else if window.floating && self.preferences.contrast {
+                u32::from_str_radix(
+                    if world.focused == Some(*id) {
+                        &self.preferences.highlight[1..]
+                    } else {
+                        &self.preferences.text[1..]
+                    },
+                    16,
+                )
+                .map(rgb_to_colorref)
+                .unwrap_or(0xffff_ffff)
             } else if window.floating {
                 world
                     .config
@@ -990,6 +1495,7 @@ impl Surfaces {
         // Border scenes contain absolute ring rectangles, not monitor bounds.
         // A bounds change can require a new canvas even when those rings match.
         let changed = self.previous.as_ref() != Some(&scene)
+            || self.bars.values().any(|canvas| canvas.data.interaction_dirty)
             || world.monitors.iter().any(|monitor| {
                 scene.borders.iter().any(|border| border.monitor == monitor.id)
                     && self
@@ -1021,15 +1527,44 @@ impl Surfaces {
                 );
             }
             let canvas = self.bars.get_mut(&bar.monitor).expect("inserted canvas");
+            let entering = bar.visible && !canvas.visible;
             canvas.position(bar.rect, bar.visible)?;
             let same = self
                 .previous
                 .as_ref()
                 .and_then(|previous| previous.bars.iter().find(|old| old.monitor == bar.monitor))
                 .is_some_and(|old| old == bar);
-            if (!same || recreated) && bar.visible {
-                canvas.draw_bar(&self.graphics, bar)?;
+            if (!same || recreated || (self.preferences.contrast && canvas.data.interaction_dirty))
+                && bar.visible
+            {
+                canvas.draw_bar(&self.graphics, bar, &self.preferences)?;
             }
+            if bar.visible && (!same || recreated || canvas.data.interaction_dirty) {
+                if canvas.data.hovered.is_some_and(|hover| {
+                    !canvas.data.hit_regions.iter().any(|(rect, _)| *rect == hover)
+                }) {
+                    canvas.data.hovered = None;
+                }
+                if let Some(feedback) = &mut canvas.feedback {
+                    feedback.update(
+                        &self.graphics,
+                        canvas.data.hovered,
+                        canvas.data.pressed.is_some(),
+                        &bar.background,
+                        &self.preferences,
+                    )?;
+                }
+                if let Some(entrance) = &canvas.entrance {
+                    unsafe {
+                        if entering && self.preferences.animations {
+                            entrance.SetOpacity(&transition(&self.graphics, 0.88, 1.0, 0.167)?)?;
+                        } else if !self.preferences.animations {
+                            entrance.SetOpacity2(1.0)?;
+                        }
+                    }
+                }
+            }
+            canvas.data.interaction_dirty = false;
         }
         for monitor in &world.monitors {
             let rings: Vec<_> =
@@ -1097,6 +1632,7 @@ fn parse_color(text: &str, alpha: f32) -> D2D1_COLOR_F {
 struct Tray {
     hwnd: HWND,
     _data: Box<WindowData>,
+    appearance: Option<(u16, u32, bool, bool)>,
 }
 impl Tray {
     fn new(commands: Arc<Mutex<Vec<String>>>) -> Result<Self> {
@@ -1118,6 +1654,9 @@ impl Tray {
                 appbar_registered: false,
                 taskbar_created: RegisterWindowMessageW(w!("TaskbarCreated")),
                 tray: true,
+                preferences_dirty: true,
+                tray_tip: "Moon · Open Settings".into(),
+                ..Default::default()
             });
             let hwnd = CreateWindowExW(
                 WS_EX_TOOLWINDOW,
@@ -1135,10 +1674,89 @@ impl Tray {
             )?;
             let _ = ChangeWindowMessageFilterEx(hwnd, data.taskbar_created, MSGFLT_ALLOW, None);
             let _ = ChangeWindowMessageFilterEx(hwnd, TRAY_MESSAGE, MSGFLT_ALLOW, None);
-            add_tray(hwnd);
-            Ok(Self { hwnd, _data: data })
+            data.tray_icon = match load_brand_icon(101, GetDpiForWindow(hwnd).max(96)) {
+                Ok(icon) => icon,
+                Err(error) => {
+                    let _ = DestroyWindow(hwnd);
+                    return Err(error);
+                }
+            };
+            add_tray(hwnd, &data);
+            Ok(Self { hwnd, _data: data, appearance: None })
         }
     }
+}
+impl Tray {
+    fn update(&mut self, paused: bool, error: bool, contrast: bool) -> Result<()> {
+        unsafe {
+            let dpi = GetDpiForWindow(self.hwnd).max(96);
+            let color = GetSysColor(COLOR_WINDOWTEXT);
+            let light_text = (color & 255) + ((color >> 8) & 255) + ((color >> 16) & 255) > 384;
+            let resource = if contrast { if light_text { 103 } else { 102 } } else { 101 };
+            let appearance = (resource, dpi, paused, error);
+            if self.appearance == Some(appearance) {
+                return Ok(());
+            }
+            if self.appearance.is_none_or(|old| old.0 != resource || old.1 != dpi) {
+                let icon = load_brand_icon(resource, dpi)?;
+                let old = std::mem::replace(&mut self._data.tray_icon, icon);
+                if !old.is_invalid() {
+                    let _ = DestroyIcon(old);
+                }
+            }
+            self._data.paused = paused;
+            self._data.tray_tip = if error {
+                "Moon · Configuration needs attention"
+            } else if paused {
+                "Moon · Tiling paused"
+            } else {
+                "Moon · Open Settings"
+            }
+            .into();
+            let icon = tray_info(self.hwnd, &self._data);
+            let _ = Shell_NotifyIconW(NIM_MODIFY, &icon);
+            self.appearance = Some(appearance);
+            Ok(())
+        }
+    }
+}
+fn load_brand_icon(resource: u16, dpi: u32) -> Result<HICON> {
+    unsafe {
+        let size = GetSystemMetricsForDpi(SM_CXSMICON, dpi).max(16);
+        if let Ok(icon) = LoadImageW(
+            Some(GetModuleHandleW(None)?.into()),
+            PCWSTR(usize::from(resource) as *const u16),
+            IMAGE_ICON,
+            size,
+            size,
+            LR_DEFAULTCOLOR,
+        ) {
+            return Ok(HICON(icon.0));
+        }
+        // Standalone developer probes do not link application resources.
+        let bytes: &[u8] = match resource {
+            102 => include_bytes!("../assets/icons/moon-tray-light-64.png"),
+            103 => include_bytes!("../assets/icons/moon-tray-dark-64.png"),
+            _ => include_bytes!("../assets/icons/moon-256.png"),
+        };
+        CreateIconFromResourceEx(bytes, true, 0x0003_0000, size, size, LR_DEFAULTCOLOR)
+    }
+}
+unsafe fn tray_info(hwnd: HWND, data: &WindowData) -> NOTIFYICONDATAW {
+    let mut icon = NOTIFYICONDATAW {
+        cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: hwnd,
+        uID: 1,
+        uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP,
+        uCallbackMessage: TRAY_MESSAGE,
+        hIcon: data.tray_icon,
+        ..Default::default()
+    };
+    let tip = wide(&data.tray_tip);
+    let length = tip.len().min(icon.szTip.len());
+    icon.szTip[..length].copy_from_slice(&tip[..length]);
+    icon.szTip[icon.szTip.len() - 1] = 0;
+    icon
 }
 impl Drop for Tray {
     fn drop(&mut self) {
@@ -1151,22 +1769,15 @@ impl Drop for Tray {
             };
             let _ = Shell_NotifyIconW(NIM_DELETE, &icon);
             let _ = DestroyWindow(self.hwnd);
+            if !self._data.tray_icon.is_invalid() {
+                let _ = DestroyIcon(self._data.tray_icon);
+            }
         }
     }
 }
-unsafe fn add_tray(hwnd: HWND) {
+unsafe fn add_tray(hwnd: HWND, data: &WindowData) {
     unsafe {
-        let mut icon = NOTIFYICONDATAW {
-            cbSize: size_of::<NOTIFYICONDATAW>() as u32,
-            hWnd: hwnd,
-            uID: 1,
-            uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP,
-            uCallbackMessage: TRAY_MESSAGE,
-            hIcon: LoadIconW(None, IDI_APPLICATION).unwrap_or_default(),
-            ..Default::default()
-        };
-        let tip = wide("moon — right-click for controls");
-        icon.szTip[..tip.len()].copy_from_slice(&tip);
+        let mut icon = tray_info(hwnd, data);
         let _ = Shell_NotifyIconW(NIM_ADD, &icon);
         icon.Anonymous.uVersion = NOTIFYICON_VERSION_4;
         let _ = Shell_NotifyIconW(NIM_SETVERSION, &icon);
@@ -1215,6 +1826,27 @@ fn ring_regions(rect: Rect, thickness: i32, bounds: Rect) -> Vec<Rect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bar_activation_requires_press_and_release_inside_the_same_action() {
+        let mut data = WindowData {
+            hit_regions: vec![
+                (Rect::new(0, 0, 20, 20), "workspace 1".into()),
+                (Rect::new(30, 0, 20, 20), "workspace 2".into()),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(data.release(Point::new(5, 5)), None);
+        data.press(Point::new(5, 5));
+        assert_eq!(data.release(Point::new(35, 5)), None);
+        data.press(Point::new(5, 5));
+        assert_eq!(data.release(Point::new(5, 5)), Some("workspace 1".into()));
+        data.press(Point::new(5, 5));
+        data.hit_regions[0].1 = "quit".into();
+        assert_eq!(data.release(Point::new(5, 5)), None);
+        data.press(Point::new(25, 5));
+        assert_eq!(data.release(Point::new(35, 5)), None);
+    }
 
     #[test]
     fn native_edge_rejects_wrong_process_owner() {
