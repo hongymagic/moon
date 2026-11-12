@@ -7,9 +7,16 @@ acceptance conditions remain tracked in [acceptance-status.md](acceptance-status
 
 ## Current ordinary candidate, 13 November 2026
 
-The latest validated ordinary daemon is
+The session-recovery update is now staged as ordinary build `47521240…` and
+UIAccess build `AFBA0420…`. It guards cursor movement while suspended and resets
+carousel input after a failed session recheck. Portable checks and the focused
+Windows registration test pass; native desktop validation and promotion remain
+pending while Windows is locked. See
+[candidate status](acceptance-status.md#staged-session-recovery-update-13-november-2026).
+
+The latest fully exercised ordinary daemon is
 `43FD913681AD449967DEEBD2DD6BA38DAD59E37D384FD1142A30E9FC9F17E314`,
-the staged UIAccess image is
+its matching earlier UIAccess image is
 `748B8829283BA55E7367EEE2F0820D3C3205914BF584B93668A44D9215D1F496`,
 and Settings remains
 `EC22F24B07DFAD2ABE6198B519016E26E2C119843351FE81AEAC13EE9799727C`.

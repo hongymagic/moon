@@ -5,6 +5,26 @@ It was reviewed on 13 November 2026 (Sydney). Implemented event handling and pas
 simulated tests do not establish that the corresponding physical Windows event
 has been exercised.
 
+## Staged session-recovery update, 13 November 2026
+
+The cursor and carousel session-recovery fix is committed in `70c7d98`. The
+ordinary candidate is
+`475212403C1DBE8AF5BBD8F8ABA78AC8543523481F4D53AFE37746B3071D2067`;
+the UIAccess installation candidate is
+`AFBA0420B38E0EA05084138C7F0E48D5E2E77ACBE2B34BF1100FD43287866C81`.
+Both are staged separately from the running 43FD build. The 93 portable tests,
+both workspace Clippy checks and the focused Windows registration regression
+pass. The focused test makes no native calls; it does not replace physical
+lock/unlock or the remaining native acceptance checks.
+
+The actual session remains locked, with the four original application identities,
+workspace assignments and configuration preserved. Neither new candidate has
+been promoted, signed or installed. Build and test evidence is in
+`target/session-lock-{build,stage,native-unit}.json` and
+`target/session-install-build.json`; [platform evidence](validation-platform.md)
+describes the recovery changes. The measurements below still refer to the last
+fully exercised ordinary candidate, 43FD.
+
 ## Current text-layout and provider refinement, 13 November 2026
 
 The latest validated ordinary daemon is
