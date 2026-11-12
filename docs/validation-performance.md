@@ -133,7 +133,7 @@ The compositor probe's intentionally 200 ms motion is recorded separately in
 
 ## Final static-runtime candidate, 12 November 2026
 
-The current normal candidate is
+The normal candidate recorded at this milestone was
 `075E96CD3C7C95E24D04F07EC9BCFF7D53F74F60E2F6AC53B23B179C7DFBB134`.
 It statically links the C runtime so first launch does not require a separate
 Visual C++ redistributable. Fresh probe
@@ -154,10 +154,10 @@ bar/borders configuration. No concurrent builds or agent desktop actions ran.
 | Hook own work p99 / whole callback p99 | 140 / 719 µs |
 | Handles after idle / GDI objects | 348 / 8 |
 
-The final candidate passes readiness and placement correctness, but **fails**
+That candidate passed readiness and placement correctness, but **failed**
 the 50,000,000-byte working-set limit and the stated placement/hook latency
 budgets. Literal zero idle CPU is not established. Earlier smaller working-set
-samples do not override this current result. `last_error` was null throughout;
+samples do not override that recorded result. `last_error` was null throughout;
 all owned processes exited and the recovery journal was absent afterward.
 Raw evidence remains in
 `target/postpolish-performance/static-crt/{metadata,full-daemon,cleanup}.json`.
@@ -179,7 +179,7 @@ apply submission 1.341 ms. Input-to-dispatch median is 0.280 ms. Independent
 native outer-frame completion is about 12.419 ms median and 32.604 ms p99, close
 to DWM visible-frame completion. The remaining delay is therefore not explained
 by late daemon observation alone. Compared with the earlier pre-polish default
-profile (14.415/40.263 ms), current placement latency improved while still missing
+profile (14.415/40.263 ms), that candidate's placement latency improved while still missing
 the required budget. The data does not identify a new avoidable animation loop
 or a concrete allocation fix; another measurement should test a specific cause
 rather than select a favorable sample.

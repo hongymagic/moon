@@ -7,11 +7,11 @@ has been exercised.
 
 ## Current text-layout and provider refinement, 13 November 2026
 
-The ordinary daemon is now
+The latest validated ordinary daemon is
 `43FD913681AD449967DEEBD2DD6BA38DAD59E37D384FD1142A30E9FC9F17E314`,
 with Settings
 `EC22F24B07DFAD2ABE6198B519016E26E2C119843351FE81AEAC13EE9799727C`.
-It runs through Explorer as the sole manager, PID 32520, from
+Its recorded Explorer promotion ran as the sole manager, PID 32520, from
 `Downloads\Moon-validation\moon-provider-demand-20261113\moon.exe`.
 All four original application identities and workspace assignments are preserved;
 visible native frames match their placements, hidden windows remain hidden,
@@ -61,26 +61,26 @@ preserve scope and comparison limits.
 
 ## Earlier renderer refinement, 13 November 2026
 
-The current ordinary daemon is
+The earlier ordinary daemon was
 `9608872A54F93B28221A918D48E2CB1B487884D10A2BCC1A19ECF4945D4FCE94`;
-its UIAccess installation candidate is
+its UIAccess installation candidate was
 `9ECFCE8BF68424B9DB46D344D4938445076FB1F886C9DD799D644C8815DC7040`.
-Settings remains
+That build used Settings
 `EC22F24B07DFAD2ABE6198B519016E26E2C119843351FE81AEAC13EE9799727C`.
-The UIAccess image is built and staged, not yet signed or installed. Build
+The UIAccess image was built and staged, without signing or installation. Build
 identities are in `target/factory-{final,install,validation}-build.json`.
 
-The ordinary 960 daemon is now running through Explorer as the sole manager,
+The ordinary 960 daemon ran through Explorer as the sole manager,
 PID 10844, from `Downloads\Moon-validation\moon-factory-final-20261113\moon.exe`,
-with the matching EC22 Settings companion beside it. Live verification preserves
+with the matching EC22 Settings companion beside it. Live verification preserved
 all four original HWND/PID/process-birth identities and workspace assignments;
-visible native frames match the plan and prior focus is restored. The personal
-configuration hash is unchanged. The token is medium integrity (8192), without
-UIAccess, and no previous window manager is running. Evidence:
+visible native frames matched the plan and prior focus was restored. The personal
+configuration hash was unchanged. The token was medium integrity (8192), without
+UIAccess, and no previous window manager was running. Evidence:
 `target/factory-final-live.json`. This ordinary startup does not complete signed
 installation or the seven-day soak.
 
-This exact ordinary daemon passes all 14 lifecycle integration cases and ten
+That ordinary daemon passed all 14 lifecycle integration cases and ten
 workspace-carousel cases: `target/factory-final-{integration,carousel}.json`.
 The default 128-chord workload has 128 exact placements and no daemon error;
 ready time is 120.659 ms, external median/p99 12.348/44.500 ms and own-hook p99
@@ -146,7 +146,7 @@ median/p99 12.183/43.941 ms, own/whole-hook p99 100/743 µs and idle CPU
 approximately 0.3125% of one core. Working-set samples were
 46,780,416 / 51,515,392 / 49,446,912 bytes before input, after input and after
 idle; the after-input sample exceeded the memory budget. These historical
-results remain distinct from the final 960 candidate above.
+results remain distinct from the later 960 and 43FD measurements above.
 
 At that verification, the D583 ordinary daemon was running as the sole manager
 with its matching Settings companion available. All four existing application identities and
@@ -279,7 +279,7 @@ separate WebView2 Evergreen prerequisite for Settings.
 |---|---|
 | Configuration and persistence | 86 portable tests pass: 70 core, 10 CLI and six store cases. Windows adds five store cases and 18 native unit checks; four interactive hook cases are explicitly excluded from this run and retain their earlier separate evidence. |
 | Settings interaction | 13 browser scenarios and eight live Windows checks pass. The native run proves comment-preserving save, applying the expected effective configuration, conflict retention, reload confirmation, Appearance rendering and refusing to reload a daemon using another file. Report: `target/polish-settings-ui/report.json`. |
-| Native layout and recovery | All 14 integration scenarios pass on the current static-runtime candidate, including guarded close, restart, watchdog recovery and failed-startup recovery. Report: `target/polish-static-integration-results.json`. |
+| Native layout and recovery | All 14 integration scenarios passed on the recorded static-runtime candidate, including guarded close, restart, watchdog recovery and failed-startup recovery. Report: `target/polish-static-integration-results.json`. |
 | Workspace motion | Workspaces are the carousel pages. A focused window activates its containing workspace; focus within that workspace does not animate. Ten native integration cases and nine grouped-thumbnail probe cases cover the behavior described in [carousel validation](validation-carousel.md). |
 | Icons and setup | Two binary-resource checks and 60 isolated installer/registration/handover checks pass. Setup preview checks do not invoke Install or Remove. Multi-size icons and product identity are embedded in both application images. |
 | Distribution | The packaging validator passes 14 isolated cases, including deterministic archive readback, input tampering, permission declarations, external-runtime rejection and partial-publication cleanup. [Packaging](packaging.md) describes strict validation of the final inputs. |
@@ -332,23 +332,30 @@ must stay usable and every owned test window must be recoverable afterward.
 
 ## Performance budgets
 
-These are the latest measured budgets for ordinary candidate `9608872A…`.
+These are the latest measured budgets for ordinary candidate `43FD9136…`.
 Earlier candidate measurements remain in [performance evidence](validation-performance.md).
 No signed-installation performance result is inferred from this ordinary run.
 
 | Budget | Evidence available |
 |---|---|
-| Hook callback p99 under 50 µs | 104 µs p99 for Moon's own work and 938 µs for the whole callback. Both exceed the budget. The earlier 9 µs sample predates the key-pair correctness fix. |
-| Eight-window key-to-placement median under 10 ms, p99 under 30 ms | 128/128 exact placements pass. Independent median/p99 are 12.348/44.500 ms; latency remains above budget. |
+| Hook callback p99 under 50 µs | 101 µs p99 for Moon's own work and 886 µs for the whole callback. Both exceed the budget. The earlier 9 µs sample predates the key-pair correctness fix. |
+| Eight-window key-to-placement median under 10 ms, p99 under 30 ms | 128/128 exact placements pass. Independent median/p99 are 11.944/29.496 ms. The median fails; p99 passes in this run only. |
 | 50-window reducer plus layout under 100 µs | Passed: 22.59–22.93 µs in the recorded Criterion run. |
-| Idle CPU 0%, no timer faster than 1 Hz | The ten-second sample is 0.4687147% of one core. Providers run at 1 Hz and unchanged scenes do not redraw; animation uses a bounded active-only timer. Literal zero CPU is not established. |
-| Working set under 50 MB, bar and borders on one 4K monitor | 45,961,216 bytes before the workload, 49,188,864 after it and 47,472,640 after idle. All three samples are below 50,000,000 bytes in this run. Earlier E9 repeats exceeded the budget with different executable-image residency; a universal bound or continuous peak below the limit is not established. |
-| Ready in under 300 ms | 120.659 ms; passed on this ordinary candidate. The signed installation still needs its own result. |
+| Idle CPU 0%, no timer faster than 1 Hz | The ten-second default-bar sample is 0.156248% of one core. A separate 60-second Static interval is 0.078116%, with unchanged scene/layout/revision counters. Providers run at 1 Hz and unchanged scenes do not redraw; animation uses a bounded active-only timer. Neither result establishes literal zero CPU. |
+| Working set under 50 MB, bar and borders on one 4K monitor | 45,543,424 bytes before the workload, 48,816,128 after it and 46,981,120 after idle. All three samples are below 50,000,000 bytes in this run. Earlier E9 repeats exceeded the budget with different executable-image residency; a universal bound or continuous peak below the limit is not established. |
+| Ready in under 300 ms | 118.223 ms; passed on this ordinary candidate. The signed installation still needs its own result. |
 
-These results use normal-permission candidate `9608872A…`, eight owned helpers,
+The separate Static pair compares D973 with 43FD: 0.234353% versus 0.078116%
+one-core CPU, and 429,596,270 versus 99,043,820 cycles. Both qualified intervals
+have zero scene, draw, layout, commit and revision changes. This single sequential
+pair uses quantized CPU-time counters and different text from the default bar;
+it is not a universal or default-bar CPU improvement. Evidence:
+`target/provider-idle-{1-baseline-static,2-candidate-static}/report.json`.
+
+The default-workload results use normal-permission candidate `43FD9136…`, eight owned helpers,
 the default WARP renderer, and a 3840×2160 display at 125% scaling, with the bar
 and borders enabled. Raw records are in
-`target/factory-final-performance.json`. Optional input dispatch profiling and
+`target/provider-demand-performance.json`. Optional input dispatch profiling and
 target-window callback profiling were both disabled; the probe's aggregate
 readback timing remains included. One device, two composition surface factories,
 one border atlas, eight gradient brushes and one text format served

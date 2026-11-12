@@ -7,41 +7,51 @@ acceptance conditions remain tracked in [acceptance-status.md](acceptance-status
 
 ## Current ordinary candidate, 13 November 2026
 
-The ordinary daemon is
-`9608872A54F93B28221A918D48E2CB1B487884D10A2BCC1A19ECF4945D4FCE94`,
+The latest validated ordinary daemon is
+`43FD913681AD449967DEEBD2DD6BA38DAD59E37D384FD1142A30E9FC9F17E314`,
 the staged UIAccess image is
-`9ECFCE8BF68424B9DB46D344D4938445076FB1F886C9DD799D644C8815DC7040`,
+`748B8829283BA55E7367EEE2F0820D3C3205914BF584B93668A44D9215D1F496`,
 and Settings remains
 `EC22F24B07DFAD2ABE6198B519016E26E2C119843351FE81AEAC13EE9799727C`.
 The installation image has not yet been signed or installed. Build records are
-`target/factory-{final,install,validation}-build.json`.
+`target/provider-demand-build.json` and `target/provider-install-build.json`.
 
-The 960 ordinary daemon is running through Explorer as PID 10844 from
-`Downloads\Moon-validation\moon-factory-final-20261113`, with EC22 Settings
+The recorded 43FD promotion ran through Explorer as PID 32520 from
+`Downloads\Moon-validation\moon-provider-demand-20261113`, with EC22 Settings
 adjacent. All four original window/process/birth identities and workspace
-assignments survive, visible frames and prior focus are verified, and the
-personal configuration is unchanged. It runs at medium integrity without
-UIAccess; no previous manager is running. `target/factory-final-live.json`
+assignments survived, visible frames and prior focus were verified, and the
+personal configuration was unchanged. It ran at medium integrity without
+UIAccess, with no previous manager running. `target/provider-demand-live.json`
 records this promotion separately from pending signed-installation acceptance.
 
-This ordinary candidate passes 14 lifecycle cases, ten workspace-carousel cases
-and all 128 exact placements in the default performance workload. Ready time is
-120.659 ms, external placement median/p99 12.348/44.500 ms and own-hook p99 104 µs.
-Working-set samples are 45,961,216 / 49,188,864 / 47,472,640 bytes before input,
-after input and after idle; idle CPU is 0.4687147% of one core. Both opt-in
+This ordinary candidate passes 77 core tests, 36 native unit tests, 14 lifecycle
+cases, ten workspace-carousel cases and all 128 exact placements in the default
+performance workload. Ready time is 118.223 ms, external placement median/p99
+11.944/29.496 ms and own/whole-hook p99 101/886 µs.
+Working-set samples are 45,543,424 / 48,816,128 / 46,981,120 bytes before input,
+after input and after idle; default idle CPU is 0.156248% of one core. Both opt-in
 profiling modes are disabled. These memory samples are below 50,000,000 bytes,
 but earlier E9 image-residency variation prevents a universal memory-pass claim.
-Latency and literal-zero idle CPU still miss the specified budgets. Reports:
-`target/factory-final-{integration,carousel,performance}.json`.
+Placement median, hook latency and literal-zero idle CPU still miss the budgets;
+placement p99 passes in this run only. Reports:
+`target/provider-demand-{integration,carousel,performance}.json`.
 
-The scoped visual review passes for all 13 images: eight complete rings, five
-bar hashes matching D583, and zero residual pixels in the removed-split region.
-All 13 before/after ordering checks held on the first attempt. This is explicit
+The scoped visual review passes for all 13 images, byte-identical to the accepted
+960 comparison captures: eight complete rings, five bars, and no residual pixels
+in the removed-split region. This is explicit
 per-target inspection ordering at 4K/125%; normal product Z-order and other DPI
 settings are not covered. Reports are in
-`target/factory-final-target-visual/{report,visual-review,pixel-review}.json`.
+`target/provider-demand-visual/{report,visual-review,pixel-review}.json`.
 The earlier E9 and 960 lowest-helper captures remain partial evidence; an
 intervening window is a plausible explanation, not an identified cause.
+
+Retained visible text layouts and provider selection avoid unused work. A matched
+60-second Static pair records 0.234353% to 0.078116% one-core CPU and 429,596,270
+to 99,043,820 cycles, with unchanged scene, draw, layout, commit and revision
+counters. This is one controlled pair, not a universal or default-bar CPU
+improvement; the default bar still requests all displayed provider families.
+See `target/provider-idle-{1-baseline-static,2-candidate-static}/report.json`.
+
 Six harmless tracked-launcher parser/behavior checks and the cleanup check pass
 in `target/explorer-launch-tracked-validation.json`; they perform no installation
 or UAC request. Signed privilege checks, physical resilience and seven-day
@@ -164,7 +174,7 @@ does not establish native high-contrast or reduced-motion behavior.
 
 The report records the exact source and generated-asset hashes. The current
 native binary identities and results are recorded in
-[acceptance evidence](acceptance-status.md#current-renderer-refinement-13-november-2026).
+[acceptance evidence](acceptance-status.md#current-text-layout-and-provider-refinement-13-november-2026).
 Normal and malformed-config opening checks both reveal the expected UI and close
 cleanly. Immediate native captures may precede compositor drawing; these results
 do not establish a zero-blank-frame presentation, physical accessibility-setting
