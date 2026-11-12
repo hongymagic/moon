@@ -120,7 +120,7 @@ function button(
   const node = el("button", className, label);
   node.type = "button";
   node.addEventListener("click", () => {
-    void Promise.resolve(action()).catch(showError);
+    void Promise.resolve().then(action).catch(showError);
   });
   return node;
 }
@@ -179,6 +179,9 @@ let active = "General";
 let busy = false;
 let busyLabel = "Saving your changes…";
 const invalidFields = new Map<string, string>();
+const fieldPages = new Map<string, string>();
+let confirmationOpen = false;
+let errorMessage: string | undefined;
 let search = "";
 let root = document.querySelector<HTMLDivElement>("#app")!;
 let content: HTMLElement;
@@ -197,6 +200,7 @@ function toast(message: string): void {
 }
 function showError(error: unknown): void {
   const message = error instanceof Error ? error.message : String(error);
+  errorMessage = message;
   if (errorBox) {
     errorBox.textContent = message;
     errorBox.hidden = false;
@@ -232,6 +236,11 @@ function updateFooter(): void {
     ),
   );
   const actions = el("div", "actions");
+  if (invalidFields.size) {
+    const review = button("Review errors", reviewErrors, "quiet");
+    review.disabled = busy;
+    actions.append(review);
+  }
   const discard = button("Discard", discardChanges);
   discard.disabled = (!edits.length && !invalidFields.size) || busy;
   const apply = button("Save changes", save, "primary");
@@ -241,6 +250,19 @@ function updateFooter(): void {
   reload.disabled = busy;
   actions.append(reload, discard, apply);
   footer.append(label, actions);
+}
+function reviewErrors(): void {
+  const key = invalidFields.keys().next().value;
+  if (!key) return;
+  switchPage(fieldPages.get(key) ?? "Advanced");
+  const input = Array.from(
+    content.querySelectorAll<HTMLElement>("[data-field-path]"),
+  ).find((node) => node.dataset.fieldPath === key);
+  if (input) {
+    const details = input.closest("details");
+    if (details) details.open = true;
+    input.focus();
+  }
 }
 function stage(path: Path, value: Json): void {
   put(draft, path, value);
@@ -268,6 +290,11 @@ function resetField(path: Path): void {
   edits = edits.filter((e) => !path.every((p, i) => p === e.path[i]));
   edits.push({ op: "reset", path });
   put(draft, path, get(loaded.snapshot.defaults, path));
+  for (const key of invalidFields.keys()) {
+    const invalidPath = JSON.parse(key) as Path;
+    if (path.every((part, index) => part === invalidPath[index]))
+      invalidFields.delete(key);
+  }
   updateFooter();
   renderPage();
 }
@@ -277,13 +304,19 @@ async function confirmAction(
   accept: string,
   destructive = false,
 ): Promise<boolean> {
+  if (confirmationOpen) return false;
+  confirmationOpen = true;
   return new Promise((resolve) => {
     const dialog = el("dialog");
     dialog.setAttribute("aria-labelledby", "dialog-title");
     const heading = el("h2", "", title);
     heading.id = "dialog-title";
+    const description = el("p", "", text);
+    description.id = "dialog-description";
+    dialog.setAttribute("aria-describedby", description.id);
     const actions = el("div", "actions");
     const finish = (value: boolean) => {
+      confirmationOpen = false;
       dialog.close();
       dialog.remove();
       resolve(value);
@@ -293,7 +326,7 @@ async function confirmAction(
       cancel,
       button(accept, () => finish(true), destructive ? "danger" : "primary"),
     );
-    dialog.append(heading, el("p", "", text), actions);
+    dialog.append(heading, description, actions);
     dialog.addEventListener("cancel", (event) => {
       event.preventDefault();
       finish(false);
@@ -317,6 +350,7 @@ async function discardChanges(): Promise<void> {
   draft = clone(loaded.snapshot.config);
   edits = [];
   invalidFields.clear();
+  errorMessage = undefined;
   errorBox.hidden = true;
   renderPage();
   updateFooter();
@@ -343,6 +377,7 @@ async function reloadSettings(): Promise<void> {
     draft = clone(next.snapshot.config);
     edits = [];
     invalidFields.clear();
+    errorMessage = undefined;
     renderPage();
     updateStatus();
     toast("Loaded the latest saved settings.");
@@ -354,7 +389,10 @@ async function reloadSettings(): Promise<void> {
 }
 
 async function save(): Promise<void> {
-  if (busy || !edits.length || invalidFields.size) return;
+  if (busy || confirmationOpen || !edits.length || invalidFields.size) return;
+  const focusedId = document.activeElement?.id;
+  const focusedPage = active;
+  let failure: unknown;
   busy = true;
   busyLabel = "Saving your changes…";
   content.inert = true;
@@ -368,18 +406,26 @@ async function save(): Promise<void> {
     loaded = result.data;
     draft = clone(loaded.snapshot.config);
     edits = [];
+    errorMessage = undefined;
     renderPage();
     updateStatus();
     toast(result.message);
   } catch (e) {
-    showError(e);
+    failure = e;
   } finally {
     busy = false;
     content.inert = false;
     updateFooter();
   }
+  if (failure) showError(failure);
+  else
+    (focusedId && active === focusedPage
+      ? document.getElementById(focusedId)
+      : content.querySelector("h1")
+    )?.focus();
 }
 window.moonCloseRequested = () => {
+  if (busy || confirmationOpen) return;
   void (async () => {
     if (
       !busy &&
@@ -392,7 +438,7 @@ window.moonCloseRequested = () => {
         )))
     )
       await request("close");
-  })();
+  })().catch(showError);
 };
 function updateStatus(): void {
   status.replaceChildren();
@@ -486,6 +532,9 @@ function field(
   const value = get(draft, path);
   const input = options.choices ? el("select") : el("input");
   input.id = id;
+  const fieldKey = JSON.stringify(path);
+  input.dataset.fieldPath = fieldKey;
+  fieldPages.set(fieldKey, active);
   input.setAttribute("aria-describedby", desc.id);
   if (input instanceof HTMLSelectElement)
     options.choices!.forEach((option) => {
@@ -507,8 +556,12 @@ function field(
   }
   if (!(input instanceof HTMLInputElement && input.type === "checkbox"))
     input.value = value === null ? "" : String(value);
-  if (invalidFields.has(JSON.stringify(path)))
-    input.value = invalidFields.get(JSON.stringify(path))!;
+  if (invalidFields.has(fieldKey)) {
+    input.value = invalidFields.get(fieldKey)!;
+    input.setAttribute("aria-invalid", "true");
+    if (input instanceof HTMLInputElement)
+      desc.textContent = input.validationMessage;
+  }
   input.addEventListener("input", () => {
     if (input instanceof HTMLInputElement && !input.checkValidity()) {
       invalidFields.set(JSON.stringify(path), input.value);
@@ -656,12 +709,15 @@ function renderGeneral(): void {
     );
   }
 }
+const lightScheme = matchMedia("(prefers-color-scheme: light)");
+lightScheme.addEventListener("change", () => {
+  if (draft?.theme === "system") updatePreview();
+});
 function resolveColor(name: Json, fallback: string): string {
   const color = String(name ?? "");
   const light =
     draft.theme === "light" ||
-    (draft.theme === "system" &&
-      matchMedia("(prefers-color-scheme: light)").matches);
+    (draft.theme === "system" && lightScheme.matches);
   const palette = light
     ? { ...object(draft.palette), ...object(draft["light-palette"]) }
     : object(draft.palette);
@@ -679,10 +735,17 @@ function updatePreview(): void {
   miniBar.style.color = resolveColor(bar.foreground, "#f0ebe0");
   miniBar.style.visibility = bar.enabled ? "visible" : "hidden";
   preview.querySelectorAll<HTMLElement>(".mini-window").forEach((window, i) => {
-    window.style.background = resolveColor(i ? "surface0" : "base", "#fffdf9");
-    window.style.borderColor = borders.enabled
+    const surface = resolveColor(i ? "surface0" : "base", "#fffdf9");
+    const start = borders.enabled
       ? resolveColor(i ? borders.unfocused : borders.focused, "#d17a4f")
       : "transparent";
+    const end =
+      !i && borders.enabled
+        ? resolveColor(borders["focused-end"], start)
+        : start;
+    window.style.borderColor = "transparent";
+    window.style.background = `linear-gradient(${surface}, ${surface}) padding-box, linear-gradient(135deg, ${start}, ${end}) border-box`;
+    window.style.borderWidth = `${Math.min(Number(borders.width), 6)}px`;
     window.style.borderRadius = `${Math.min(Number(borders.radius), 16)}px`;
   });
 }
@@ -705,17 +768,36 @@ function renderAppearance(): void {
     el("div", "preview-caption", "Appearance preview"),
   );
   content.append(preview);
+  content.append(
+    el("h2", "", "Desktop theme"),
+    el(
+      "p",
+      "note",
+      "Choose colors for the bar and window borders. Settings follows your Windows appearance.",
+    ),
+  );
   const choices = el("div", "theme-choices");
+  choices.setAttribute("role", "group");
+  choices.setAttribute("aria-label", "Desktop theme");
   for (const theme of ["light", "dark", "system"]) {
     const b = button(
       theme[0]!.toUpperCase() + theme.slice(1),
       () => {
         stage(["theme"], theme);
-        renderPage();
+        choices
+          .querySelectorAll<HTMLButtonElement>("button")
+          .forEach((choice) =>
+            choice.setAttribute(
+              "aria-pressed",
+              String(choice.dataset.theme === theme),
+            ),
+          );
+        updatePreview();
       },
       "theme-choice",
     );
     b.setAttribute("aria-pressed", String(draft.theme === theme));
+    b.dataset.theme = theme;
     const swatches = el("div", "swatches");
     (theme === "light"
       ? ["#f1ede5", "#d7cfc3", "#9d4b28"]
@@ -1181,6 +1263,9 @@ function jsonEditor(
   const details = el("details");
   details.append(el("summary", "", title), el("p", "note", hint));
   const input = el("textarea");
+  const fieldKey = JSON.stringify(path);
+  input.dataset.fieldPath = fieldKey;
+  fieldPages.set(fieldKey, active);
   input.className = "path";
   input.style.width = "100%";
   input.style.minHeight = "150px";
@@ -1189,19 +1274,30 @@ function jsonEditor(
     JSON.stringify(get(draft, path), null, 2);
   input.setAttribute("aria-label", title);
   const error = el("div", "description");
+  error.id = `field-${++nextField}-error`;
+  input.setAttribute("aria-describedby", error.id);
   error.setAttribute("role", "alert");
+  const invalidMessage =
+    "Enter valid JSON. This field has not been added to your changes.";
+  if (invalidFields.has(fieldKey)) {
+    input.setAttribute("aria-invalid", "true");
+    input.setCustomValidity(invalidMessage);
+    error.textContent = invalidMessage;
+    details.open = true;
+  }
   input.addEventListener("input", () => {
     try {
       invalidFields.delete(JSON.stringify(path));
       stage(path, JSON.parse(input.value) as Json);
       error.textContent = "";
       input.setCustomValidity("");
+      input.removeAttribute("aria-invalid");
     } catch {
       invalidFields.set(JSON.stringify(path), input.value);
       updateFooter();
-      error.textContent =
-        "Enter valid JSON. This field has not been added to your changes.";
+      error.textContent = invalidMessage;
       input.setCustomValidity(error.textContent);
+      input.setAttribute("aria-invalid", "true");
     }
   });
   details.append(input, error);
@@ -1448,10 +1544,10 @@ function renderPage(): void {
     heading,
     el("p", "lead", search ? `Results for “${search}”` : descriptions[active]),
   );
-  errorBox = el("div", "notice error");
+  errorBox = el("div", "notice error", errorMessage);
   errorBox.setAttribute("role", "alert");
   errorBox.tabIndex = -1;
-  errorBox.hidden = true;
+  errorBox.hidden = !errorMessage;
   content.append(errorBox);
   if (search) {
     const card = el("div", "card");
@@ -1485,6 +1581,7 @@ function renderPage(): void {
     About: renderAbout,
   })[active]!();
 }
+let readySent = false;
 async function boot(): Promise<void> {
   try {
     loaded = await request<Loaded>("load");
@@ -1507,14 +1604,20 @@ async function boot(): Promise<void> {
     page.append(actions);
     root.append(page);
   }
+  if (!readySent) {
+    readySent = true;
+    window.ipc?.postMessage(JSON.stringify({ id: 0, method: "ready" }));
+  }
 }
 document.addEventListener("keydown", (event) => {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
     event.preventDefault();
+    if (confirmationOpen) return;
     void save();
   }
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") {
     event.preventDefault();
+    if (confirmationOpen) return;
     document.querySelector<HTMLInputElement>("#search")?.focus();
   }
 });

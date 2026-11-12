@@ -2,7 +2,14 @@ use crate::store::Store;
 use moon_core::settings::{Edit, Snapshot};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{cell::Cell, fs, path::PathBuf, sync::mpsc, thread};
+use std::{
+    cell::Cell,
+    fs,
+    path::PathBuf,
+    sync::mpsc,
+    thread,
+    time::{Duration, Instant},
+};
 use tao::{
     dpi::LogicalSize,
     event::{Event, WindowEvent},
@@ -256,7 +263,7 @@ fn trusted_url(url: &str) -> bool {
 
 fn apply_material(window: &tao::window::Window) -> bool {
     let preferences = moon_win::surfaces::system_accessibility();
-    let backdrop = if preferences.high_contrast { DWMSBT_NONE } else { DWMSBT_MAINWINDOW };
+    let backdrop = if preferences.transparency_allowed { DWMSBT_MAINWINDOW } else { DWMSBT_NONE };
     let corner = DWMWCP_ROUND;
     let hwnd = HWND(window.hwnd() as *mut _);
     unsafe {
@@ -276,14 +283,14 @@ fn apply_material(window: &tao::window::Window) -> bool {
         {
             return false;
         }
-        let margin = if preferences.high_contrast { 0 } else { -1 };
+        let margin = if preferences.transparency_allowed { -1 } else { 0 };
         let margins = MARGINS {
             cxLeftWidth: margin,
             cxRightWidth: margin,
             cyTopHeight: margin,
             cyBottomHeight: margin,
         };
-        DwmExtendFrameIntoClientArea(hwnd, &margins).is_ok() && !preferences.high_contrast
+        DwmExtendFrameIntoClientArea(hwnd, &margins).is_ok() && preferences.transparency_allowed
     }
 }
 
@@ -294,10 +301,14 @@ pub fn run() -> Result<(), String> {
     if token.ui_access || token.integrity_rid >= 0x3000 {
         return Err("Open Moon Settings normally from the Start menu. Settings does not run as administrator.".into());
     }
+    // Appearance reads use UISettings before WebView2 initializes its thread.
+    let _apartment = moon_win::platform::Apartment::new().map_err(|e| e.to_string())?;
     let path = config_path()?;
     let loop_ = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let window = WindowBuilder::new()
         .with_title("Moon Settings")
+        // Reveal after the local page renders its initial settings or error.
+        .with_visible(false)
         .with_transparent(false)
         // DWM's extended frame needs zero-valued pixels underneath it,
         // including newly exposed client pixels after a resize.
@@ -363,8 +374,17 @@ pub fn run() -> Result<(), String> {
         .with_url("moon://localhost/")
         .build(&window).map_err(|e|format!("Moon Settings could not open its interface. Check that Microsoft Edge WebView2 Runtime is installed.\n\n{e}\n\nRuntime help: https://developer.microsoft.com/microsoft-edge/webview2/"))?;
     let mut initialized = false;
+    let mut shown = false;
+    let startup_deadline = Instant::now() + Duration::from_secs(30);
     loop_.run(move |event, _, flow| {
-        *flow = ControlFlow::Wait;
+        // A failed script or WebView process must not leave an invisible host.
+        // The frontend's bounded load request renders its own error before this.
+        if !shown && matches!(event, Event::NewEvents(_)) && Instant::now() >= startup_deadline {
+            show_error("Moon Settings could not finish opening. Close this message and try opening Settings again. Your saved settings have not changed.");
+            *flow = ControlFlow::Exit;
+            return;
+        }
+        *flow = if shown { ControlFlow::Wait } else { ControlFlow::WaitUntil(startup_deadline) };
         match event {
             Event::UserEvent(UserEvent::MaterialChanged) => {
                 material_observer.pending.set(false);
@@ -381,7 +401,15 @@ pub fn run() -> Result<(), String> {
             }
             Event::UserEvent(UserEvent::Call(call)) => {
                 initialized = true;
-                if call.method == "close" { *flow = ControlFlow::Exit; }
+                if call.method == "ready" {
+                    if !shown {
+                        shown = true;
+                        *flow = ControlFlow::Wait;
+                        window.set_visible(true);
+                        window.set_focus();
+                    }
+                }
+                else if call.method == "close" { *flow = ControlFlow::Exit; }
                 else if let Err(error) = sender.try_send(call) {
                     let (mpsc::TrySendError::Full(call) | mpsc::TrySendError::Disconnected(call)) = error;
                     let reply = json!({"id":call.id,"ok":false,"error":{"message":"Moon is busy. Wait a moment and try again."}});

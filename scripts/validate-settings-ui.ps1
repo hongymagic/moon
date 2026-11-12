@@ -7,13 +7,31 @@ $ErrorActionPreference='Stop'
 if (!$OutputDirectory) {$OutputDirectory=Join-Path $env:LOCALAPPDATA 'moon-dev\settings-ui-validation'}
 Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes,System.Drawing
 Add-Type -TypeDefinition @'
-using System;using System.Runtime.InteropServices;
+using System;using System.Runtime.InteropServices;using System.Text;
 public static class MoonSettingsValidation {
+ delegate bool EnumWindowProc(IntPtr window,IntPtr parameter);
+ [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindowProc callback,IntPtr parameter);
+ [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
+ [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern int GetWindowText(IntPtr window,StringBuilder text,int capacity);
  [StructLayout(LayoutKind.Sequential)] public struct Rect {public int Left,Top,Right,Bottom;}
  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h,out Rect r);
  [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h,IntPtr dc,uint flags);
  [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h,uint m,IntPtr w,IntPtr l);
  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h,out uint p);
+ public static IntPtr FindVisibleWindow(uint processId) {
+  IntPtr result=IntPtr.Zero;bool ambiguous=false;
+  EnumWindows((window,parameter)=>{
+   uint owner;GetWindowThreadProcessId(window,out owner);
+   if(owner!=processId || !IsWindowVisible(window))return true;
+   var title=new StringBuilder(256);GetWindowText(window,title,title.Capacity);
+   if(title.ToString()!="Moon Settings")return true;
+   Rect bounds;if(!GetWindowRect(window,out bounds) || bounds.Right-bounds.Left<200 || bounds.Bottom-bounds.Top<120)return true;
+   if(result!=IntPtr.Zero){ambiguous=true;return false;}
+   result=window;return true;
+  },IntPtr.Zero);
+  if(ambiguous)throw new InvalidOperationException("Multiple visible Moon Settings windows belong to the owned process.");
+  return result;
+ }
 }
 '@
 [IO.Directory]::CreateDirectory($OutputDirectory)|Out-Null
@@ -33,10 +51,25 @@ function Wait-MoonCondition([scriptblock]$Condition,[string]$Description) {
  do {if(&$Condition){return};Start-Sleep -Milliseconds 100}while([DateTime]::UtcNow -lt $until)
  throw "Timed out: $Description"
 }
-function Find-MoonControl([string]$Name) {
+function Get-OwnedSettingsHandle {
  $process.Refresh();if($process.HasExited){throw 'Owned Settings process exited unexpectedly.'}
- $window=[Windows.Automation.AutomationElement]::FromHandle($process.MainWindowHandle)
- if($window.Current.ProcessId -ne $process.Id){throw 'Settings owner changed.'}
+ $handle=[MoonSettingsValidation]::FindVisibleWindow([uint32]$process.Id)
+ if($handle -ne [IntPtr]::Zero){
+  [uint32]$owner=0;[void][MoonSettingsValidation]::GetWindowThreadProcessId($handle,[ref]$owner)
+  if($owner -ne $process.Id){throw 'Settings HWND owner changed.'}
+ }
+ return $handle
+}
+function Get-OwnedSettingsWindow {
+ $handle=Get-OwnedSettingsHandle
+ if($handle -eq [IntPtr]::Zero){return $null}
+ $window=[Windows.Automation.AutomationElement]::FromHandle($handle)
+ if($window.Current.ProcessId -ne $process.Id -or $window.Current.Name -ne 'Moon Settings'){throw 'Settings automation owner or title changed.'}
+ return $window
+}
+function Find-MoonControl([string]$Name) {
+ $window=Get-OwnedSettingsWindow
+ if(!$window){return $null}
  $window.FindFirst([Windows.Automation.TreeScope]::Descendants,[Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty,$Name))
 }
 function Invoke-MoonButton([string]$Name) {
@@ -45,9 +78,8 @@ function Invoke-MoonButton([string]$Name) {
  ([Windows.Automation.InvokePattern]$element.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern)).Invoke()
 }
 function Find-MoonValue([string]$Name) {
- $process.Refresh();if($process.HasExited){throw 'Owned Settings exited.'}
- $window=[Windows.Automation.AutomationElement]::FromHandle($process.MainWindowHandle)
- if($window.Current.ProcessId -ne $process.Id){throw 'Settings owner changed.'}
+ $window=Get-OwnedSettingsWindow
+ if(!$window){return $null}
  $elements=$window.FindAll([Windows.Automation.TreeScope]::Descendants,[Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty,$Name))
  foreach($element in $elements){$pattern=$null;if($element.TryGetCurrentPattern([Windows.Automation.ValuePattern]::Pattern,[ref]$pattern)){return [Windows.Automation.ValuePattern]$pattern}}
  return $null
@@ -70,7 +102,8 @@ function Read-SettingsSource([string]$Path) {
 }
 function Start-OwnedSettings([string]$Path) {
  $script:process=Start-Process -FilePath $Binary -ArgumentList @('--config',(ConvertTo-MoonArgument $Path)) -PassThru
- Wait-MoonCondition {$process.Refresh();$process.MainWindowHandle -ne [IntPtr]::Zero} 'Settings window'
+ $null=$process.Handle
+ Wait-MoonCondition {(Get-OwnedSettingsHandle) -ne [IntPtr]::Zero} 'Visible owned Moon Settings window'
  Wait-MoonCondition {Find-MoonValue 'Inner gap'} 'Settings content'
 }
 function Close-OwnedSettings {
@@ -78,10 +111,12 @@ function Close-OwnedSettings {
  try {
   $process.Refresh()
   if(!$process.HasExited){
+   $handle=Get-OwnedSettingsHandle
+   if($handle -eq [IntPtr]::Zero){throw 'No visible owned Moon Settings window is available; close was refused.'}
    [uint32]$owner=0
-   [void][MoonSettingsValidation]::GetWindowThreadProcessId($process.MainWindowHandle,[ref]$owner)
+   [void][MoonSettingsValidation]::GetWindowThreadProcessId($handle,[ref]$owner)
    if($owner -ne $process.Id){throw 'Settings HWND owner changed; close was refused.'}
-   [void][MoonSettingsValidation]::PostMessage($process.MainWindowHandle,0x10,[IntPtr]::Zero,[IntPtr]::Zero)
+   if(![MoonSettingsValidation]::PostMessage($handle,0x10,[IntPtr]::Zero,[IntPtr]::Zero)){throw 'Windows refused the owned Settings close message.'}
    if(!$process.WaitForExit(1000)){
     # Only this harness's document can be discarded.
     $discard=Find-MoonControl 'Discard and close'
@@ -177,8 +212,9 @@ try {
  $checks.Add('Reload confirmation can retain the draft or load the external file')
  Invoke-MoonButton 'Appearance'
  Wait-MoonCondition {Find-MoonControl 'Focused color'} 'Appearance controls'
- $handle=$process.MainWindowHandle
- $bounds=[MoonSettingsValidation+Rect]::new();[void][MoonSettingsValidation]::GetWindowRect($handle,[ref]$bounds)
+ $handle=Get-OwnedSettingsHandle
+ $bounds=[MoonSettingsValidation+Rect]::new()
+ if($handle -eq [IntPtr]::Zero -or ![MoonSettingsValidation]::GetWindowRect($handle,[ref]$bounds)){throw 'The visible owned Settings frame is unavailable for capture.'}
  $bitmap=[Drawing.Bitmap]::new($bounds.Right-$bounds.Left,$bounds.Bottom-$bounds.Top);$graphics=[Drawing.Graphics]::FromImage($bitmap)
  try {$dc=$graphics.GetHdc();try{[void][MoonSettingsValidation]::PrintWindow($handle,$dc,2)}finally{$graphics.ReleaseHdc($dc)};$bitmap.Save((Join-Path $OutputDirectory 'appearance.png'),[Drawing.Imaging.ImageFormat]::Png)}finally{$graphics.Dispose();$bitmap.Dispose()}
  $checks.Add('Appearance controls and preview are available in the real Windows host')
@@ -201,9 +237,9 @@ try {
  $failure=$_
  try {
   $names=@()
-  if($process -and !$process.HasExited -and $process.MainWindowHandle -ne [IntPtr]::Zero){
-   $window=[Windows.Automation.AutomationElement]::FromHandle($process.MainWindowHandle)
-   if($window.Current.ProcessId -eq $process.Id){$names=@($window.FindAll([Windows.Automation.TreeScope]::Descendants,[Windows.Automation.Condition]::TrueCondition)|ForEach-Object {$_.Current.Name}|Select-Object -Unique)}
+  if($process -and !$process.HasExited){
+   $window=Get-OwnedSettingsWindow
+   if($window){$names=@($window.FindAll([Windows.Automation.TreeScope]::Descendants,[Windows.Automation.Condition]::TrueCondition)|ForEach-Object {$_.Current.Name}|Select-Object -Unique)}
   }
   [IO.File]::WriteAllText((Join-Path $OutputDirectory 'failure.json'),([pscustomobject]@{error=$failure.ToString();checks=$checks.ToArray();controls=$names}|ConvertTo-Json -Depth 5),[Text.UTF8Encoding]::new($false))
  }catch{Write-Warning 'Could not capture Settings failure controls.'}

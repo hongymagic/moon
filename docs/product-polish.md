@@ -17,18 +17,45 @@ have a checked origin, a bounded message size, and a fixed operation list.
 
 The interface uses native window chrome for resizing, snapping, system menus,
 and caption buttons. Windows 11 system backdrop and corner preferences add Mica
-and rounded corners when available. Contrast mode uses system colors and opaque
+and rounded corners when available. The native host reads Windows' Transparency
+effects preference through `UISettings.AdvancedEffectsEnabled` and selects an
+opaque surface when it is disabled. Contrast mode uses system colors and opaque
 surfaces; reduced motion disables decorative transitions. The seven pages have
 keyboard-visible focus, labeled controls, search, draft indicators, explicit save,
-discard and reload, and a close confirmation for unsaved changes. Main theme
+discard and reload, and a close confirmation for unsaved changes. **Desktop theme**
 controls edit the same live configuration as the CLI, including light/dark/system
-themes, border colors and gradients, bar materials and font size. Advanced
+themes, border colors and gradients, bar materials and font size. The Settings
+interface itself follows Windows' appearance. Its desktop preview displays both
+gradient colors and updates when the system color scheme changes. Advanced
 structured editors expose the remaining configuration without a second format.
 
 Persistence preserves comments and personal overrides, validates complete batches,
 checks concurrent edits, and replaces the file atomically. The precise limits are
-in [settings-editing.md](settings-editing.md). Failed saves retain the draft.
+in [settings-editing.md](settings-editing.md). Failed saves retain the draft and
+focus the error after editing is enabled again; the error remains available when
+changing pages. **Review errors** returns to an invalid field, opens its editor
+when needed, and preserves its explanation. Resetting a section clears invalid
+raw entries in that section. Keyboard saves restore focus to the edited field,
+or to the current page heading if the user navigated while saving. A confirmation
+dialog owns keyboard shortcuts and repeated close requests until it is dismissed.
 A successful save reloads only a daemon using the same configuration path.
+
+At narrow widths, navigation becomes a compact grid and the status sits above one
+aligned row of Reload, Discard and Save actions. Short viewports use normal
+document scrolling so navigation, editing and saving remain reachable. High
+contrast uses the user's system Highlight/HighlightText colors for the primary
+action, preventing an unreadable forced-color text backplate.
+
+The frontend now sends a one-time local readiness notification after rendering
+the initial loaded interface or its recoverable startup-error page. It sends
+nothing while configuration loading is pending, and retries do not repeat the
+notification. This gives the native host a meaningful initial-DOM signal for
+revealing its hidden window; Wry's page-load completion event alone was too early.
+The host bounds startup to 30 seconds so a failed script cannot leave an
+invisible process indefinitely. Native opening checks exercise both the normal
+and error pages. This handshake does not promise a compositor frame with no
+intermediate blank pixels; immediate captures can still precede drawing.
+Physical Windows transparency-preference transitions remain unmeasured.
 
 ## Workspace motion
 
@@ -59,6 +86,40 @@ motion apply to these surfaces as well as Settings. Window-manager performance
 and settings-window performance are separate measurements, not an aggregated
 claim that a WebView fits the daemon's memory budget.
 
+## Current polish verification
+
+The following checks cover the current source and frontend bundle. They do not
+replace signed-install, native interaction, performance or soak acceptance.
+
+| Check | Result and scope | Evidence |
+| --- | --- | --- |
+| Frontend build, formatting and TypeScript | Passed | `target/settings-polish/report.json` |
+| Browser interaction suite | 31/31 passed; startup readiness, dialog ownership, save/conflict handling, invalid-field recovery, focus, themes, reflow and accessibility media preferences | `target/settings-polish/browser-results.json` |
+| Portable Rust tests | 89/89 passed: 10 daemon, 73 core and 6 Settings store tests; Windows-only runtime paths are not executed | `target/polish-portable-tests.log` |
+| Windows-target Clippy | Passed; compile/static-analysis check, not native execution | `target/polish-windows-clippy.log` |
+| Windows native units | 22 passed; four separately interactive hook tests excluded | `target/polish-native-unit-results.txt` |
+| Native desktop | 14 integration, four initial-assignment and ten carousel cases passed | `target/polish-final-{integration,startup,carousel}.json` |
+| Native Settings | Eight passed with the current daemon, including save/apply, conflicts and different-file isolation | `target/polish-final-settings/report.json` |
+| Setup | 32 isolated state/handler checks and 14 recovery checks passed; both WPF modes compiled; owned visual preview does not install or remove | `target/setup-polish-validation.json`, `target/setup-polish-recovery-validation.json`, `target/setup-polish-ui/report.json` |
+
+Four focused frontend regressions were reproduced before the fixes; their failed
+baseline is retained in `target/settings-polish-before/regressions.json`.
+Screenshots in `target/settings-polish/` cover light, dark and emulated high
+contrast, plus 320, 370 and 740 CSS-pixel widths. At 740×540, the footer actions
+are checked for a common vertical position as well as viewport containment.
+The 370×270 check exercises a reflow area equivalent to halving that content
+viewport: it edits a field, saves by keyboard and navigates all seven pages.
+It is not a physical Windows 200% DPI test. Browser media emulation likewise
+does not establish native high-contrast or reduced-motion behavior.
+
+The report records the exact source and generated-asset hashes. The current
+native binary identities and results are recorded in
+[acceptance evidence](acceptance-status.md#current-polish-candidate-13-november-2026).
+Normal and malformed-config opening checks both reveal the expected UI and close
+cleanly. Immediate native captures may precede compositor drawing; these results
+do not establish a zero-blank-frame presentation, physical accessibility-setting
+transitions, full accessibility conformance or release acceptance.
+
 ## Dependencies and current references
 
 Verified on 2026-11-12: Bun 1.4.4, TypeScript 7.0.2, Playwright 1.65.0, Wry 0.57.2,
@@ -84,9 +145,14 @@ Primary references:
 - [Windows system backdrop types](https://learn.microsoft.com/en-us/windows/win32/api/dwmapi/ne-dwmapi-dwm_systembackdrop_type): Mica MAINWINDOW and minimum build 22621.
 - [DWM window attributes](https://learn.microsoft.com/en-us/windows/win32/api/dwmapi/ne-dwmapi-dwmwindowattribute): native corners, theme and backdrop attributes.
 - [Windows motion](https://learn.microsoft.com/en-us/windows/apps/design/motion/): bounded, purposeful feedback and system preferences.
+- [Windows effects preferences](https://learn.microsoft.com/en-us/windows/apps/develop/composition/composition-tailoring): `UISettings.AdvancedEffectsEnabled` reports the Transparency effects preference; custom effects need an opaque alternative when disabled.
 - [WebView2 security](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/security): ordinary privileges, origin checks and narrow host operations.
 - [WebView2 distribution](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/distribution): Evergreen sharing, runtime detection and missing-runtime handling.
 - [Wry 0.57.2 API](https://docs.rs/wry/0.57.2/wry/struct.WebViewBuilder.html) and [Tao 0.37.2](https://docs.rs/tao/0.37.2/tao/): host, navigation, IPC and native window integration.
+- [Wry page-load handler](https://docs.rs/wry/latest/wry/struct.WebViewBuilder.html#method.with_on_page_load_handler): page-loading events reviewed against the pinned 0.57.2 API; the application readiness handshake additionally waits for the initial Settings DOM.
+- [WAI modal dialog pattern](https://www.w3.org/WAI/ARIA/apg/patterns/dialog-modal/): modal focus and keyboard behavior.
+- [WAI reflow guidance](https://www.w3.org/WAI/WCAG22/Understanding/reflow.html): preserve information and functionality as the content viewport narrows.
+- [Forced colors](https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/At-rules/%40media/forced-colors): system colors and text backplates in browser contrast modes.
 - [Bun installation and upgrades](https://bun.sh/docs/installation): current stable runtime.
 
 Validation is recorded separately from implementation: browser interaction tests,

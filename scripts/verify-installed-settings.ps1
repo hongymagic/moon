@@ -8,7 +8,14 @@ if(!('MoonInstalledSettingsNative' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
 public static class MoonInstalledSettingsNative {
+    delegate bool EnumWindowProc(IntPtr window,IntPtr parameter);
+    [StructLayout(LayoutKind.Sequential)] struct Frame {public int Left,Top,Right,Bottom;}
+    [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindowProc callback,IntPtr parameter);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr window,out Frame frame);
+    [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern int GetWindowText(IntPtr window,StringBuilder text,int capacity);
     [DllImport("advapi32.dll",SetLastError=true)] static extern bool OpenProcessToken(IntPtr process,uint access,out IntPtr token);
     [DllImport("advapi32.dll",SetLastError=true)] static extern bool GetTokenInformation(IntPtr token,int kind,IntPtr value,uint length,out uint returned);
     [DllImport("advapi32.dll")] static extern IntPtr GetSidSubAuthorityCount(IntPtr sid);
@@ -17,6 +24,20 @@ public static class MoonInstalledSettingsNative {
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr window,out uint process);
     [DllImport("user32.dll",SetLastError=true)] public static extern bool PostMessage(IntPtr window,uint message,IntPtr wparam,IntPtr lparam);
     public sealed class Token {public uint integrity_rid; public bool ui_access; public bool elevated;}
+    public static IntPtr FindVisibleWindow(uint processId) {
+        IntPtr result=IntPtr.Zero;bool ambiguous=false;
+        EnumWindows((window,parameter)=>{
+            uint owner;GetWindowThreadProcessId(window,out owner);
+            if(owner!=processId || !IsWindowVisible(window))return true;
+            var title=new StringBuilder(256);GetWindowText(window,title,title.Capacity);
+            if(title.ToString()!="Moon Settings")return true;
+            Frame frame;if(!GetWindowRect(window,out frame) || frame.Right-frame.Left<200 || frame.Bottom-frame.Top<120)return true;
+            if(result!=IntPtr.Zero){ambiguous=true;return false;}
+            result=window;return true;
+        },IntPtr.Zero);
+        if(ambiguous)throw new InvalidOperationException("Multiple visible Moon Settings windows belong to the owned process.");
+        return result;
+    }
     static Exception Error() {return new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());}
     static uint Word(IntPtr token,int kind) {
         var memory=Marshal.AllocHGlobal(4);
@@ -60,13 +81,13 @@ function Get-OwnedSettingsWindow {
     if($identity.Birth -ne $settings.birth -or ![string]::Equals($identity.Path,$settings.path,[StringComparison]::OrdinalIgnoreCase)){
         throw 'Settings process identity changed; no window action is allowed.'
     }
-    $window=$owned.MainWindowHandle
-    if($window -eq [IntPtr]::Zero){throw 'Settings has no main window yet.'}
+    $window=[MoonInstalledSettingsNative]::FindVisibleWindow([uint32]$owned.Id)
+    if($window -eq [IntPtr]::Zero){throw 'Settings has no visible application window yet.'}
     [uint32]$windowOwner=0
     [void][MoonInstalledSettingsNative]::GetWindowThreadProcessId($window,[ref]$windowOwner)
     if($windowOwner -ne $owned.Id){throw 'Settings HWND owner changed.'}
     $element=[Windows.Automation.AutomationElement]::FromHandle($window)
-    if($element.Current.ProcessId -ne $owned.Id){throw 'Settings automation owner changed.'}
+    if($element.Current.ProcessId -ne $owned.Id -or $element.Current.Name -ne 'Moon Settings'){throw 'Settings automation owner or title changed.'}
     return $element
 }
 function Find-SettingsControl($Window,[string]$Name) {

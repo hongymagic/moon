@@ -1,13 +1,55 @@
 # Acceptance evidence
 
 This ledger maps the checks in `.claude/plans/moon-v1.md` to observed evidence.
-It was reviewed on 12 November 2026. Implemented event handling and passing
+It was reviewed on 13 November 2026 (Sydney). Implemented event handling and passing
 simulated tests do not establish that the corresponding physical Windows event
 has been exercised.
 
-## Current SID-fix candidate, 12 November 2026
+## Current polish candidate, 13 November 2026
 
-The current normal-permission daemon is
+The ordinary Windows daemon is
+`E050F021CFA3643CAF33B0EE007525FD1676575D688A73706FC14A8979512BE5`;
+Settings is
+`EC22F24B07DFAD2ABE6198B519016E26E2C119843351FE81AEAC13EE9799727C`.
+The corresponding UIAccess installation image is
+`B7188D60E72E40ECB662E72E2D344E9EE840FEF8333BC5058941E3F9EFA75E25`.
+Build identities are recorded in `target/polish-native-build.json` and
+`target/polish-uiaccess-build.json`.
+
+| Check | Observed result |
+| --- | --- |
+| Settings frontend | 31 browser scenarios pass, including initial normal/error-page readiness, dialog ownership, invalid-field recovery, keyboard save/focus, themes and narrow/short viewport reflow. |
+| Portable and native units | 89 portable tests and 22 Windows native unit tests pass. Four interactive hook tests are explicitly ignored in this run; their earlier separate evidence is unchanged. |
+| Native desktop behavior | 14 integration, four startup-assignment and ten carousel checks pass on this daemon. Carousel checks include focusing a hidden workspace, same-workspace focus without a slide, rapid switches and restoring original frames. |
+| Native Settings | Eight checks pass with this exact Settings/daemon pair: save/apply, comment preservation, conflict retention, reload, Appearance and different-file isolation. The personal configuration is unchanged and cleanup reports no errors. |
+| Setup | 32 isolated state/handler checks and 14 recovery checks pass. Install/Uninstall WPF views compile. Visual preview invokes neither Install nor Remove and requests no UAC prompt. |
+| Build | Formatting, frontend type checking/build, and Windows-target Clippy with warnings denied pass. |
+
+Reports: `target/polish-final-{integration,startup,carousel,desktop}.json`,
+`target/polish-final-settings/report.json`, `target/polish-native-unit-results.txt`,
+`target/settings-polish/report.json`, `target/setup-polish-validation.json`,
+`target/setup-polish-recovery-validation.json` and `target/setup-polish-ui/report.json`.
+
+The ordinary daemon is running as the sole window manager. Actual visits to
+workspaces 1, 2 and 10 verified Arc, Windows Terminal, and ChatGPT plus Claude,
+respectively, with exact visible native frames and correct hidden-window state.
+The visits returned to workspace 10. See
+`target/polish-final-workspace-visits.json`. No previous manager was restarted.
+
+Settings now reveals after its initial page or error UI has been built. Both
+native opening scenarios pass and close cleanly using owned temporary files.
+Immediate `PrintWindow` captures can still precede WebView compositor drawing;
+these checks do not prove a zero-blank-frame presentation. Evidence is retained
+in `target/settings-opening-ready-after/` and
+`target/settings-opening-invalid-after/`.
+
+This candidate has not completed a signed installation. The physical resilience
+matrix, performance budgets and seven-day soak below remain open; this polish
+run does not supersede their measured results.
+
+## Earlier SID-fix candidate, 12 November 2026
+
+The earlier normal-permission daemon is
 `DBADD0C08FA4C78AA1EF567520B593B7D3F68297BD3724C641CEDB082ECBCCAE`;
 the matching Settings image is
 `6A633A06B872765EA30AEDCBC9839F856FD3EA70BA5D855AC1BD85CCC8670E92`.

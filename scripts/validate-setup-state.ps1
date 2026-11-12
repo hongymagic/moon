@@ -180,6 +180,120 @@ function Start-Process {
             $checks.Add("Actual startup worker records and propagates result without a task or elevation: $kind")
         }
     }finally{$env:LOCALAPPDATA=$savedLocalAppData}
+    # Exercise the production setup helpers and event bodies without creating a
+    # window or starting the installer. Only worker launch/status are substituted.
+    $setupPath=Join-Path $PSScriptRoot 'setup.ps1'
+    $tokens=$null;$errors=$null
+    $setup=[Management.Automation.Language.Parser]::ParseFile($setupPath,[ref]$tokens,[ref]$errors)
+    if($errors.Count){throw ($errors|Out-String)}
+    & {
+        foreach($name in @('Get-MoonSetupHandoverArguments','Test-MoonSetupPayload')) {
+            $definition=$setup.Find({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name},$true)
+            if(!$definition){throw "Missing production setup helper: $name"}
+            Invoke-Expression $definition.Extent.Text
+        }
+        $receipt=Join-Path $temporary 'preference.json'
+        $saved=[pscustomobject]@{version=1;owner_sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;session=[Diagnostics.Process]::GetCurrentProcess().SessionId;keep_previous_desktop_stopped=$true}
+        [IO.File]::WriteAllText($receipt,($saved|ConvertTo-Json))
+        if((Get-MoonSetupHandoverArguments -StatePath $receipt) -ne '-KeepPreviousDesktopStopped'){throw 'Guided retry lost the saved no-fallback preference.'}
+        $saved.session+=100;[IO.File]::WriteAllText($receipt,($saved|ConvertTo-Json))
+        if((Get-MoonSetupHandoverArguments -StatePath $receipt) -ne '-KeepPreviousDesktopStopped'){throw 'Signing in again lost the same-account no-fallback preference.'}
+        $saved.keep_previous_desktop_stopped=$false;[IO.File]::WriteAllText($receipt,($saved|ConvertTo-Json))
+        if(@(Get-MoonSetupHandoverArguments -StatePath $receipt).Count){throw 'Guided setup invented a recovery preference.'}
+        $saved.owner_sid='S-1-5-18';[IO.File]::WriteAllText($receipt,($saved|ConvertTo-Json))
+        $rejected=$false;try{Get-MoonSetupHandoverArguments -StatePath $receipt|Out-Null}catch{$rejected=$true}
+        if(!$rejected){throw 'Guided retry trusted a preference from another account.'}
+        [IO.File]::WriteAllText($receipt,'invalid JSON')
+        $rejected=$false;try{Get-MoonSetupHandoverArguments -StatePath $receipt|Out-Null}catch{$rejected=$true}
+        if(!$rejected){throw 'Guided retry ignored an unreadable recovery preference.'}
+        if((Get-MoonSetupHandoverArguments -StatePath $receipt -KeepStopped) -ne '-KeepPreviousDesktopStopped'){throw 'Explicit no-fallback instruction was lost.'}
+        $checks.Add('Guided retry preserves explicit or same-account no-fallback across sign-ins and rejects untrusted records')
+        $payload=Join-Path $temporary 'payload';[void][IO.Directory]::CreateDirectory($payload)
+        foreach($file in @('moon.exe','moon-settings.exe','install.ps1','uninstall.ps1','setup.ps1','handover.ps1','verify-uiaccess.ps1','window_inventory.exe','recover_windows.exe')){[IO.File]::WriteAllText((Join-Path $payload $file),'owned existence fixture; never executed')}
+        Test-MoonSetupPayload $payload (Join-Path $payload 'moon.exe') (Join-Path $payload 'moon-settings.exe')
+        Remove-Item -LiteralPath (Join-Path $payload 'recover_windows.exe')
+        $rejected=$false;try{Test-MoonSetupPayload $payload (Join-Path $payload 'moon.exe') (Join-Path $payload 'moon-settings.exe')}catch{$rejected=$true}
+        if(!$rejected){throw 'Incomplete first-install payload passed guided preflight.'}
+        $checks.Add('Guided first-install preflight requires both applications and handover recovery dependencies')
+    }
+    & {
+        Add-Type -AssemblyName PresentationFramework
+        $primary=$setup.Find({param($node)$node -is [Management.Automation.Language.InvokeMemberExpressionAst] -and $node.Extent.Text.StartsWith('$ui.Primary.Add_Click(')},$true)
+        $tick=$setup.Find({param($node)$node -is [Management.Automation.Language.InvokeMemberExpressionAst] -and $node.Member.Value -eq 'Add_Tick'},$true)
+        if(!$primary -or !$tick){throw 'Expected the production primary and completion handlers.'}
+        $body=$primary.Arguments[0].ScriptBlock.Extent.Text
+        $sourceDirectory=([IO.Path]::GetDirectoryName($setupPath)).Replace("'","''")
+        $primaryHandler=[scriptblock]::Create($body.Substring(1,$body.Length-2).Replace('$PSScriptRoot',("'"+$sourceDirectory+"'")))
+        $body=$tick.Arguments[0].ScriptBlock.Extent.Text;$tickHandler=[scriptblock]::Create($body.Substring(1,$body.Length-2))
+        $ui=@{};foreach($name in @('Heading','Status','Progress','Primary','Secondary','Details','RuntimeNote')){$ui[$name]=[pscustomobject]@{Text='';Visibility='Visible';IsEnabled=$true;Content='';IsCancel=$false;IsDefault=$false;IsIndeterminate=$false}}
+        $timer=[pscustomobject]@{started=$false};$timer|Add-Member ScriptMethod Start {$this.started=$true};$timer|Add-Member ScriptMethod Stop {$this.started=$false}
+        $oldLog=Join-Path $temporary 'earlier-attempt.log';[IO.File]::WriteAllText($oldLog,'earlier diagnostics')
+        $context=@{busy=$false;done=$false;process=$null;files=$null;operation='old';detail=$oldLog;status='failed';outcome=[pscustomobject]@{detail='old failure'}}
+        $Mode='Install';$installed=$false;$Binary='owned-moon.exe';$SettingsBinary='owned-settings.exe';$KeepPreviousDesktopStopped=$true
+        $ui.Secondary.IsEnabled=$false
+        function Test-MoonAdministrator {$false}
+        function Test-MoonSetupPayload {param($PackageDirectory,$Daemon,$Settings,$Installed)}
+        function Get-MoonSetupHandoverArguments {param([switch]$KeepStopped) if(!$KeepStopped){throw 'No-fallback option not forwarded'};'-KeepPreviousDesktopStopped'}
+        function Show-MoonSetupProblem {param($Message,$Failure) $script:setupReportedProblem=$Message;$ui.Status.Text=$Message}
+        function Start-Process {param($FilePath,$ArgumentList,$WindowStyle,$RedirectStandardOutput,$RedirectStandardError,[switch]$PassThru) $script:setupWorkerArguments=$ArgumentList;$child=[pscustomobject]@{HasExited=$false;ExitCode=0};$child|Add-Member ScriptMethod Dispose {};return $child}
+        . $primaryHandler
+        if(!$context.busy -or $context.outcome -or $context.status -ne 'working' -or !$ui.Secondary.IsEnabled -or $ui.Details.Visibility -ne 'Collapsed' -or $script:setupWorkerArguments -notlike '*-KeepPreviousDesktopStopped*'){throw 'Actual retry did not reset stale UI state or forward no-fallback.'}
+        if([IO.File]::ReadAllText($oldLog) -ne 'earlier diagnostics'){throw 'Retry deleted earlier diagnostics.'}
+        $checks.Add('Actual guided retry resets stale controls/outcome, retains diagnostic history and forwards no-fallback')
+        function Read-MoonSetupStatus {param($OperationId) $script:setupFixtureStatus}
+        $script:setupFixtureStatus=[pscustomobject]@{operation=$context.operation;status='cancelled';message='Moon setup was rolled back. Your previous desktop remains stopped.'}
+        $context.process.HasExited=$true;$context.process.ExitCode=1223
+        . $tickHandler
+        if($context.busy -or $ui.Status.Text -ne $script:setupFixtureStatus.message -or $ui.Primary.Content -ne 'Try again'){throw 'Cancellation replaced the actual desktop recovery outcome.'}
+        $checks.Add('Actual cancellation completion preserves the accurate previous-desktop-stopped outcome')
+        $context.busy=$true;$context.detail=Join-Path $temporary 'missing-directory\failure.log'
+        $context.process=[pscustomobject]@{HasExited=$true;ExitCode=1};$context.process|Add-Member ScriptMethod Dispose {}
+        $script:setupFixtureStatus=[pscustomobject]@{operation=$context.operation;status='failed';message='Setup could not finish.';detail='Failure details'}
+        . $tickHandler
+        if($context.busy -or !$ui.Primary.IsEnabled -or $ui.Details.Visibility -ne 'Visible' -or $ui.Status.Text -ne $script:setupFixtureStatus.message){throw 'Diagnostic append failure left setup apparently busy or prevented retry.'}
+        $checks.Add('Actual failed completion remains actionable when diagnostics cannot be appended')
+        $context.done=$true;$Mode='Install'
+        $window=[pscustomobject]@{closed=$false};$window|Add-Member ScriptMethod Close {$this.closed=$true}
+        function Get-MoonWebViewRuntime {'fixture-runtime'}
+        function Start-Process {param($FilePath,$ArgumentList) throw [ComponentModel.Win32Exception]::new(2)}
+        $script:setupReportedProblem=$null
+        . $primaryHandler
+        if(!$script:setupReportedProblem -or $window.closed -or !$context.done){throw 'A Settings launch failure escaped completion UI or restarted installation.'}
+        $checks.Add('Actual Open Settings failure stays in the completed setup without closing or reinstalling')
+        function Get-MoonWebViewRuntime {$null}
+        function Start-Process {param($FilePath) $script:setupOpenedTarget=$FilePath}
+        . $primaryHandler
+        if($window.closed -or $script:setupOpenedTarget -ne 'https://developer.microsoft.com/microsoft-edge/webview2/consumer/' -or $ui.Status.Text -notlike '*return here*'){throw 'Missing WebView2 did not leave a clear route back to Settings.'}
+        $checks.Add('Actual missing-runtime completion opens only the Microsoft page and keeps setup available')
+        $Mode='Uninstall';$script:setupOpenedTarget=$null
+        . $primaryHandler
+        if(!$window.closed -or $script:setupOpenedTarget){throw 'Completed removal did not close without another launch.'}
+        $checks.Add('Completed removal closes without requesting another approval or launching another process')
+        $activation=$setup.Find({param($node)$node -is [Management.Automation.Language.InvokeMemberExpressionAst] -and $node.Member.Value -eq 'Add_Activated'},$true)
+        $body=$activation.Arguments[0].ScriptBlock.Extent.Text;$activationHandler=[scriptblock]::Create($body.Substring(1,$body.Length-2))
+        function Get-MoonWebViewRuntime {'fixture-runtime'}
+        $Mode='Install';$ui.RuntimeNote.Visibility='Collapsed';$ui.Status.Text='Settings could not open.'
+        . $activationHandler
+        if($ui.Status.Text -ne 'Settings could not open.'){throw 'Returning to setup erased an unresolved launch error.'}
+        $ui.RuntimeNote.Visibility='Visible'
+        . $activationHandler
+        if($ui.Primary.Content -ne 'Open Settings' -or $ui.RuntimeNote.Visibility -ne 'Collapsed' -or $ui.Status.Text -notlike '*ready*'){throw 'Installing the missing runtime did not refresh the completed setup action.'}
+        $checks.Add('Returning to setup refreshes a newly installed runtime without erasing unrelated launch errors')
+    }
+    & {
+        $removed=$setup.Find({param($node)$node -is [Management.Automation.Language.StatementBlockAst] -and $node.Parent -is [Management.Automation.Language.IfStatementAst] -and $node.Extent.Text.Contains("'Moon is already removed.'")},$true)
+        $loaded=$setup.Find({param($node)$node -is [Management.Automation.Language.InvokeMemberExpressionAst] -and $node.Member.Value -eq 'Add_Loaded'},$true)
+        if(!$removed -or !$loaded){throw 'Expected the actual already-removed state and initial focus handlers.'}
+        $context=@{done=$false};$Mode='Uninstall';$ui=@{}
+        foreach($name in @('Heading','Introduction','Promise','Primary','Secondary')) {
+            $ui[$name]=[pscustomobject]@{Text='old text';Content='old action';Visibility='Visible';IsEnabled=$true;IsDefault=$false;IsCancel=$false;focused=$false}
+            $ui[$name]|Add-Member ScriptMethod Focus {$this.focused=$true;return $true}
+        }
+        $body=$removed.Extent.Text;. ([scriptblock]::Create($body.Substring(1,$body.Length-2)))
+        $body=$loaded.Arguments[0].ScriptBlock.Extent.Text;. ([scriptblock]::Create($body.Substring(1,$body.Length-2)))
+        if(!$context.done -or $ui.Promise.Text -ne '' -or $ui.Promise.Visibility -ne 'Collapsed' -or $ui.Secondary.Visibility -ne 'Collapsed' -or $ui.Primary.Content -ne 'Done' -or !$ui.Primary.IsDefault -or !$ui.Primary.IsCancel -or !$ui.Primary.focused -or $ui.Secondary.focused){throw 'Already-removed setup did not present a single focused Done action without a startup promise.'}
+        $checks.Add('Actual already-removed state hides the startup promise and duplicate action, with Done focused for Enter and Escape')
+    }
     $report=[pscustomobject]@{passed=$true;checks=$checks.ToArray();uac_requested=$false;installation_changed=$false}
     if($ReportPath){[IO.File]::WriteAllText($ReportPath,($report|ConvertTo-Json -Depth 5),[Text.UTF8Encoding]::new($false))}
     $report|ConvertTo-Json -Depth 5

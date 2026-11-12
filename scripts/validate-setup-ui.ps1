@@ -30,9 +30,15 @@ foreach ($mode in @('Install','Uninstall')) {
         if($handle -eq [IntPtr]::Zero){throw 'Setup preview window did not appear.'}
         $window=[Windows.Automation.AutomationElement]::FromHandle($handle)
         if($window.Current.ProcessId -ne $process.Id){throw 'Preview window owner changed.'}
-        $buttonName=if($mode -eq 'Install'){'Install Moon'}else{'Remove Moon'}
+        $buttonName=if($mode -eq 'Install'){'Install Moon'}elseif(Test-Path -LiteralPath (Join-Path (Get-MoonInstallDirectory) 'installation.json')){'Remove Moon'}else{'Done'}
         $primary=$window.FindFirst([Windows.Automation.TreeScope]::Descendants,[Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty,$buttonName))
         if(!$primary -or !$primary.Current.IsKeyboardFocusable){throw 'Primary setup action is not keyboard accessible.'}
+        if($buttonName -eq 'Done') {
+            foreach($id in @('SetupSecondary','SetupPromise')) {
+                $removed=$window.FindFirst([Windows.Automation.TreeScope]::Descendants,[Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::AutomationIdProperty,$id))
+                if($removed -and !$removed.Current.IsOffscreen){throw "Already-removed setup still shows $id."}
+            }
+        }
         $primary.SetFocus();Start-Sleep -Milliseconds 150
         if([MoonSetupPreview]::GetForegroundWindow() -ne $handle){throw 'Preview does not own foreground; no test input was sent.'}
         $initial=[Windows.Automation.AutomationElement]::FocusedElement.Current.Name
@@ -40,6 +46,7 @@ foreach ($mode in @('Install','Uninstall')) {
         Start-Sleep -Milliseconds 150
         $focused=[Windows.Automation.AutomationElement]::FocusedElement
         if($focused.Current.ProcessId -ne $process.Id){throw 'Tab moved focus outside the owned setup window.'}
+        if($buttonName -eq 'Done' -and $focused.Current.Name -ne 'Done'){throw 'Tab did not cycle through the sole Done action.'}
         $bounds=[MoonSetupPreview+Rect]::new();[void][MoonSetupPreview]::GetWindowRect($handle,[ref]$bounds)
         $bitmap=[Drawing.Bitmap]::new($bounds.Right-$bounds.Left,$bounds.Bottom-$bounds.Top)
         $graphics=[Drawing.Graphics]::FromImage($bitmap)

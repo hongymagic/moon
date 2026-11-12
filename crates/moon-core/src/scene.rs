@@ -209,11 +209,20 @@ pub fn derive(world: &World, providers: &BTreeMap<String, String>, error: Option
             ));
         }
         if let Some(error) = error {
-            items.clear();
-            alignments.clear();
+            // Keep navigation available while an error needs attention. Replace
+            // central status widgets, rather than taking over the whole bar.
+            for index in (0..items.len()).rev() {
+                let navigation = items[index].command.as_deref().is_some_and(|command| {
+                    command == "settings" || command.starts_with("workspace ")
+                });
+                if alignments[index].0 == "center" && !navigation {
+                    items.remove(index);
+                    alignments.remove(index);
+                }
+            }
             items.push(BarItem {
                 rect,
-                label: format!("Configuration error: {error}. Click to reload."),
+                label: format!("Moon: {error}. Click to reload configuration."),
                 selected: false,
                 text: format!(
                     "moon: {}",
@@ -224,7 +233,7 @@ pub fn derive(world: &World, providers: &BTreeMap<String, String>, error: Option
                 command: Some("reload".into()),
                 font_size: config.bar.font_size * scale,
             });
-            alignments.push(("left", rect.width as f32, 1.0, 0.0));
+            alignments.push(("center", rect.width as f32 / 3.0, 1.0, 0.0));
         }
         place_items(&mut items, &alignments, rect, scale);
         scene.bars.push(BarScene {
@@ -456,7 +465,85 @@ mod tests {
         assert!(bar.items[1].rect.x > 960);
         assert!(bar.items[1].rect.width <= 200);
         let error = derive(&world, &BTreeMap::new(), Some("line 4: unknown field"));
-        assert!(error.bars[0].items[0].text.contains("line 4"));
+        assert!(error.bars[0].items.iter().any(|item| item.text.contains("line 4")));
+    }
+    #[test]
+    fn errors_leave_workspace_navigation_available_and_keep_complete_details() {
+        let world = World::new(
+            Config::default(),
+            vec![Monitor {
+                id: MonitorId(1),
+                name: "screen".into(),
+                bounds: Rect::new(0, 0, 1920, 1080),
+                work_area: Rect::new(0, 0, 1920, 1080),
+                scale: 1.0,
+            }],
+        )
+        .unwrap();
+        let providers = BTreeMap::from([("clock".into(), "12:34".into())]);
+        let error = "Window placement failed\nThe application refused the requested position";
+        let scene = derive(&world, &providers, Some(error));
+        let items = &scene.bars[0].items;
+        for workspace in 1..=10 {
+            let command = format!("workspace {workspace}");
+            assert!(items.iter().any(|item| item.command.as_deref() == Some(&command)));
+        }
+        assert!(items.iter().any(|item| item.command.as_deref() == Some("cheatsheet")));
+        assert!(!items.iter().any(|item| item.text == "12:34"));
+        let notice = items.iter().find(|item| item.command.as_deref() == Some("reload")).unwrap();
+        assert!(notice.label.contains(error));
+        assert!(!notice.label.contains("Configuration error"));
+        assert!(!notice.text.contains('\n'));
+        assert!(notice.rect.width > 0);
+        assert!(
+            items
+                .iter()
+                .filter(|item| item.command != notice.command)
+                .all(|item| !item.rect.intersects(&notice.rect))
+        );
+    }
+    #[test]
+    fn crowded_secondary_bars_keep_items_inside_their_group_without_overlap() {
+        let providers = BTreeMap::from([
+            ("clock".into(), "Thursday 13 November 12:34".into()),
+            ("media".into(), "A long song title and artist".into()),
+            ("keyboard".into(), "Korean".into()),
+            ("network".into(), "Wireless network".into()),
+            ("memory".into(), "42%".into()),
+            ("cpu".into(), "99%".into()),
+            ("battery".into(), "100%".into()),
+            ("volume".into(), "Muted".into()),
+            ("weather".into(), "Cloudy 28°C".into()),
+        ]);
+        for (width, scale) in [(1280, 1.0), (1920, 1.5), (3840, 1.25)] {
+            let world = World::new(
+                Config::default(),
+                vec![Monitor {
+                    id: MonitorId(1),
+                    name: "secondary".into(),
+                    bounds: Rect::new(-width, -200, width, 1080),
+                    work_area: Rect::new(-width, -200, width, 1080),
+                    scale,
+                }],
+            )
+            .unwrap();
+            for error in [None, Some("A long runtime error requiring attention")] {
+                let scene = derive(&world, &providers, error);
+                let bar = &scene.bars[0];
+                for (index, item) in bar.items.iter().enumerate() {
+                    assert!(item.rect.x >= bar.rect.x && item.rect.right() <= bar.rect.right());
+                    assert!(item.rect.y >= bar.rect.y && item.rect.bottom() <= bar.rect.bottom());
+                    for other in &bar.items[index + 1..] {
+                        assert!(
+                            !item.rect.intersects(&other.rect),
+                            "{width}px scale {scale}: {:?} overlaps {:?}",
+                            item.text,
+                            other.text
+                        );
+                    }
+                }
+            }
+        }
     }
     #[test]
     fn native_fullscreen_suppresses_only_its_monitor_without_changing_manual_state() {

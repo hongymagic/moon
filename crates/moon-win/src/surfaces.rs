@@ -137,6 +137,7 @@ impl Drop for Graphics {
 pub struct AccessibilityPreferences {
     pub motion_allowed: bool,
     pub high_contrast: bool,
+    pub transparency_allowed: bool,
 }
 pub fn system_accessibility() -> AccessibilityPreferences {
     unsafe {
@@ -156,9 +157,14 @@ pub fn system_accessibility() -> AccessibilityPreferences {
             SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
         );
         let high_contrast = contrast.dwFlags.0 & HCF_HIGHCONTRASTON.0 != 0;
+        let transparency_allowed = !high_contrast
+            && windows::UI::ViewManagement::UISettings::new()
+                .and_then(|settings| settings.AdvancedEffectsEnabled())
+                .unwrap_or(false);
         AccessibilityPreferences {
             motion_allowed: animations.as_bool() && !high_contrast,
             high_contrast,
+            transparency_allowed,
         }
     }
 }
@@ -167,6 +173,7 @@ pub fn system_accessibility() -> AccessibilityPreferences {
 struct Preferences {
     animations: bool,
     contrast: bool,
+    transparency: bool,
     window: String,
     text: String,
     highlight: String,
@@ -182,6 +189,7 @@ impl Preferences {
             Self {
                 animations: accessibility.motion_allowed,
                 contrast: accessibility.high_contrast,
+                transparency: accessibility.transparency_allowed,
                 window: color(COLOR_WINDOW),
                 text: color(COLOR_WINDOWTEXT),
                 highlight: color(COLOR_HIGHLIGHT),
@@ -192,6 +200,12 @@ impl Preferences {
         }
     }
     fn apply(&self, scene: &mut Scene) {
+        if !self.transparency {
+            for bar in &mut scene.bars {
+                bar.opacity = 1.0;
+                bar.backdrop = "none".into();
+            }
+        }
         if !self.contrast {
             return;
         }
@@ -216,6 +230,37 @@ impl Preferences {
             border.colors = [color.clone(), color.clone()];
         }
     }
+}
+
+struct BarTarget {
+    rect: Rect,
+    label: String,
+    command: Option<String>,
+}
+fn bar_targets(bar: &BarScene) -> Vec<BarTarget> {
+    let mut targets: Vec<BarTarget> = Vec::new();
+    for item in bar.items.iter().filter(|item| !item.rect.is_empty()) {
+        let rect = item.rect.translated(-bar.rect.x, -bar.rect.y);
+        // Icon and text segments form one visible control. Sharing an action
+        // alone is insufficient: separate labeled controls remain separate.
+        if let Some(previous) = targets.last_mut()
+            && !item.label.is_empty()
+            && previous.label == item.label
+            && previous.command == item.command
+            && previous.rect.y == rect.y
+            && previous.rect.height == rect.height
+            && (previous.rect.right() - rect.x).abs() <= 1
+        {
+            previous.rect.width = rect.right() - previous.rect.x;
+        } else {
+            targets.push(BarTarget {
+                rect,
+                label: item.label.clone(),
+                command: item.command.clone(),
+            });
+        }
+    }
+    targets
 }
 
 #[derive(Default)]
@@ -618,12 +663,11 @@ impl Tooltips {
             ..Default::default()
         }
     }
-    fn update(&mut self, bar: &BarScene) {
-        let next = bar
-            .items
+    fn update(&mut self, targets: &[BarTarget]) {
+        let next = targets
             .iter()
-            .filter(|item| !item.label.is_empty() && !item.rect.is_empty())
-            .map(|item| (item.rect.translated(-bar.rect.x, -bar.rect.y), wide(&item.label)))
+            .filter(|target| !target.label.is_empty())
+            .map(|target| (target.rect, wide(&target.label)))
             .collect::<Vec<_>>();
         unsafe {
             if self.tools.len() != next.len() {
@@ -985,13 +1029,19 @@ impl Canvas {
                 Rect::new(0, 0, self.rect.width, self.rect.height),
             )?;
             self.context.Clear(Some(&parse_color(&bar.background, bar.opacity)));
-            self.data.hit_regions.clear();
+            let targets = bar_targets(bar);
+            self.data.hit_regions = targets
+                .iter()
+                .filter_map(|target| {
+                    target.command.as_ref().map(|command| (target.rect, command.clone()))
+                })
+                .collect();
             let scale = GetDpiForWindow(self.hwnd).max(96) as f32 / 96.0;
             for item in &bar.items {
                 let bounds = item.rect.translated(-bar.rect.x, -bar.rect.y);
                 let highlighted = preferences.contrast
                     && item.command.is_some()
-                    && self.data.hovered == Some(bounds);
+                    && self.data.hovered.is_some_and(|hover| hover.intersects(&bounds));
                 let background = if highlighted {
                     Some(&preferences.highlight)
                 } else {
@@ -1044,13 +1094,10 @@ impl Canvas {
                         &brush,
                     );
                 }
-                if let Some(command) = &item.command {
-                    self.data.hit_regions.push((bounds, command.clone()));
-                }
             }
             drawing.finish()?;
             if let Some(tooltip) = &mut self.tooltip {
-                tooltip.update(bar);
+                tooltip.update(&targets);
             }
             let backdrop: i32 = match bar.backdrop.as_str() {
                 "system" => 0,
@@ -1706,7 +1753,7 @@ impl Tray {
             }
             self._data.paused = paused;
             self._data.tray_tip = if error {
-                "Moon · Configuration needs attention"
+                "Moon · Needs attention"
             } else if paused {
                 "Moon · Tiling paused"
             } else {
@@ -1826,6 +1873,85 @@ fn ring_regions(rect: Rect, thickness: i32, bounds: Rect) -> Vec<Rect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn bar_fixture(items: Vec<moon_core::scene::BarItem>) -> BarScene {
+        BarScene {
+            monitor: MonitorId(1),
+            rect: Rect::new(1920, -200, 1600, 40),
+            visible: true,
+            background: "#141417".into(),
+            items,
+            font: "Segoe UI".into(),
+            opacity: 0.6,
+            backdrop: "mica".into(),
+        }
+    }
+
+    #[test]
+    fn adjacent_icon_and_text_share_an_action_without_merging_other_controls() {
+        let item = |x, width, label: &str| moon_core::scene::BarItem {
+            rect: Rect::new(x, -194, width, 28),
+            label: label.into(),
+            selected: false,
+            text: "fixture".into(),
+            foreground: "#ffffff".into(),
+            background: None,
+            command: Some("settings".into()),
+            font_size: 14.0,
+        };
+        let bar = bar_fixture(vec![
+            item(1940, 30, "Volume"),
+            item(1970, 90, "Volume"),
+            item(2060, 50, "Other control"),
+            item(2116, 50, "Other control"),
+        ]);
+        let targets = bar_targets(&bar);
+        assert_eq!(targets.len(), 3);
+        assert_eq!(targets[0].rect, Rect::new(20, 6, 120, 28));
+        let mut data = WindowData {
+            hit_regions: targets
+                .into_iter()
+                .map(|target| (target.rect, target.command.unwrap()))
+                .collect(),
+            ..Default::default()
+        };
+        data.press(Point::new(25, 10)); // Icon.
+        assert_eq!(data.release(Point::new(100, 10)), Some("settings".into())); // Label.
+        data.press(Point::new(25, 10));
+        assert_eq!(data.release(Point::new(150, 10)), None); // Distinct control.
+        data.press(Point::new(150, 10));
+        assert_eq!(data.release(Point::new(200, 10)), None); // Separate pill.
+    }
+
+    #[test]
+    fn disabled_transparency_uses_opaque_theme_and_contrast_keeps_system_colours() {
+        let mut preferences = Preferences {
+            animations: true,
+            contrast: false,
+            transparency: false,
+            window: "#000000".into(),
+            text: "#ffffff".into(),
+            highlight: "#ffff00".into(),
+            highlight_text: "#000000".into(),
+            button: "#222222".into(),
+            button_text: "#ffffff".into(),
+        };
+        let original = Scene { bars: vec![bar_fixture(Vec::new())], borders: Vec::new() };
+        let mut opaque = original.clone();
+        preferences.apply(&mut opaque);
+        assert_eq!(opaque.bars[0].opacity, 1.0);
+        assert_eq!(opaque.bars[0].backdrop, "none");
+        assert_eq!(opaque.bars[0].background, original.bars[0].background);
+        preferences.transparency = true;
+        let mut enabled = original.clone();
+        preferences.apply(&mut enabled);
+        assert_eq!(enabled, original);
+        preferences.contrast = true;
+        preferences.apply(&mut enabled);
+        assert_eq!(enabled.bars[0].opacity, 1.0);
+        assert_eq!(enabled.bars[0].backdrop, "none");
+        assert_eq!(enabled.bars[0].background, preferences.window);
+    }
 
     #[test]
     fn bar_activation_requires_press_and_release_inside_the_same_action() {

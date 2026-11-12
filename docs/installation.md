@@ -19,6 +19,34 @@ discards it while wrapping a shell launch error. Isolated Windows
 checks cover the exception chain, installer/removal handlers and stopped rollback
 without opening another approval prompt.
 
+Guided setup checks that the extracted applications and first-install recovery
+helpers are present before enabling installation. Repair remains available when
+an installed executable is missing. Retrying clears the previous attempt's screen
+state while retaining its diagnostic files. Cancellation displays the actual
+recovery outcome, including when the previous window manager remains stopped.
+An explicit `-KeepPreviousDesktopStopped` preference, or that preference in a
+validated handover record for the same account, carries into guided
+retries. An unrelated or unreadable record is not treated as permission to restart
+another manager. The preference survives signing in again; process identities and
+recovery actions from an earlier session are never reused for this purpose.
+
+After installation, setup rechecks WebView2 when activated and updates the next
+action to **Open Settings** when it becomes available. A failed Settings or browser
+launch leaves setup open with an actionable message. Removal defaults keyboard
+focus to **Keep Moon**; an already-removed installation completes without another
+approval request. Reduced-motion users receive status text without a moving or
+misleading percentage bar. These choices follow Microsoft's guidance for
+[clear dialog actions](https://learn.microsoft.com/en-us/windows/apps/develop/ui/controls/dialogs-and-flyouts/dialogs),
+[unknown-duration progress](https://learn.microsoft.com/en-us/windows/apps/develop/ui/controls/progress-controls),
+and [WebView2 runtime detection](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/distribution).
+
+The setup polish passed 32 isolated Windows state/handler checks and the existing
+14 recovery checks; reports are `target/setup-polish-validation.json` and
+`target/setup-polish-recovery-validation.json`. WPF compilation also passed.
+These checks did not show a setup window, request UAC, change installation state,
+or replace the current desktop manager. A new visual preview and accepted signed
+installation remain separate acceptance steps.
+
 Only one elevated installation or removal can run at a time, across accounts and
 Windows sessions. Its named mutex permits Administrators and SYSTEM and stays held
 through recovery. Ordinary handovers have a separate account/session lock so they
