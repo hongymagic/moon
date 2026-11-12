@@ -142,6 +142,78 @@ static LOCAL_LATENCY: [std::sync::atomic::AtomicU64; LATENCY_BUCKETS] =
     [const { std::sync::atomic::AtomicU64::new(0) }; LATENCY_BUCKETS];
 static LOCAL_MAX_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static MAX_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+// Fixed storage; callbacks record only elapsed time, never input identities.
+// Phase timings are diagnostic and remain included in the existing totals.
+struct PhaseLatency {
+    buckets: [AtomicU64; LATENCY_BUCKETS],
+    max_ns: AtomicU64,
+}
+impl PhaseLatency {
+    const fn new() -> Self {
+        Self { buckets: [const { AtomicU64::new(0) }; LATENCY_BUCKETS], max_ns: AtomicU64::new(0) }
+    }
+    fn record(&self, elapsed: std::time::Duration) {
+        let ns = elapsed.as_nanos().min(u64::MAX as u128) as u64;
+        self.buckets[(ns.div_ceil(1000) as usize).min(LATENCY_BUCKETS - 1)]
+            .fetch_add(1, Ordering::Relaxed);
+        self.max_ns.fetch_max(ns, Ordering::Relaxed);
+    }
+    fn measure(&self) -> PhaseMeasure<'_> {
+        PhaseMeasure { latency: self, started: std::time::Instant::now() }
+    }
+    fn stats(&self) -> PhaseStats {
+        let counts = self.buckets.each_ref().map(|counter| counter.load(Ordering::Relaxed));
+        let samples: u64 = counts.iter().sum();
+        let percentile = |percent: u64| {
+            let target = (samples * percent).div_ceil(100);
+            let mut sum = 0;
+            counts
+                .iter()
+                .position(|count| {
+                    sum += count;
+                    sum >= target
+                })
+                .unwrap_or(LATENCY_BUCKETS - 1) as u64
+        };
+        PhaseStats {
+            samples,
+            p50_us: percentile(50),
+            p99_us: percentile(99),
+            max_us: self.max_ns.load(Ordering::Relaxed).div_ceil(1000),
+        }
+    }
+}
+struct PhaseMeasure<'a> {
+    latency: &'a PhaseLatency,
+    started: std::time::Instant,
+}
+impl Drop for PhaseMeasure<'_> {
+    fn drop(&mut self) {
+        self.latency.record(self.started.elapsed());
+    }
+}
+static MATCHING_LATENCY: PhaseLatency = PhaseLatency::new();
+static MASK_LATENCY: PhaseLatency = PhaseLatency::new();
+static ENQUEUE_LATENCY: PhaseLatency = PhaseLatency::new();
+
+#[derive(serde::Serialize)]
+pub struct PhaseStats {
+    pub samples: u64,
+    /// Rounded up to microseconds; 4096 is the terminal bucket's lower bound.
+    pub p50_us: u64,
+    pub p99_us: u64,
+    pub max_us: u64,
+}
+#[derive(serde::Serialize)]
+pub struct HookPhases {
+    /// State lookup, key ownership and binding match, excluding internal masks.
+    pub matching: PhaseStats,
+    /// The complete synchronous SendInput call, including reentrant dispatch.
+    pub alt_mask: PhaseStats,
+    /// Event enqueue and consumed-key bookkeeping, including failure reporting.
+    pub enqueue: PhaseStats,
+}
 #[derive(serde::Serialize)]
 pub struct HookStats {
     pub callbacks: u64,
@@ -150,6 +222,7 @@ pub struct HookStats {
     /// Matching, enqueueing and ordered Alt masking, excluding CallNextHookEx.
     pub own_p99_us: u64,
     pub own_max_us: u64,
+    pub phases: HookPhases,
 }
 pub fn stats() -> HookStats {
     use std::sync::atomic::Ordering::Relaxed;
@@ -179,6 +252,11 @@ pub fn stats() -> HookStats {
         max_us: MAX_NS.load(Relaxed).div_ceil(1000),
         own_p99_us,
         own_max_us: LOCAL_MAX_NS.load(Relaxed).div_ceil(1000),
+        phases: HookPhases {
+            matching: MATCHING_LATENCY.stats(),
+            alt_mask: MASK_LATENCY.stats(),
+            enqueue: ENQUEUE_LATENCY.stats(),
+        },
     }
 }
 
@@ -295,6 +373,7 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
                     received: std::time::Instant,
                 },
             }
+            let matching_started = std::time::Instant::now();
             let matched = STATE.with(|cell| {
                 let mut value = cell.borrow_mut();
                 let Some(state) = value.as_mut() else {
@@ -338,13 +417,21 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
                     Match::Forward
                 }
             });
+            MATCHING_LATENCY.record(matching_started.elapsed());
             match matched {
                 Match::Swallow => return LRESULT(1),
                 Match::Command { key, alt, was_swallowed, commands, sender, received } => {
                     // SendInput can reenter the callback. No State borrow is
                     // held, and masking precedes both modifier release and any
                     // focus change caused by the queued command.
-                    if alt && !mask_alt_chord() {
+                    let masked = if alt {
+                        let _phase = MASK_LATENCY.measure();
+                        mask_alt_chord()
+                    } else {
+                        true
+                    };
+                    let _phase = ENQUEUE_LATENCY.measure();
+                    if !masked {
                         let _ = sender.send(PlatformEvent::HookError(
                             "Windows refused the internal Alt mask; shortcut was not executed"
                                 .into(),
@@ -1396,6 +1483,28 @@ mod tests {
         drop(hook);
         drop(observer);
         Ok(())
+    }
+
+    #[test]
+    fn phase_timings_preserve_sample_counts_and_outliers_without_unbounded_storage() {
+        let latency = PhaseLatency::new();
+        let empty = latency.stats();
+        assert_eq!((empty.samples, empty.p50_us, empty.p99_us, empty.max_us), (0, 0, 0, 0));
+        for _ in 0..99 {
+            latency.record(std::time::Duration::from_nanos(1));
+        }
+        latency.record(std::time::Duration::from_micros(6000));
+        let one_outlier = latency.stats();
+        assert_eq!(
+            (one_outlier.samples, one_outlier.p50_us, one_outlier.p99_us, one_outlier.max_us),
+            (100, 1, 1, 6000)
+        );
+        latency.record(std::time::Duration::from_micros(5000));
+        let two_outliers = latency.stats();
+        assert_eq!(
+            (two_outliers.samples, two_outliers.p50_us, two_outliers.p99_us, two_outliers.max_us),
+            (101, 1, 4096, 6000)
+        );
     }
 
     #[test]

@@ -294,6 +294,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "whole_chord_to_placed_p99_us":chord_latency[(chord_latency.len()*99).div_ceil(100)-1],
         "poll_wait_us":poll_waits,
         "native_outer_placed_us":native_latency,
+        "hook_phase_timings":active["hooks"]["phases"],
+        "hook_phase_scope":"Cumulative elapsed microseconds through after_input; diagnostic phases remain included in the unchanged own/whole callback metrics. Percentiles are not additive; 4096 is the terminal bucket lower bound.",
         "idle_cpu_one_core_percent":idle_cpu,"before_input":before_input,"after_input":active,"after_idle":idle,
         }))?
     );

@@ -191,3 +191,47 @@ were measured on the same candidate. The observed peak working set was
 placement workload or proof of a universal memory bound. Their timing definition,
 sampling limits and correctness evidence are in
 [carousel validation](validation-carousel.md).
+
+## Hook phase diagnosis, 12 November 2026
+
+Diagnostic normal candidate
+`91B77064A36650FEA7E55F02305DF5BD307DBF05C580DB71A0AA63438CC56E91`
+and probe
+`B16929FF513D9B928B9B56FE94C995E756DD4EE62F0E5116F886F9EA5CD0CE69`
+retain the existing callback timing boundaries and add bounded aggregate phase
+timings. Instrumentation overhead remains included in the overall measurements;
+no key codes, scan codes or character contents are recorded. All phase counters
+were zero before the 128-chord workload.
+
+| Phase | Samples | Median | p99 | Maximum |
+|---|---:|---:|---:|---:|
+| State/ownership lookup and binding match | 768 | 1 µs | 2 µs | 3 µs |
+| Synchronous Alt-mask `SendInput` call | 128 | 72 µs | 93 µs | 108 µs |
+| Enqueue and consumed-key bookkeeping | 128 | 5 µs | 9 µs | 9 µs |
+
+The mask call is the dominant measured phase. Its duration includes Windows and
+reentrant input dispatch; it is elapsed time, not a measurement of Moon CPU time.
+Overall own-work p99 was **94 µs**, and whole-callback p99 was **691 µs**, across
+896 callbacks. These populations differ from the phase populations, so their
+percentiles cannot be added or subtracted. The lower total than the earlier
+140 µs run does not establish an optimization: this change only adds diagnostics.
+
+All **128/128** eight-window placements were exact, with readiness **118.496 ms**.
+Independent trigger-to-placement median/p99 was **11.905/25.367 ms**: this run
+meets the 30 ms p99 criterion but still misses the 10 ms median criterion. Both
+hook timings exceed the 50 µs budget. Working set was **45,936,640 bytes** before
+input, **60,436,480** afterward and **58,507,264** after ten seconds idle, failing
+the 50,000,000-byte limit. Idle CPU was **0.31248%** of one core. Nominal surface
+storage stayed at 2,865,156 bytes; idle handles/GDI counts were 348/8. No daemon
+error was reported, and cleanup verified no owned Moon/testwin process or
+recovery journal remained.
+
+Evidence: `target/hook-phase-build.json`, `target/hook-phase-performance.json`
+and `target/hook-phase-performance-cleanup.json`. The data supports investigating
+time inside the mask call before changing binding lookup or command delivery.
+A targeted context-switch trace can distinguish thread execution from waiting
+and readiness delays; Microsoft documents this in
+[CPU Usage (Precise)](https://learn.microsoft.com/en-us/windows-hardware/test/wpt/cpu-analysis#cpu-usage-precise-graph).
+It does not justify deferring the mask, which previously failed rapid-chord
+language-switching checks, or attributing the remaining memory growth to a
+specific allocation without further evidence.
