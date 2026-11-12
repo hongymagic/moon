@@ -967,16 +967,52 @@ pub fn set_border_color(id: WindowId, rgb: Option<u32>) -> Result<()> {
     }
 }
 
+/// Owned test-window diagnostic properties: sequence, QPC, left, top, right, bottom.
+/// Coordinates use their u32 bit pattern plus one, so NULL always means missing.
+pub const TESTWIN_PLACEMENT_PROPERTIES: [PCWSTR; 6] = [
+    windows::core::w!("Moon.TestPlacement.v1.Sequence"),
+    windows::core::w!("Moon.TestPlacement.v1.Qpc"),
+    windows::core::w!("Moon.TestPlacement.v1.Left"),
+    windows::core::w!("Moon.TestPlacement.v1.Top"),
+    windows::core::w!("Moon.TestPlacement.v1.Right"),
+    windows::core::w!("Moon.TestPlacement.v1.Bottom"),
+];
+
 pub fn run_test_windows(count: usize) -> Result<()> {
-    use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
     static WINDOWS: AtomicUsize = AtomicUsize::new(0);
     static KEY_DOWNS: AtomicU32 = AtomicU32::new(0);
     static KEY_UPS: AtomicU32 = AtomicU32::new(0);
     static CHARACTER_EVENTS: AtomicU32 = AtomicU32::new(0);
     static MOUSE_UPS: AtomicU32 = AtomicU32::new(0);
+    static PLACEMENT_TIMING: AtomicBool = AtomicBool::new(false);
     const KEY_COUNTS_MESSAGE: u32 = WM_APP + 93;
     const CHARACTER_COUNT_MESSAGE: u32 = WM_APP + 94;
     const MOUSE_UP_COUNT_MESSAGE: u32 = WM_APP + 95;
+    unsafe fn publish_placement(handle: HWND) -> Result<()> {
+        unsafe {
+            let mut outer = RECT::default();
+            GetWindowRect(handle, &mut outer)?;
+            let mut counter = 0;
+            windows::Win32::System::Performance::QueryPerformanceCounter(&mut counter)?;
+            let previous = GetPropW(handle, TESTWIN_PLACEMENT_PROPERTIES[0]).0 as usize;
+            let sequence = (previous | 1).checked_add(1).ok_or_else(|| {
+                windows::core::Error::new(E_FAIL, "test-window placement sequence overflow")
+            })?;
+            SetPropW(handle, TESTWIN_PLACEMENT_PROPERTIES[0], Some(HANDLE((sequence - 1) as _)))?;
+            let values = [
+                counter as usize,
+                outer.left as u32 as usize + 1,
+                outer.top as u32 as usize + 1,
+                outer.right as u32 as usize + 1,
+                outer.bottom as u32 as usize + 1,
+            ];
+            for (name, value) in TESTWIN_PLACEMENT_PROPERTIES[1..].iter().zip(values) {
+                SetPropW(handle, *name, Some(HANDLE(value as _)))?;
+            }
+            SetPropW(handle, TESTWIN_PLACEMENT_PROPERTIES[0], Some(HANDLE(sequence as _)))
+        }
+    }
     unsafe extern "system" fn procedure(
         handle: HWND,
         message: u32,
@@ -984,6 +1020,22 @@ pub fn run_test_windows(count: usize) -> Result<()> {
         lparam: LPARAM,
     ) -> LRESULT {
         match message {
+            WM_WINDOWPOSCHANGED if PLACEMENT_TIMING.load(Ordering::Relaxed) => {
+                // Keep normal WM_SIZE/WM_MOVE handling. This timestamp is an
+                // upper bound on geometry change, not compositor presentation.
+                let result = unsafe { DefWindowProcW(handle, message, wparam, lparam) };
+                if unsafe { publish_placement(handle) }.is_err() {
+                    // Never leave an old complete sample after publication fails.
+                    let _ = unsafe { RemovePropW(handle, TESTWIN_PLACEMENT_PROPERTIES[0]) };
+                }
+                result
+            }
+            WM_NCDESTROY if PLACEMENT_TIMING.load(Ordering::Relaxed) => {
+                for name in TESTWIN_PLACEMENT_PROPERTIES {
+                    let _ = unsafe { RemovePropW(handle, name) };
+                }
+                unsafe { DefWindowProcW(handle, message, wparam, lparam) }
+            }
             WM_KEYDOWN | WM_SYSKEYDOWN | WM_KEYUP | WM_SYSKEYUP
                 if wparam.0 == usize::from(VK_OEM_MINUS.0) =>
             {
@@ -1049,6 +1101,10 @@ pub fn run_test_windows(count: usize) -> Result<()> {
     KEY_UPS.store(0, Ordering::Relaxed);
     CHARACTER_EVENTS.store(0, Ordering::Relaxed);
     MOUSE_UPS.store(0, Ordering::Relaxed);
+    PLACEMENT_TIMING.store(
+        std::env::var("MOON_TESTWIN_PLACEMENT_TIMING").is_ok_and(|value| value == "1"),
+        Ordering::Relaxed,
+    );
     let _ = enable_dpi_awareness();
     unsafe {
         let instance = windows::Win32::System::LibraryLoader::GetModuleHandleW(None)?;

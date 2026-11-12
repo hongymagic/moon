@@ -136,6 +136,36 @@ Direct invocation of the signed UIAccess image from an ordinary terminal still
 requires the native `verify-cli-launch.ps1` result. PATH discovery alone does not
 prove that launch, exit codes, stdout or subscription streaming work.
 
+## Windows launch context and AppData
+
+On this host, a PowerShell child launched directly through Codex/WSL and a worker
+launched by the existing Explorer desktop saw different physical files for the
+same `%LOCALAPPDATA%\moon` paths. The direct child resolved Moon's journal, log
+and handover record beneath Codex's package `LocalCache\Local`; Explorer's worker
+did not see that journal or handover record and read a different log. Both callers
+used the same account/session and reported `package=null`, so that result alone
+did not exclude inherited file virtualization. The opened-file paths were
+measured, not inferred from environment variables
+(`target/appdata-context-comparison.json`). Microsoft's [MSIX filesystem
+documentation](https://learn.microsoft.com/en-us/windows/msix/desktop/desktop-to-uwp-behind-the-scenes)
+describes redirected new AppData files and merged, package-first reads.
+
+The same ordinary D583 Moon image was then restarted through the existing
+Explorer desktop's `Application.ShellExecute`, using a hidden worker staged
+outside AppData. The four existing application identities, workspace assignments,
+layout, focus and personal configuration were preserved
+(`target/workspace-labels-ordinary-context.json`). Both caller contexts now open
+the same physical live journal at `%LOCALAPPDATA%\moon\journal-v1-session1.json`,
+owned by PID 20524 (`target/appdata-context-after.json`). Earlier logs and handover
+records still differ between the two views; they were not silently merged.
+
+Future installation and native validation on this host must start through the
+existing ordinary Explorer shell, with staged packages/workers outside AppData
+(for example, Downloads). Preserve the explicit no-fallback handover preference
+instead of assuming an old record is visible. The elevated installer's file view
+has **not** yet been compared, and this finding does not establish the cause of
+earlier installation failures. Signed installation remains a separate test.
+
 ## First handover
 
 Build the installation candidate from WSL:
@@ -144,16 +174,57 @@ Build the installation candidate from WSL:
 cargo xwin build -p moon --features uiaccess --release --target x86_64-pc-windows-msvc --locked
 ```
 
-After development probes have exited, `just handover` builds both the UIAccess
-candidate and its two installation-only inventory/recovery helpers, then starts
-the controlled handover. The equivalent explicit launch, after building the
-helpers, is:
+After development probes have exited, stage the complete verified package outside
+AppData and open **Install Moon.cmd** from File Explorer. For development builds,
+`just install` and `just handover` use `scripts/launch-from-explorer.ps1` to reach
+the existing Explorer desktop before invoking setup. Both the caller and worker
+must be ordinary processes in the same Windows account and session. The helper
+uses Microsoft's documented [desktop shell automation approach](https://devblogs.microsoft.com/oldnewthing/20131118-00/?p=2643/),
+not a newly created shell object's launch context.
 
-```sh
-powershell.exe -NoProfile -ExecutionPolicy Bypass \
-  -File "$(wslpath -w "$PWD/scripts/handover.ps1")" \
-  -Binary "$(wslpath -w "$PWD/target/x86_64-pc-windows-msvc/release/moon.exe")"
+The launcher stages its worker and records in a private `.moon-launch-<id>`
+directory directly under the user profile, outside AppData. Only worker startup
+is bounded: it must announce its identity and receive authorization within
+30 seconds. A late worker cannot begin setup. Once authorized, the launcher waits
+for setup and any Windows approval prompt without a timeout or forced termination.
+It returns the script's Windows exit code and forwards its stdout/stderr. Unix
+shells still apply their normal exit-code conversion. Successful temporary files
+are removed; failure or interruption retains the printed diagnostic directory.
+
+For the current user's requested no-fallback handover, run `just handover true`.
+This forwards `-KeepPreviousDesktopStopped` explicitly. The optional argument
+defaults to `false` for other users, preserving the existing recovery behavior.
+The handover recipe builds the UIAccess candidate, Settings and both inventory/
+recovery helpers before launching; `just install` builds the two installed apps.
+
+Harmless native worker checks preserved exit codes 0, 42 and 1223, both output
+streams, and arguments containing spaces, quotes, an empty string, trailing
+backslashes, shell metacharacters, a newline and Unicode. Every worker ran under
+the same account/session at ordinary medium integrity; expired/no-go and foreign
+owner requests did not start their action (`target/explorer-launch-validation.json`).
+An opened-handle check confirmed that the result file physically resided directly
+under the user profile, outside AppData (`target/explorer-launch-physical-path.json`).
+These checks did not install Moon or request Windows approval.
+
+The reproducible source is `scripts/validate-explorer-launch.ps1`. From an ordinary
+Windows PowerShell session with the existing Explorer desktop available, run:
+
+```powershell
+./scripts/validate-explorer-launch.ps1
 ```
+
+It resolves the repository and default `target/explorer-launch-validation.json`
+report path inside the script, so PowerShell 5.1 needs no extra path arguments.
+An optional `-ReportPath` preserves a separate run. The test invokes the production
+launch functions with an owned dummy script, exercises all three exit codes and
+argument cases, checks the physical result path and ordinary token, and asserts
+that rejected requests never reach the dummy. It also checks that owned processes
+have exited and removes only its verified temporary files. No Moon command,
+installer, elevation, or user-window action is executed. Run it outside native
+performance measurements because the hidden worker processes consume CPU briefly.
+The tracked script passed all seven checks on 2026-11-12, including its final
+cleanup assertion (`target/explorer-launch-tracked-validation.json`); the report
+records the exact launcher and test source hashes.
 
 When copying the candidate to a Windows-local folder, keep `moon-settings.exe`,
 `Install Moon.cmd`, `setup.ps1`, `handover.ps1`, `install-common.ps1`, `install.ps1`,

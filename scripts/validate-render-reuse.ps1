@@ -29,11 +29,41 @@ public static class MoonRenderReuseNative {
  [DllImport("user32.dll")]static extern int ReleaseDC(IntPtr h,IntPtr dc);
  [DllImport("gdi32.dll",SetLastError=true)]static extern bool BitBlt(IntPtr destination,int dx,int dy,int width,int height,IntPtr source,int sx,int sy,uint operation);
  [DllImport("dwmapi.dll")]static extern int DwmGetWindowAttribute(IntPtr h,uint a,out Rect r,uint n);
+ [DllImport("dwmapi.dll")]static extern int DwmFlush();
  [DllImport("dwmapi.dll",EntryPoint="DwmGetWindowAttribute")]static extern int GetCloak(IntPtr h,uint a,out uint r,uint n);
  public static uint Owner(long h){uint id;GetWindowThreadProcessId(new IntPtr(h),out id);return id;}
  public static bool Underlay(long h){var s=new StringBuilder(256);GetClassName(new IntPtr(h),s,256);return s.ToString()=="moon.surface"&&(GetWindowLongPtr(new IntPtr(h),-20).ToInt64()&0x80020)==0x80020&&IsWindowVisible(new IntPtr(h));}
  public static long Lowest(long[] handles){var remaining=new HashSet<long>(handles);var seen=new HashSet<long>();var current=GetTopWindow(IntPtr.Zero);while(current!=IntPtr.Zero&&seen.Count<8192&&seen.Add(current.ToInt64())){if(remaining.Remove(current.ToInt64())&&remaining.Count==0)return current.ToInt64();current=GetWindow(current,2);}throw new InvalidOperationException("Could not locate every owned helper in the bounded Z-order walk.");}
- public static void InspectBehind(long underlay,uint daemon,long helper,uint fixture){var h=new IntPtr(underlay);var after=new IntPtr(helper);var name=new StringBuilder(256);GetClassName(after,name,256);if(Owner(underlay)!=daemon||!Underlay(underlay)||Owner(helper)!=fixture||name.ToString()!="MoonTestWindow"||!IsWindowVisible(after))throw new InvalidOperationException("Inspection HWND identity changed.");if(!SetWindowPos(h,after,0,0,0,0,0x213))throw new System.ComponentModel.Win32Exception();if(GetWindow(h,3)!=after)throw new InvalidOperationException("Inspection underlay did not settle below the owned helper.");}
+ static void ValidateInspection(long[] underlays,uint daemon,long[] helpers,uint fixture){foreach(var h in underlays)if(Owner(h)!=daemon||!Underlay(h))throw new InvalidOperationException("Inspection underlay identity changed.");foreach(var h in helpers){var name=new StringBuilder(256);GetClassName(new IntPtr(h),name,256);if(Owner(h)!=fixture||name.ToString()!="MoonTestWindow"||!IsWindowVisible(new IntPtr(h)))throw new InvalidOperationException("Inspection helper identity changed.");}}
+ static bool InspectionHeld(long[] underlays,uint daemon,long[] helpers,uint fixture,long lowest,Rect[] original){
+  ValidateInspection(underlays,daemon,helpers,fixture);
+  if(Lowest(helpers)!=lowest)return false;
+  for(int i=0;i<underlays.Length;i++){
+   var bounds=Bounds(underlays[i]);var saved=original[i];
+   if(bounds.Left!=saved.Left||bounds.Top!=saved.Top||bounds.Right!=saved.Right||bounds.Bottom!=saved.Bottom)throw new InvalidOperationException("Inspection underlay geometry changed.");
+   // Every insertion below the helper reverses this small underlay chain.
+   long previous=i+1<underlays.Length?underlays[i+1]:lowest;
+   if(GetWindow(new IntPtr(underlays[i]),3).ToInt64()!=previous)return false;
+  }
+  return true;
+ }
+ public sealed class InspectionCapture {public int Attempts;public bool HeldBeforeCopy,HeldAfterCopy;public long BelowHelper;public int UnderlayCount;public long[] AnchorHelpers;}
+ public static InspectionCapture CopyScreenInspected(IntPtr destination,int x,int y,int width,int height,long[] underlays,uint daemon,long[] helpers,uint fixture){
+  if(underlays.Length==0||underlays.Length>32||helpers.Length==0||helpers.Length>8)throw new InvalidOperationException("Inspection identity list is outside fixture limits.");
+  ValidateInspection(underlays,daemon,helpers,fixture);
+  var original=new Rect[underlays.Length];for(int i=0;i<underlays.Length;i++)original[i]=Bounds(underlays[i]);
+  for(int attempt=1;attempt<=5;attempt++){
+   ValidateInspection(underlays,daemon,helpers,fixture);long lowest=Lowest(helpers);
+   foreach(var h in underlays)if(!SetWindowPos(new IntPtr(h),new IntPtr(lowest),0,0,0,0,0x213))throw new System.ComponentModel.Win32Exception();
+   // Wait for this caller's queued display updates; not a global session barrier.
+   Marshal.ThrowExceptionForHR(DwmFlush());
+   if(!InspectionHeld(underlays,daemon,helpers,fixture,lowest,original))continue;
+   CopyScreen(destination,x,y,width,height);
+   // Check immediately after BitBlt, before PNG encoding or any disk access.
+   if(InspectionHeld(underlays,daemon,helpers,fixture,lowest,original))return new InspectionCapture{Attempts=attempt,HeldBeforeCopy=true,HeldAfterCopy=true,BelowHelper=lowest,UnderlayCount=underlays.Length,AnchorHelpers=(long[])helpers.Clone()};
+  }
+  throw new InvalidOperationException("Inspection Z-order did not remain stable around pixel capture within five attempts; no image was accepted.");
+ }
  public static long[] Windows(uint pid,string name){var v=new List<long>();EnumWindows((h,p)=>{var s=new StringBuilder(256);GetClassName(h,s,256);if(Owner(h.ToInt64())==pid&&IsWindowVisible(h)&&s.ToString()==name)v.Add(h.ToInt64());return true;},IntPtr.Zero);return v.ToArray();}
  public static Rect Frame(long h){Rect r;Marshal.ThrowExceptionForHR(DwmGetWindowAttribute(new IntPtr(h),9,out r,16));return r;}
  public static Rect Bounds(long h){Rect r;if(!GetWindowRect(new IntPtr(h),out r))throw new System.ComponentModel.Win32Exception();return r;}
@@ -74,7 +104,7 @@ $snapshots=[Collections.Generic.List[object]]::new()
 $report=[ordered]@{
  started_at=[DateTime]::UtcNow.ToString('o');automated_passed=$false;visual_review_status='pending';
  inspection_underlay_override=[bool]$InspectUnderlay;
- z_order_scope=$(if($InspectUnderlay){'Inspection only: owned underlays are placed below the lowest owned helper before each capture. These images do not validate normal product Z-order.'}else{'Unmodified product Z-order; ignored background windows may obscure portions of the underlay.'});
+ z_order_scope=$(if($InspectUnderlay){'Inspection only: each window crop places owned underlays immediately below that verified target helper; bar crops use the lowest owned helper. Each image records the anchor list and before/after pixel-copy ordering checks. These images do not validate normal product Z-order.'}else{'Unmodified product Z-order; ignored background windows may obscure portions of the underlay.'});
  visual_review_scope='Review the captured rings, corners, focus colors, ellipsis and bundled glyphs; screenshot capture alone is not visual acceptance.';
  moon=[ordered]@{path=$moon;sha256=(Get-FileHash -LiteralPath $moon -Algorithm SHA256).Hash};
  testwin=[ordered]@{path=$testwin;sha256=(Get-FileHash -LiteralPath $testwin -Algorithm SHA256).Hash};
@@ -213,7 +243,7 @@ matches=[{process={not-regex="(?i)^testwin(?:\\.exe)?$"}}]
  $source=$source.Replace('THEME',$theme).Replace('FONT',$font).Replace('SIZE',[string]$size).Replace('START',$start).Replace('END',$end)
  [IO.File]::WriteAllText($config,$source,$utf8)
 }
-function Capture-Rectangle([string]$Name,[int]$Left,[int]$Top,[int]$Width,[int]$Height) {
+function Capture-Rectangle([string]$Name,[int]$Left,[int]$Top,[int]$Width,[int]$Height,[long[]]$InspectionUnderlays=@(),[long[]]$InspectionHelpers=@()) {
  if($Width -lt 1 -or $Height -lt 1 -or $Width -gt 16384 -or $Height -gt 16384 -or [long]$Width*$Height -gt 67108864){throw 'Snapshot dimensions are outside the bounded fixture limits.'}
  $screen=[Windows.Forms.SystemInformation]::VirtualScreen
  $clipped=[Drawing.Rectangle]::Intersect([Drawing.Rectangle]::new($Left,$Top,$Width,$Height),$screen)
@@ -221,52 +251,62 @@ function Capture-Rectangle([string]$Name,[int]$Left,[int]$Top,[int]$Width,[int]$
  $Left=$clipped.Left;$Top=$clipped.Top;$Width=$clipped.Width;$Height=$clipped.Height
  $bitmap=[Drawing.Bitmap]::new($Width,$Height);$graphics=[Drawing.Graphics]::FromImage($bitmap)
  $path=Join-Path $OutputDirectory ($Name+'.png')
+ $bracket=$null
  try {
   # SRCCOPY | CAPTUREBLT includes the layered border underlay. Call BitBlt
   # directly because .NET Framework rejects that combined CopyPixelOperation.
   $destination=$graphics.GetHdc()
-  try{[MoonRenderReuseNative]::CopyScreen($destination,$Left,$Top,$Width,$Height)}finally{$graphics.ReleaseHdc($destination)}
+  try{
+   if($InspectUnderlay){
+    # Retained process handles bind PID/birth. No RPC is issued between ordering
+    # the owned underlay and the native before/after pixel-copy checks.
+    Assert-Process $daemon $daemonIdentity;Assert-Process $helper $helperIdentity
+    $bracket=[MoonRenderReuseNative]::CopyScreenInspected($destination,$Left,$Top,$Width,$Height,$InspectionUnderlays,[uint32]$daemon.Id,$InspectionHelpers,[uint32]$helper.Id)
+   }else{[MoonRenderReuseNative]::CopyScreen($destination,$Left,$Top,$Width,$Height)}
+  }finally{$graphics.ReleaseHdc($destination)}
   $bitmap.Save($path,[Drawing.Imaging.ImageFormat]::Png)
  }finally{$graphics.Dispose();$bitmap.Dispose()}
- return [pscustomobject]@{path=$path;sha256=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash;left=$Left;top=$Top;width=$Width;height=$Height}
+ return [pscustomobject]@{path=$path;sha256=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash;left=$Left;top=$Top;width=$Width;height=$Height;inspection_bracket=$bracket}
 }
 function Capture-State([string]$Name,[int]$Count) {
  $script:phase=$Name
  Wait-Placement $Count
+ # Settle before inspection: any later Moon update may restore HWND_BOTTOM.
+ # This is not a timing measurement; each inspection copy is separately guarded.
+ Start-Sleep -Milliseconds 250
+ $stats=Assert-Daemon;$world=Invoke-MoonRpc query world
+ if([MoonRenderReuseNative]::GetForegroundWindow().ToInt64() -ne [long]$world.focused){throw 'Foreground left the owned fixture; screenshot capture was refused.'}
+ $placements=@(Invoke-MoonRpc query windows)
  $inspected=[Collections.Generic.List[object]]::new()
+ $handles=@();$underlays=@()
  if($InspectUnderlay){
-  $null=Assert-Daemon
-  $handles=@(Invoke-MoonRpc query windows|ForEach-Object{Assert-Window ([long]$_.id);[long]$_.id})
+  $handles=@($placements|ForEach-Object{Assert-Window ([long]$_.id);[long]$_.id})
   $lowest=[MoonRenderReuseNative]::Lowest([long[]]$handles);Assert-Window $lowest
   foreach($handle in [MoonRenderReuseNative]::Windows([uint32]$daemon.Id,'moon.surface')){
    if(![MoonRenderReuseNative]::Underlay($handle)){continue}
    Assert-Process $daemon $daemonIdentity;Assert-Window $lowest
-   $before=[MoonRenderReuseNative]::Bounds($handle)
-   [MoonRenderReuseNative]::InspectBehind($handle,[uint32]$daemon.Id,$lowest,[uint32]$helper.Id)
-   $after=[MoonRenderReuseNative]::Bounds($handle)
-   foreach($edge in @('Left','Top','Right','Bottom')){if($before.$edge -ne $after.$edge){throw 'Inspection unexpectedly moved or resized an owned underlay.'}}
-   $inspected.Add([pscustomobject]@{underlay=$handle;daemon_process_id=$daemon.Id;below_helper=$lowest;helper_process_id=$helper.Id;bounds=$after})
+   $bounds=[MoonRenderReuseNative]::Bounds($handle)
+   $inspected.Add([pscustomobject]@{underlay=$handle;daemon_process_id=$daemon.Id;helper_process_id=$helper.Id;bounds=$bounds})
   }
   if(!$inspected.Count){throw 'Inspection requested but no verified owned underlay was found.'}
+  $underlays=@($inspected|ForEach-Object{[long]$_.underlay})
  }
- # Let the existing compositor submission become visible; this is not a timing measurement.
- Start-Sleep -Milliseconds 250
- $stats=Assert-Daemon;$world=Invoke-MoonRpc query world
- if([MoonRenderReuseNative]::GetForegroundWindow().ToInt64() -ne [long]$world.focused){throw 'Foreground left the owned fixture; screenshot capture was refused.'}
  $images=[Collections.Generic.List[object]]::new();$native=[Collections.Generic.List[object]]::new()
- foreach($p in @(Invoke-MoonRpc query windows)){
+ foreach($p in $placements){
   Assert-Window ([long]$p.id)
   $frame=[MoonRenderReuseNative]::Frame([long]$p.id)
   $native.Add([pscustomobject]@{id=$p.id;frame=$frame;cloak=[MoonRenderReuseNative]::Cloak([long]$p.id)})
   # Small margins include the ring and its rounded corners, rather than unrelated desktop regions.
-  $images.Add((Capture-Rectangle ($Name+'-window-'+$p.id) ($frame.Left-16) ($frame.Top-16) ($frame.Right-$frame.Left+32) ($frame.Bottom-$frame.Top+32)))
+  # Anchor each window crop below its target: an ignored window between the two
+  # helpers must not hide this target's ring during explicit pixel inspection.
+  $images.Add((Capture-Rectangle ($Name+'-window-'+$p.id) ($frame.Left-16) ($frame.Top-16) ($frame.Right-$frame.Left+32) ($frame.Bottom-$frame.Top+32) $underlays ([long[]]@([long]$p.id))))
  }
  $barIndex=0
  foreach($handle in [MoonRenderReuseNative]::Windows([uint32]$daemon.Id,'moon.surface')){
   if([MoonRenderReuseNative]::Owner($handle) -ne $daemon.Id){throw 'Surface owner changed.'}
   $bounds=[MoonRenderReuseNative]::Bounds($handle)
   if($bounds.Bottom-$bounds.Top -gt 200){continue}
-  $images.Add((Capture-Rectangle ($Name+'-bar-'+$barIndex) $bounds.Left $bounds.Top ($bounds.Right-$bounds.Left) ($bounds.Bottom-$bounds.Top)));$barIndex++
+  $images.Add((Capture-Rectangle ($Name+'-bar-'+$barIndex) $bounds.Left $bounds.Top ($bounds.Right-$bounds.Left) ($bounds.Bottom-$bounds.Top) $underlays $handles));$barIndex++
  }
  if(!$barIndex){throw 'No visible owned bar was available to capture.'}
  [IO.File]::Copy($config,(Join-Path $OutputDirectory ($Name+'.toml')),$false)

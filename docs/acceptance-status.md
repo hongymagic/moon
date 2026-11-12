@@ -7,7 +7,58 @@ has been exercised.
 
 ## Current renderer refinement, 13 November 2026
 
-The corrected ordinary daemon is
+The current ordinary daemon is
+`9608872A54F93B28221A918D48E2CB1B487884D10A2BCC1A19ECF4945D4FCE94`;
+its UIAccess installation candidate is
+`9ECFCE8BF68424B9DB46D344D4938445076FB1F886C9DD799D644C8815DC7040`.
+Settings remains
+`EC22F24B07DFAD2ABE6198B519016E26E2C119843351FE81AEAC13EE9799727C`.
+The UIAccess image is built and staged, not yet signed or installed. Build
+identities are in `target/factory-{final,install,validation}-build.json`.
+
+The ordinary 960 daemon is now running through Explorer as the sole manager,
+PID 10844, from `Downloads\Moon-validation\moon-factory-final-20261113\moon.exe`,
+with the matching EC22 Settings companion beside it. Live verification preserves
+all four original HWND/PID/process-birth identities and workspace assignments;
+visible native frames match the plan and prior focus is restored. The personal
+configuration hash is unchanged. The token is medium integrity (8192), without
+UIAccess, and no previous window manager is running. Evidence:
+`target/factory-final-live.json`. This ordinary startup does not complete signed
+installation or the seven-day soak.
+
+This exact ordinary daemon passes all 14 lifecycle integration cases and ten
+workspace-carousel cases: `target/factory-final-{integration,carousel}.json`.
+The default 128-chord workload has 128 exact placements and no daemon error;
+ready time is 120.659 ms, external median/p99 12.348/44.500 ms and own-hook p99
+104 µs. Working-set samples before/after input/after idle are
+45,961,216 / 49,188,864 / 47,472,640 bytes, with idle CPU 0.4687147% of one core.
+Both opt-in profiling modes are disabled. These three memory samples are below
+50,000,000 bytes; the earlier E9 run's image-residency variation and higher total
+remain evidence against a universal memory pass. Latency and literal-zero CPU
+requirements remain unmet. See `target/factory-final-performance.json` and the
+[budget table](#performance-budgets).
+
+The final **scoped visual review passes**: all 13 PNGs were inspected and their
+hashes verified, all eight ring captures have continuous edges and corners,
+all five bar hashes match D583, and the removed-split region has zero residual
+pixels. Each image's ordering checks held before and after capture on attempt
+one. Evidence: `target/factory-final-target-visual/{report,visual-review,pixel-review}.json`.
+This covers explicit per-target inspection ordering on one 4K display at 125%,
+not normal product Z-order or other physical DPI settings. The earlier E9 and
+960 captures with the underlay below the lowest helper remain preserved as
+partial results in `target/surface-pools-visual/` and `target/factory-final-visual/`.
+The new complete initial ring is consistent with earlier fixture occlusion;
+the identity of any intervening ignored window was not proved.
+
+The tracked Explorer installation launcher passes six harmless parser/behavior
+checks plus its cleanup check, including argument/stream preservation, exit-code
+forwarding, expiration and foreign-owner rejection. These checks perform no
+installation or UAC request: `target/explorer-launch-tracked-validation.json`.
+Signed installation, physical resilience and the seven-day soak remain open.
+
+### Earlier workspace-label candidate
+
+The previous corrected ordinary daemon is
 `D5831ED9F4C2DD5676D79EF1CD511D4EC379E582C5C4FFF7DADD6BBE5D006F4A`;
 its UIAccess installation candidate is
 `5EF1FB070BC48A5FC924728769B0DB572217F44958260B1D73B6EC8A849B23A6`.
@@ -36,8 +87,15 @@ Reports: `target/workspace-label-{normal,uiaccess}-build.json`,
 The latest performance budget results are below. Installation, physical
 resilience and seven-day acceptance remain incomplete.
 
-The D583 ordinary daemon is now running as the sole manager with its matching
-Settings companion available. All four existing application identities and
+For this earlier D583 run, readiness was 134.267 ms, external placement
+median/p99 12.183/43.941 ms, own/whole-hook p99 100/743 µs and idle CPU
+approximately 0.3125% of one core. Working-set samples were
+46,780,416 / 51,515,392 / 49,446,912 bytes before input, after input and after
+idle; the after-input sample exceeded the memory budget. These historical
+results remain distinct from the final 960 candidate above.
+
+At that verification, the D583 ordinary daemon was running as the sole manager
+with its matching Settings companion available. All four existing application identities and
 workspace assignments were preserved, visible native frames match the plan,
 hidden windows remain hidden, original focus returned, and the personal config
 hash is unchanged. No previous manager was started. Live verification:
@@ -220,24 +278,26 @@ must stay usable and every owned test window must be recoverable afterward.
 
 ## Performance budgets
 
-These are the latest measured budgets for ordinary candidate `D5831ED9…`.
+These are the latest measured budgets for ordinary candidate `9608872A…`.
 Earlier candidate measurements remain in [performance evidence](validation-performance.md).
 No signed-installation performance result is inferred from this ordinary run.
 
 | Budget | Evidence available |
 |---|---|
-| Hook callback p99 under 50 µs | 100 µs p99 for Moon's own work and 743 µs for the whole callback. Both exceed the budget. The earlier 9 µs sample predates the key-pair correctness fix. |
-| Eight-window key-to-placement median under 10 ms, p99 under 30 ms | 128/128 exact placements pass. Independent median/p99 are 12.183/43.941 ms; latency remains above budget. |
+| Hook callback p99 under 50 µs | 104 µs p99 for Moon's own work and 938 µs for the whole callback. Both exceed the budget. The earlier 9 µs sample predates the key-pair correctness fix. |
+| Eight-window key-to-placement median under 10 ms, p99 under 30 ms | 128/128 exact placements pass. Independent median/p99 are 12.348/44.500 ms; latency remains above budget. |
 | 50-window reducer plus layout under 100 µs | Passed: 22.59–22.93 µs in the recorded Criterion run. |
-| Idle CPU 0%, no timer faster than 1 Hz | The ten-second sample is approximately 0.3125% of one core. Providers run at 1 Hz and unchanged scenes do not redraw; animation uses a bounded active-only timer. Literal zero CPU is not established. |
-| Working set under 50 MB, bar and borders on one 4K monitor | 46,780,416 bytes before the workload, 51,515,392 after it and 49,446,912 after idle. The after-input result still exceeds the budget; the lower idle result does not establish a complete pass. |
-| Ready in under 300 ms | 134.267 ms; passed on this ordinary candidate. The signed installation still needs its own result. |
+| Idle CPU 0%, no timer faster than 1 Hz | The ten-second sample is 0.4687147% of one core. Providers run at 1 Hz and unchanged scenes do not redraw; animation uses a bounded active-only timer. Literal zero CPU is not established. |
+| Working set under 50 MB, bar and borders on one 4K monitor | 45,961,216 bytes before the workload, 49,188,864 after it and 47,472,640 after idle. All three samples are below 50,000,000 bytes in this run. Earlier E9 repeats exceeded the budget with different executable-image residency; a universal bound or continuous peak below the limit is not established. |
+| Ready in under 300 ms | 120.659 ms; passed on this ordinary candidate. The signed installation still needs its own result. |
 
-These results use normal-permission candidate `D5831ED9…`, eight owned helpers,
+These results use normal-permission candidate `9608872A…`, eight owned helpers,
 the default WARP renderer, and a 3840×2160 display at 125% scaling, with the bar
 and borders enabled. Raw records are in
-`target/workspace-labels-performance.json`. Optional input profiling was disabled.
-One device, one border atlas, eight gradient brushes and one text format served
+`target/factory-final-performance.json`. Optional input dispatch profiling and
+target-window callback profiling were both disabled; the probe's aggregate
+readback timing remains included. One device, two composition surface factories,
+one border atlas, eight gradient brushes and one text format served
 the workload, with no draw failure or device recreation. A previous, separate four-window workspace
 sample observed all six full-width animations below the 50-pixel bar, with
 47,575,040 bytes peak working set. Its command-to-overlay-disappearance interval

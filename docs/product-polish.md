@@ -5,6 +5,48 @@ guided setup, product identity, theme editing, Windows 11 materials, and carouse
 navigation. The original signed-install, resilience, performance and seven-day
 acceptance conditions remain tracked in [acceptance-status.md](acceptance-status.md).
 
+## Current ordinary candidate, 13 November 2026
+
+The ordinary daemon is
+`9608872A54F93B28221A918D48E2CB1B487884D10A2BCC1A19ECF4945D4FCE94`,
+the staged UIAccess image is
+`9ECFCE8BF68424B9DB46D344D4938445076FB1F886C9DD799D644C8815DC7040`,
+and Settings remains
+`EC22F24B07DFAD2ABE6198B519016E26E2C119843351FE81AEAC13EE9799727C`.
+The installation image has not yet been signed or installed. Build records are
+`target/factory-{final,install,validation}-build.json`.
+
+The 960 ordinary daemon is running through Explorer as PID 10844 from
+`Downloads\Moon-validation\moon-factory-final-20261113`, with EC22 Settings
+adjacent. All four original window/process/birth identities and workspace
+assignments survive, visible frames and prior focus are verified, and the
+personal configuration is unchanged. It runs at medium integrity without
+UIAccess; no previous manager is running. `target/factory-final-live.json`
+records this promotion separately from pending signed-installation acceptance.
+
+This ordinary candidate passes 14 lifecycle cases, ten workspace-carousel cases
+and all 128 exact placements in the default performance workload. Ready time is
+120.659 ms, external placement median/p99 12.348/44.500 ms and own-hook p99 104 µs.
+Working-set samples are 45,961,216 / 49,188,864 / 47,472,640 bytes before input,
+after input and after idle; idle CPU is 0.4687147% of one core. Both opt-in
+profiling modes are disabled. These memory samples are below 50,000,000 bytes,
+but earlier E9 image-residency variation prevents a universal memory-pass claim.
+Latency and literal-zero idle CPU still miss the specified budgets. Reports:
+`target/factory-final-{integration,carousel,performance}.json`.
+
+The scoped visual review passes for all 13 images: eight complete rings, five
+bar hashes matching D583, and zero residual pixels in the removed-split region.
+All 13 before/after ordering checks held on the first attempt. This is explicit
+per-target inspection ordering at 4K/125%; normal product Z-order and other DPI
+settings are not covered. Reports are in
+`target/factory-final-target-visual/{report,visual-review,pixel-review}.json`.
+The earlier E9 and 960 lowest-helper captures remain partial evidence; an
+intervening window is a plausible explanation, not an identified cause.
+Six harmless tracked-launcher parser/behavior checks and the cleanup check pass
+in `target/explorer-launch-tracked-validation.json`; they perform no installation
+or UAC request. Signed privilege checks, physical resilience and seven-day
+sole-manager acceptance remain open.
+
 ## Settings
 
 `moon-settings.exe` is a separate ordinary-permission process. It refuses an

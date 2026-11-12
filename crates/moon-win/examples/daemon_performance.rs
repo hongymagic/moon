@@ -1,5 +1,74 @@
 //! Full-daemon measurements using eight owned windows and the real keyboard hook.
 //! Refuses an existing daemon or another window manager; ignores all user windows.
+#[cfg(any(windows, test))]
+#[derive(Debug, Default)]
+#[cfg_attr(windows, derive(serde::Serialize))]
+struct ReadbackTiming {
+    passes: u64,
+    calls: u64,
+    short_circuit_skips: u64,
+    completed_pass_skips: u64,
+    total_ns: u64,
+    max_ns: u64,
+}
+
+#[cfg(any(windows, test))]
+impl ReadbackTiming {
+    fn measure<T>(&mut self, read: impl FnOnce() -> T) -> T {
+        let started = std::time::Instant::now();
+        let result = read();
+        let elapsed = started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
+        self.calls += 1;
+        self.total_ns += elapsed;
+        self.max_ns = self.max_ns.max(elapsed);
+        result
+    }
+
+    fn finish_pass(&mut self, targets: usize, calls_before: u64) {
+        self.passes += 1;
+        self.short_circuit_skips += targets as u64 - (self.calls - calls_before);
+    }
+}
+
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug)]
+struct PlacementStamp {
+    sequence: u64,
+    qpc: i64,
+    outer: [i32; 4],
+}
+
+#[cfg(any(windows, test))]
+fn changed_target_ticks(
+    before: PlacementStamp,
+    after: PlacementStamp,
+    expected: [i32; 4],
+    key_qpc: i64,
+) -> Result<Option<u64>, &'static str> {
+    if before.sequence == 0
+        || after.sequence < before.sequence
+        || !before.sequence.is_multiple_of(2)
+        || !after.sequence.is_multiple_of(2)
+    {
+        return Err("missing, incomplete or regressed helper placement sequence");
+    }
+    if after.outer != expected {
+        return Err("helper placement snapshot does not match the exact expected outer rectangle");
+    }
+    if before.outer == expected {
+        return Ok(None);
+    }
+    if after.sequence == before.sequence {
+        return Err("changed target has no new helper placement callback");
+    }
+    let elapsed = after.qpc.checked_sub(key_qpc).ok_or("helper placement QPC overflow")?;
+    if elapsed < -1 {
+        return Err("changed target callback predates the trigger");
+    }
+    // Microsoft documents +/- one tick ordering uncertainty across threads.
+    Ok(Some(elapsed.max(0) as u64))
+}
+
 #[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use moon_core::{geometry::Rect, ids::WindowId, world::World};
@@ -19,6 +88,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             windows::Win32::UI::WindowsAndMessaging::GetWindowRect(platform::hwnd(id), &mut rect)?;
         }
         Ok(Rect::new(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top))
+    }
+
+    fn qpc() -> windows::core::Result<i64> {
+        let mut value = 0;
+        unsafe { windows::Win32::System::Performance::QueryPerformanceCounter(&mut value)? };
+        Ok(value)
+    }
+
+    fn placement_stamp(id: WindowId, owner: u32) -> Result<PlacementStamp, &'static str> {
+        use windows::Win32::UI::WindowsAndMessaging::GetPropW;
+        for _ in 0..8 {
+            if platform::process_id(id) != owner {
+                return Err("placement diagnostic window no longer belongs to the owned helper");
+            }
+            let read = |index| unsafe {
+                GetPropW(platform::hwnd(id), platform::TESTWIN_PLACEMENT_PROPERTIES[index]).0 as u64
+            };
+            let sequence = read(0);
+            if sequence == 0 {
+                return Err("helper placement instrumentation is missing or failed to publish");
+            }
+            if !sequence.is_multiple_of(2) {
+                continue;
+            }
+            let counter = read(1);
+            let encoded = [read(2), read(3), read(4), read(5)];
+            if sequence != read(0) {
+                continue;
+            }
+            if platform::process_id(id) != owner {
+                return Err("placement diagnostic owner changed while reading the snapshot");
+            }
+            if counter == 0 || counter > i64::MAX as u64 {
+                return Err("helper placement QPC is missing or invalid");
+            }
+            if encoded.iter().any(|&value| value == 0 || value > u64::from(u32::MAX) + 1) {
+                return Err("helper placement rectangle is missing or invalid");
+            }
+            return Ok(PlacementStamp {
+                sequence,
+                qpc: counter as i64,
+                outer: encoded.map(|value| (value - 1) as u32 as i32),
+            });
+        }
+        Err("helper placement snapshot remained inconsistent across eight reads")
     }
 
     fn query(name: &str) -> Result<Value, Box<dyn std::error::Error>> {
@@ -212,6 +326,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let args: Vec<_> = std::env::args().collect();
     let control = args.get(3).is_some_and(|arg| arg == "--memory-control");
+    let target_timing = std::env::var("MOON_PERF_PLACEMENT_TIMING").is_ok_and(|value| value == "1");
+    let mut qpc_frequency = 0;
+    if target_timing {
+        if control {
+            return Err(
+                "placement timestamps require the resize workload, not memory control".into()
+            );
+        }
+        unsafe {
+            windows::Win32::System::Performance::QueryPerformanceFrequency(&mut qpc_frequency)?;
+        }
+        if qpc_frequency <= 0 {
+            return Err("invalid placement diagnostic QPC frequency".into());
+        }
+    }
     if args.len() != 3 && !(args.len() == 4 && control) {
         return Err("usage: daemon_performance.exe moon.exe testwin.exe [--memory-control]".into());
     }
@@ -232,7 +361,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &cleanup.config,
         "config-version = 1\n[[rules]]\ncommands = [\"ignore\"]\nmatches = [{process={not-regex=\"(?i)^testwin(?:\\\\.exe)?$\"}}]\n",
     )?;
-    cleanup.helper = Some(Command::new(&args[2]).arg("8").spawn()?);
+    let mut helper = Command::new(&args[2]);
+    helper.arg("8").env_remove("MOON_TESTWIN_PLACEMENT_TIMING");
+    if target_timing {
+        helper.env("MOON_TESTWIN_PLACEMENT_TIMING", "1");
+    }
+    cleanup.helper = Some(helper.spawn()?);
     let helper_pid = cleanup.helper.as_ref().unwrap().id();
     let deadline = Instant::now() + Duration::from_secs(10);
     while platform::enumerate_windows()?.iter().filter(|w| w.process_id == helper_pid).count() != 8
@@ -329,6 +463,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut chord_latency = Vec::new();
     let mut poll_waits = Vec::new();
     let mut native_latency = Vec::new();
+    #[derive(Default, serde::Serialize)]
+    struct ObserverTrial {
+        trial: usize,
+        trigger_inject_us: u64,
+        native: ReadbackTiming,
+        dwm_frame: ReadbackTiming,
+        sleeps: u64,
+        sleep_us: u64,
+        native_placed_us: u64,
+        external_placed_us: u64,
+        whole_chord_us: u64,
+    }
+    #[derive(serde::Serialize)]
+    struct TargetWindowTiming {
+        window: usize,
+        sequence_before: u64,
+        sequence_after: u64,
+        callback_us: Option<u64>,
+    }
+    #[derive(serde::Serialize)]
+    struct TargetTrial {
+        trial: usize,
+        changed_windows: usize,
+        latest_callback_us: u64,
+        windows: Vec<TargetWindowTiming>,
+    }
+    // Exactly one fixed-size record per trial; never retain per-poll histories.
+    let mut observer_trials = Vec::with_capacity(128);
+    let mut target_trials = Vec::with_capacity(if target_timing { 128 } else { 0 });
     cleanup.injected = true;
     // Each key executes both width and height changes through the built-in binding.
     for index in 0..128 {
@@ -346,6 +509,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .world;
         }
         let expected = world.plan().placements;
+        let mut before_targets = BTreeMap::new();
+        if target_timing {
+            for placement in &expected {
+                let stamp = placement_stamp(placement.id, helper_pid)?;
+                let actual = native_rect(placement.id)?;
+                if stamp.outer != [actual.x, actual.y, actual.right(), actual.bottom()] {
+                    return Err("helper timestamp does not match its pre-trial actual frame".into());
+                }
+                before_targets.insert(placement.id, stamp);
+            }
+        }
+        let mut observer = ObserverTrial { trial: index, ..Default::default() };
         let chord_started = Instant::now();
         if !inject(&[(VK_LMENU, false), (VK_LSHIFT, false)]) {
             return Err("modifier preparation was refused".into());
@@ -353,13 +528,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // The command starts at its trigger key, after its modifiers are held.
         // Retain whole-chord timings separately instead of hiding their cost.
         let key_started = Instant::now();
+        let key_qpc = if target_timing { qpc()? } else { 0 };
         if !inject(&[(key, false), (key, true)]) {
             return Err("keyboard injection was refused".into());
         }
-        let native_settled = || {
-            expected.iter().all(|p| {
+        observer.trigger_inject_us = key_started.elapsed().as_micros() as u64;
+        let native_settled = |timing: &mut ReadbackTiming| {
+            let calls_before = timing.calls;
+            let settled = expected.iter().all(|p| {
                 let (left, top, right, bottom) = frame_insets[&p.id];
-                native_rect(p.id).is_ok_and(|rect| {
+                timing.measure(|| native_rect(p.id)).is_ok_and(|rect| {
                     rect == Rect::new(
                         p.rect.x - left,
                         p.rect.y - top,
@@ -367,24 +545,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         p.rect.height + top + bottom,
                     )
                 })
-            })
+            });
+            timing.finish_pass(expected.len(), calls_before);
+            settled
         };
         let mut native_placed = None;
         loop {
-            if native_placed.is_none() && native_settled() {
-                native_placed = Some(key_started.elapsed().as_micros() as u64);
+            if native_placed.is_none() {
+                if native_settled(&mut observer.native) {
+                    native_placed = Some(key_started.elapsed().as_micros() as u64);
+                }
+            } else {
+                observer.native.completed_pass_skips += 1;
             }
-            if expected.iter().all(|placement| {
-                platform::window_rect(placement.id).is_ok_and(|rect| {
-                    (rect.x - placement.rect.x).abs() <= 1
-                        && (rect.y - placement.rect.y).abs() <= 1
-                        && (rect.width - placement.rect.width).abs() <= 1
-                        && (rect.height - placement.rect.height).abs() <= 1
-                })
-            }) {
+            let calls_before = observer.dwm_frame.calls;
+            let frames_settled = expected.iter().all(|placement| {
+                observer.dwm_frame.measure(|| platform::window_rect(placement.id)).is_ok_and(
+                    |rect| {
+                        (rect.x - placement.rect.x).abs() <= 1
+                            && (rect.y - placement.rect.y).abs() <= 1
+                            && (rect.width - placement.rect.width).abs() <= 1
+                            && (rect.height - placement.rect.height).abs() <= 1
+                    },
+                )
+            });
+            observer.dwm_frame.finish_pass(expected.len(), calls_before);
+            if frames_settled {
                 // A move can finish between the native and DWM reads above.
                 if native_placed.is_none() {
-                    if !native_settled() {
+                    if !native_settled(&mut observer.native) {
                         return Err("DWM frames settled without exact native outer bounds".into());
                     }
                     native_placed = Some(key_started.elapsed().as_micros() as u64);
@@ -407,6 +596,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let wait_started = Instant::now();
             thread::sleep(Duration::from_millis(1));
             poll_waits.push(wait_started.elapsed().as_micros() as u64);
+            observer.sleeps += 1;
+            observer.sleep_us += poll_waits.last().copied().unwrap_or_default();
         }
         external_latency.push(key_started.elapsed().as_micros() as u64);
         native_latency
@@ -415,9 +606,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if !inject(&[(VK_LSHIFT, true), (VK_LMENU, true)]) {
             return Err("modifier release was refused".into());
         }
+        // Read helper metadata only after every existing completion timer has
+        // been recorded. No diagnostic query is part of the polling loop.
+        if target_timing {
+            let mut trial = TargetTrial {
+                trial: index,
+                changed_windows: 0,
+                latest_callback_us: 0,
+                windows: Vec::with_capacity(expected.len()),
+            };
+            for (window, placement) in expected.iter().enumerate() {
+                let before = before_targets[&placement.id];
+                let after = placement_stamp(placement.id, helper_pid)?;
+                let (left, top, right, bottom) = frame_insets[&placement.id];
+                let outer = [
+                    placement.rect.x - left,
+                    placement.rect.y - top,
+                    placement.rect.right() + right,
+                    placement.rect.bottom() + bottom,
+                ];
+                let callback_us = changed_target_ticks(before, after, outer, key_qpc)?
+                    .map(|ticks| (u128::from(ticks) * 1_000_000 / qpc_frequency as u128) as u64);
+                if let Some(elapsed) = callback_us {
+                    trial.changed_windows += 1;
+                    trial.latest_callback_us = trial.latest_callback_us.max(elapsed);
+                }
+                trial.windows.push(TargetWindowTiming {
+                    window,
+                    sequence_before: before.sequence,
+                    sequence_after: after.sequence,
+                    callback_us,
+                });
+            }
+            if trial.changed_windows == 0 {
+                return Err("resize diagnostic had no changed target windows".into());
+            }
+            target_trials.push(trial);
+        }
+        observer.native_placed_us = native_latency[index];
+        observer.external_placed_us = external_latency[index];
+        observer.whole_chord_us = chord_latency[index];
+        observer_trials.push(observer);
         // Spread samples across display-refresh phases; a fixed 150 ms interval
         // accidentally synchronizes with exactly nine frames on a 60 Hz display.
-        let interval = Duration::from_millis(95 + (index * 37 % 101));
+        let interval = Duration::from_millis((95 + (index * 37 % 101)) as u64);
         thread::sleep(interval.saturating_sub(chord_started.elapsed()));
     }
     let active = query("stats")?;
@@ -451,6 +683,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "whole_chord_to_placed_p99_us":chord_latency[(chord_latency.len()*99).div_ceil(100)-1],
         "poll_wait_us":poll_waits,
         "native_outer_placed_us":native_latency,
+        "observer_trials":observer_trials,
+        "target_placement_enabled":target_timing,
+        "target_placement_qpc_frequency":qpc_frequency,
+        "target_placement_trials":target_trials,
+        "target_placement_scope":"Opt-in MOON_PERF_PLACEMENT_TIMING=1. Owned testwin publishes actual outer rectangle and same-system QPC after WM_WINDOWPOSCHANGED default handling, an upper bound on geometry change, not compositor visibility. Stable odd/even sequence and process ownership are checked. Exact unchanged targets contribute no timestamp; changed targets require a fresh sequence and QPC at or after trigger (one-tick cross-thread uncertainty). Metadata reads occur before trial timing or after all existing completion timestamps; only the QPC start read is added inside the existing trigger interval. Helper publication overhead remains real work; these diagnostic timings do not replace acceptance metrics.",
+        "observer_scope":"128 fixed-size records in trial order. Readback total/max nanoseconds time only the existing native_rect/platform::window_rect wrappers (the latter retains its DWM-to-GetWindowRect fallback); elapsed time may include descheduling. Trigger microseconds include the existing inject helper. Short-circuit skips count unqueried targets within attempted passes; completed-pass skips count whole native passes omitted after native completion. Input/read order, deadlines, polling and acceptance timing boundaries are unchanged; added measurement overhead remains included. This diagnostic is not an uninstrumented budget comparison.",
         "hook_phase_timings":active["hooks"]["phases"],
         "hook_phase_scope":"Cumulative elapsed microseconds through after_input; diagnostic phases remain included in the unchanged own/whole callback metrics. Percentiles are not additive; 4096 is the terminal bucket lower bound.",
         "idle_cpu_one_core_percent":idle_cpu,"before_input":before_input,"after_input":active,"after_idle":idle,
@@ -463,4 +701,68 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(not(windows))]
 fn main() {
     eprintln!("daemon_performance requires Windows 11");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PlacementStamp, ReadbackTiming, changed_target_ticks};
+
+    #[test]
+    fn readback_timing_preserves_short_circuit_and_read_errors() {
+        let mut timing = ReadbackTiming::default();
+        let mut visited = Vec::new();
+        let before = timing.calls;
+        let settled = (0..8).all(|index| {
+            timing
+                .measure(|| {
+                    visited.push(index);
+                    if index == 2 { Err("unavailable") } else { Ok(true) }
+                })
+                .is_ok_and(|exact| exact)
+        });
+        timing.finish_pass(8, before);
+        assert!(!settled);
+        assert_eq!(visited, [0, 1, 2]);
+        assert_eq!(timing.calls + timing.short_circuit_skips, 8);
+        assert_eq!(timing.short_circuit_skips, 5);
+        let before = timing.calls;
+        assert!((0..8).all(|_| timing.measure(|| true)));
+        timing.finish_pass(8, before);
+        assert_eq!(timing.passes, 2);
+        assert_eq!(timing.calls, 11);
+        assert_eq!(timing.short_circuit_skips, 5);
+        assert_eq!(timing.completed_pass_skips, 0);
+        assert!(timing.max_ns <= timing.total_ns);
+    }
+
+    #[test]
+    fn unchanged_targets_do_not_contribute_old_callback_times() {
+        let old = PlacementStamp { sequence: 2, qpc: 50, outer: [-400, 20, 0, 320] };
+        assert_eq!(changed_target_ticks(old, old, old.outer, 1000), Ok(None));
+    }
+
+    #[test]
+    fn changed_targets_require_exact_fresh_consistent_snapshots() {
+        let before = PlacementStamp { sequence: 2, qpc: 50, outer: [-400, 20, 0, 320] };
+        let expected = [-400, 20, 50, 350];
+        let after = PlacementStamp { sequence: 4, qpc: 1100, outer: expected };
+        assert_eq!(changed_target_ticks(before, after, expected, 1000), Ok(Some(100)));
+        assert!(changed_target_ticks(before, before, expected, 1000).is_err());
+        assert!(
+            changed_target_ticks(before, PlacementStamp { sequence: 2, ..after }, expected, 1000)
+                .is_err()
+        );
+        assert!(
+            changed_target_ticks(before, PlacementStamp { sequence: 3, ..after }, expected, 1000)
+                .is_err()
+        );
+        assert!(
+            changed_target_ticks(before, PlacementStamp { qpc: 998, ..after }, expected, 1000)
+                .is_err()
+        );
+        assert_eq!(
+            changed_target_ticks(before, PlacementStamp { qpc: 999, ..after }, expected, 1000),
+            Ok(Some(0))
+        );
+    }
 }

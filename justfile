@@ -49,14 +49,15 @@ install:
     just settings
     cargo xwin build -p moon --features uiaccess --release --target x86_64-pc-windows-msvc --locked
     cargo xwin build -p moon-settings --release --target x86_64-pc-windows-msvc --locked
-    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$PWD/scripts/install.ps1")" -Binary "$(wslpath -w "$PWD/target/x86_64-pc-windows-msvc/release/moon.exe")"
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$PWD/scripts/launch-from-explorer.ps1")" -Mode Install -Binary "$(wslpath -w "$PWD/target/x86_64-pc-windows-msvc/release/moon.exe")"
 
-handover:
+handover keep_previous_desktop_stopped="false":
+    @[[ {{quote(keep_previous_desktop_stopped)}} == true || {{quote(keep_previous_desktop_stopped)}} == false ]] || { echo 'Use: just handover [true|false]' >&2; exit 2; }
     just settings
     cargo xwin build -p moon --features uiaccess --release --target x86_64-pc-windows-msvc --locked
     cargo xwin build -p moon-settings --release --target x86_64-pc-windows-msvc --locked
     cargo xwin build -p moon-win --example window_inventory --example recover_windows --release --target x86_64-pc-windows-msvc --locked
-    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$PWD/scripts/handover.ps1")" -Binary "$(wslpath -w "$PWD/target/x86_64-pc-windows-msvc/release/moon.exe")"
+    args=(); if [[ {{quote(keep_previous_desktop_stopped)}} == true ]]; then args+=(-KeepPreviousDesktopStopped); fi; powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$PWD/scripts/launch-from-explorer.ps1")" -Mode Handover -Binary "$(wslpath -w "$PWD/target/x86_64-pc-windows-msvc/release/moon.exe")" "${args[@]}"
 
 soak:
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$PWD/scripts/record-soak.ps1")"

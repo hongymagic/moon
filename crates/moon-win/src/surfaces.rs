@@ -99,6 +99,7 @@ pub struct RendererDiagnostics {
     changed_scenes: u64,
     commits: u64,
     devices_created: u64,
+    surface_factories_created: u64,
     device_recreation_attempts: u64,
     bar_canvases_created: u64,
     border_canvases_created: u64,
@@ -130,6 +131,8 @@ struct Graphics {
     backend: &'static str,
     context: ID2D1DeviceContext,
     composition: IDCompositionDevice,
+    bar_surfaces: IDCompositionSurfaceFactory,
+    border_surfaces: IDCompositionSurfaceFactory,
     write: IDWriteFactory5,
     symbols: IDWriteFontCollection,
     loader: IDWriteInMemoryFontFileLoader,
@@ -181,7 +184,15 @@ impl Graphics {
             // Every scene uses physical pixels; all draws share this main-thread context.
             context.SetDpi(96.0, 96.0);
             context.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-            let composition = DCompositionCreateDevice(&dxgi_device)?;
+            // Surface allocations are pooled per factory. Keep the wide, shallow
+            // bar separate from the taller border atlas, sharing the same DXGI
+            // device and composition transaction. No implicit third pool is needed.
+            // https://learn.microsoft.com/windows/win32/api/dcomp/nf-dcomp-idcompositiondevice2-createsurfacefactory
+            let composition: IDCompositionDevice =
+                DCompositionCreateDevice2(None::<&windows::core::IUnknown>)?;
+            let composition2: IDCompositionDevice2 = composition.cast()?;
+            let bar_surfaces = composition2.CreateSurfaceFactory(&dxgi_device)?;
+            let border_surfaces = composition2.CreateSurfaceFactory(&dxgi_device)?;
             let write: IDWriteFactory5 = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
             let loader = write.CreateInMemoryFontFileLoader()?;
             write.RegisterFontFileLoader(&loader)?;
@@ -202,8 +213,20 @@ impl Graphics {
                 factory3.CreateFontCollectionFromFontSet(&builder.CreateFontSet()?)?.cast()?;
             let mut counters = diagnostics.borrow_mut();
             counters.devices_created = counters.devices_created.saturating_add(1);
+            counters.surface_factories_created =
+                counters.surface_factories_created.saturating_add(2);
             drop(counters);
-            Ok(Self { backend, context, composition, write, symbols, loader, diagnostics })
+            Ok(Self {
+                backend,
+                context,
+                composition,
+                bar_surfaces,
+                border_surfaces,
+                write,
+                symbols,
+                loader,
+                diagnostics,
+            })
         }
     }
 }
@@ -606,7 +629,7 @@ struct Feedback {
 impl Feedback {
     fn new(graphics: &Graphics, parent: &IDCompositionVisual) -> Result<Self> {
         unsafe {
-            let surface = graphics.composition.CreateSurface(
+            let surface = graphics.bar_surfaces.CreateSurface(
                 1,
                 1,
                 DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -1032,7 +1055,7 @@ impl Canvas {
                 let surface = if border {
                     None
                 } else {
-                    Some(graphics.composition.CreateSurface(
+                    Some(graphics.bar_surfaces.CreateSurface(
                         rect.width.max(1) as u32,
                         rect.height.max(1) as u32,
                         DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -1300,7 +1323,7 @@ impl Canvas {
                 .as_ref()
                 .is_none_or(|(capacity, _)| capacity.height < needed.height)
             {
-                let surface = graphics.composition.CreateSurface(
+                let surface = graphics.border_surfaces.CreateSurface(
                     needed.width as u32,
                     needed.height as u32,
                     DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -2073,6 +2096,56 @@ fn ring_regions(rect: Rect, thickness: i32, bounds: Rect) -> Vec<Rect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_surface_factories_share_context_and_commit_without_a_window() {
+        let _apartment = crate::platform::Apartment::new().unwrap();
+        let diagnostics = Rc::default();
+        let graphics = Graphics::new(Rc::clone(&diagnostics)).unwrap();
+        // Exercise actual V2 factory surfaces through the retained V1 device,
+        // with the production draw path and one context for both resource pools.
+        // Backing dimensions are allocator policy, not a contract to assert.
+        unsafe {
+            let root = graphics.composition.CreateVisual().unwrap();
+            let mut surfaces = Vec::new();
+            for (factory, rect, kind) in [
+                (&graphics.bar_surfaces, Rect::new(0, 0, 3840, 50), DrawKind::Bar),
+                (&graphics.bar_surfaces, Rect::new(0, 0, 1, 1), DrawKind::Feedback),
+                (&graphics.border_surfaces, Rect::new(0, 0, 1024, 512), DrawKind::Border),
+            ] {
+                let surface = factory
+                    .CreateSurface(
+                        rect.width as u32,
+                        rect.height as u32,
+                        DXGI_FORMAT_B8G8R8A8_UNORM,
+                        DXGI_ALPHA_MODE_PREMULTIPLIED,
+                    )
+                    .unwrap();
+                let visual = graphics.composition.CreateVisual().unwrap();
+                visual.SetContent(&surface).unwrap();
+                root.AddVisual(&visual, true, None).unwrap();
+                surfaces.push((surface, rect, kind));
+            }
+            for _ in 0..4 {
+                for (surface, rect, kind) in &surfaces {
+                    let drawing = Drawing::begin(&graphics, surface, *rect, *kind).unwrap();
+                    graphics.context.Clear(Some(&parse_color("#a46852", 0.75)));
+                    drawing.finish().unwrap();
+                }
+                graphics.composition.Commit().unwrap();
+                graphics.composition.WaitForCommitCompletion().unwrap();
+            }
+        }
+        let counters = diagnostics.borrow();
+        assert_eq!(counters.devices_created, 1);
+        assert_eq!(counters.surface_factories_created, 2);
+        assert_eq!(counters.device_recreation_attempts, 0);
+        for draws in [&counters.bar, &counters.border, &counters.feedback] {
+            assert_eq!(draws.begin_draw_calls, 4);
+            assert_eq!(draws.begin_draw_failures, 0);
+            assert_eq!(draws.descriptor_failures, 0);
+        }
+    }
 
     #[test]
     fn native_render_resources_reuse_and_invalidate_without_changing_styles() {

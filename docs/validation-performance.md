@@ -401,7 +401,222 @@ width limit. The resulting ordinary daemon is
 Its final uninstrumented run again completes all 128 exact placements with no
 renderer or daemon error, one graphics device/atlas, eight gradient brushes and
 one text format. Input profiling is explicitly disabled in the recorded stats.
-The current readiness, latency, CPU and working-set results are tabulated in
+That D583 run records readiness 134.267 ms, external placement median/p99
+12.183/43.941 ms, own/whole-hook p99 100/743 µs and approximately 0.3125% idle
+CPU. Working-set samples are 46,780,416 / 51,515,392 / 49,446,912 bytes before
+input, after input and after idle. Current-candidate budgets are tabulated in
 [acceptance evidence](acceptance-status.md#performance-budgets); the failed limits
-remain open. Raw evidence is `target/workspace-labels-performance.json`, alongside
+remain open. Raw D583 evidence is `target/workspace-labels-performance.json`, alongside
 the native units, lifecycle, carousel and scoped pixel review for that candidate.
+
+### Separate composition surface pools
+
+The next candidate gives the bar and its feedback surface one retained
+DirectComposition surface factory and the border atlas another. Both factories
+use the existing DXGI device, Direct2D context and composition transaction. Atlas
+geometry, rendering, window styles and pre-draw waiting are unchanged. Microsoft
+documents allocation pooling per factory; this permits separation but does not
+guarantee smaller backing allocations or lower working set.
+[CreateSurfaceFactory](https://learn.microsoft.com/en-us/windows/win32/api/dcomp/nf-dcomp-idcompositiondevice2-createsurfacefactory).
+
+The immutable build identities in `target/surface-pools-build.json` are:
+
+| Artifact | SHA256 |
+| --- | --- |
+| Ordinary candidate `moon.exe` | `E9A8438CBB39D662CD3C894C9E6F973B7F522E2BB0A87B5C1ECBC1C1670B5EB9` |
+| `daemon_performance.exe` | `E3416FA3E52B2F011331FF7CCB5599DBB9788D6638468CB8F71B860C52626B63` |
+| `testwin.exe` | `71425F3BB9E36060917863DEB9CBFAE386EE8B83A5A5B742734CDA93022A934D` |
+| Native unit executable | `7243F19785630651027C53940EB5CB7CCA3EF9138E64367A310F16908FAE6023` |
+
+The baseline is the D583 larger-font candidate identified above. Native units
+pass 28/28, with four explicitly interactive tests excluded. The new test draws
+through both factories using the shared context, then commits and waits through
+the existing composition interface. It creates no window, so it establishes API
+compatibility rather than visible output or a memory improvement. Evidence:
+`target/surface-pools-native-units.txt`.
+
+Four fresh processes ran in baseline/candidate/candidate/baseline order on the
+same 4K, 125% display, followed by one no-input control for each binary. Each
+resize run completed 128 exact placements with no daemon or renderer error.
+Both controls preserved all eight native frames through the matched
+18.481-second interval and ten seconds idle. These runs originated from the
+Explorer context used by ordinary Moon, avoiding the previously observed host
+AppData redirection. No user configuration was changed.
+
+| Run | Working set before / after workload / after idle, bytes | External median / p99 | Idle CPU, % of one core |
+| --- | ---: | ---: | ---: |
+| Baseline 1 | 46,272,512 / 52,232,192 / 50,225,152 | 11.531 / 24.578 ms | 0.469 |
+| Candidate 2 | 46,088,192 / 54,824,960 / 52,871,168 | 12.275 / 24.280 ms | 0.312 |
+| Candidate 3 | 45,953,024 / 48,914,432 / 47,005,696 | 11.908 / 27.641 ms | 0.156 |
+| Baseline 4 | 46,014,464 / 51,523,584 / 49,487,872 | 12.552 / 37.450 ms | 0.156 |
+| Baseline no-input control 5 | 46,276,608 / 46,313,472 / 46,313,472 | No input | 0.156 |
+| Candidate no-input control 6 | 46,239,744 / 45,998,080 / 46,006,272 | No input | 0.000 |
+
+The separate region snapshots show a consistent reduction in anonymous mapped
+**resident** bytes across these resize repeats:
+
+| Run | Mapped resident bytes after workload / idle | Mapped committed bytes after workload / idle | Executable image resident bytes after workload |
+| --- | ---: | ---: | ---: |
+| Baseline 1 | 10,149,888 / 8,052,736 | 19,304,448 / 17,207,296 | 3,149,824 |
+| Candidate 2 | 7,675,904 / 5,578,752 | 21,401,600 / 19,304,448 | 8,757,248 |
+| Candidate 3 | 7,688,192 / 5,591,040 | 21,401,600 / 19,304,448 | 3,162,112 |
+| Baseline 4 | 10,162,176 / 8,065,024 | 19,304,448 / 17,207,296 | 3,149,824 |
+
+Mapped residency is approximately 2.47 MB lower in both candidate runs, while
+mapped commitment is 2,097,152 bytes higher. This is a measured residency
+tradeoff, not evidence that total allocation decreased. Candidate 2 also brings
+its entire 8,757,248-byte executable image into residency; the other resize runs
+retain approximately 3.15 MB. That accounts for the higher total despite lower
+mapped residency. It does not identify why those pages became resident or
+permit their subtraction from the process budget. The region snapshots remain
+non-atomic and are not substitutes for `WorkingSetSize`.
+
+Each candidate's 129 border draws receives a 1024×512 backing descriptor.
+Both baselines additionally receive 1056×704 and 3842×704 backing descriptors.
+The bar still receives 3842×704 descriptors during resize in both variants;
+neither control does. Descriptor sizes are not allocation identities and must
+not be added. Nominal surface bytes remain 2,865,156 throughout, with one device,
+one border atlas, eight gradient brushes, one text format and no recreation.
+The candidates report two factories. After ten seconds idle, GDI objects remain
+eight and handles are 350 for the candidates versus 348 for the baselines.
+
+The results support continuing visual and lifecycle verification of the two
+factories. They **do not pass the strict 50,000,000-byte memory budget**: candidate
+2 exceeds it both after input and after idle. Neither the favorable repeat nor
+the 0% CPU control establishes a universal result. Median placement latency and
+the remaining performance requirements also remain open. Candidate-specific
+visual, lifecycle and carousel acceptance is not established by these profiles.
+
+The initial wrapper stopped while displaying a timing field absent from
+no-input reports after saving valid baseline control 5. A retry then flattened its argument
+array incorrectly and could not find the probe executable. Both were harness
+failures; cleanup restored the normal desktop, and the corrected retry produced
+valid candidate control 6. They are not recorded as product failures. Retained
+evidence includes `target/surface-pools-{1-baseline,2-candidate,3-candidate,4-baseline,5-baseline-control,6-candidate-control}.json`,
+the profile/control cleanup reports and normal-desktop restoration reports.
+
+The same E9 candidate subsequently passes all 14 native lifecycle scenarios in
+`target/surface-pools-integration.json` and all ten workspace-carousel checks in
+`target/surface-pools-carousel.json`. These include exact native placement,
+reload, restart, recovery, workspace visibility and restoration. The visual
+guard's six automated checks also pass. Review of all 13 PNG hashes and images
+in `target/surface-pools-visual/` is **partial**, however: the initial focused
+window's top ring is not visible in the saved pixels. Seven other ring captures
+have continuous edges and corners; recoloring, focus changes, slot removal and
+bar text pass the scoped inspection. The five bar captures and two full-width
+survivor captures match the prior D583 image hashes. This observation does not
+attribute the initial missing edge to the renderer; a temporary inspection-order
+race remains to be checked. `visual-review.json`, `pixel-review.json` and the
+capture report retain that incomplete result. The scope is one 125% display with
+an explicit inspection-underlay order, not normal product Z-order or other
+physical DPI settings.
+
+### Observer timing and target-window callbacks
+
+The first two surface-pool runs retain 128 observer records apiece, in trial
+order. Probe `E3416FA3E52B2F011331FF7CCB5599DBB9788D6638468CB8F71B860C52626B63`
+times its existing trigger injection and native/DWM-frame readback calls without
+changing their order, short-circuit behavior, sleeps or completion criterion.
+Every record matches the existing sorted completion arrays; call counts plus
+short-circuit skips account for every attempted eight-target pass. The daemon
+reports no error in either run.
+
+| Run | External completion median / p99 | Native outer observation median / p99 | DWM-frame reads, cumulative per trial median / p99 | Native reads, cumulative per trial median |
+| --- | ---: | ---: | ---: | ---: |
+| D583 baseline 1 | 11.531 / 24.578 ms | 11.346 / 24.264 ms | 2.893 / 15.408 ms | 5.6 µs |
+| E9 candidate 2 | 12.275 / 24.280 ms | 11.895 / 23.232 ms | 3.239 / 10.887 ms | 5.4 µs |
+
+These percentiles describe separate populations and cannot be subtracted to
+derive a placement duration. The paired candidate trial 30 is more informative:
+external completion is 49.274 ms and native observation 48.941 ms, while the
+DWM-frame wrappers consume 40.717 ms, including one 28.005-ms call. Sleeps consume
+8.144 ms and trigger injection 0.393 ms. Native reads share this observer thread
+and cannot run while its DWM-frame call is pending. Similar native and DWM
+completion observations therefore do not independently exclude delayed
+observation. Wrapper timings include the existing DWM-to-GetWindowRect fallback
+and possible descheduling; they do not identify a kernel wait or prove when the
+target geometry changed. Evidence: `target/surface-pools-1-baseline.json` and
+`target/surface-pools-2-candidate.json`.
+
+A separate opt-in target run keeps the same immutable E9 daemon
+`E9A8438CBB39D662CD3C894C9E6F973B7F522E2BB0A87B5C1ECBC1C1670B5EB9`, with
+probe `41E4AD28EE8789FE806509BEFA055255F9C8BFD8888AEF656937BF4379E271A8` and
+helper `664F516E8D0BA321A912EE5EA62626D23B70AFA27CB041A3B61144097058B77B`.
+`MOON_PERF_PLACEMENT_TIMING=1` enables six numeric properties per owned window:
+an odd/even publication sequence, QPC timestamp and four actual outer edges.
+The helper publishes after `DefWindowProc(WM_WINDOWPOSCHANGED)` and
+`GetWindowRect`; the probe verifies ownership, consistent sequence, exact
+rectangle and freshness. It reads metadata before a trial or after recording
+all existing completion timings. Unchanged targets contribute no old timestamp.
+The QPC frequency is 10,000,000 Hz on this host. These are same-system elapsed
+comparisons, subject to Microsoft's one-tick cross-thread ordering uncertainty.
+[QPC contract](https://learn.microsoft.com/en-us/windows/win32/sysinfo/acquiring-high-resolution-time-stamps).
+
+All 128 trials pass, with all eight targets changed in each trial and all 1,024
+samples fresh and complete. The latest target callback per trial has median/p99
+11.886/40.989 ms; the unchanged external completion metric is 11.837/40.759 ms.
+In 86 trials the latest callback timestamp is later than the already-recorded
+external observation. Trial 54 records callback 47.512 ms, external observation
+46.260 ms and 37.182 ms inside DWM-frame reads. The 1.252-ms late callback is
+direct evidence that this timestamp is an **upper bound**, not the instant the
+rectangle first changed. The helper handles all eight windows on one GUI
+thread, and callback timestamps follow their window order in every trial.
+
+Microsoft documents that `WM_WINDOWPOSCHANGED` arrives after a position change,
+and its default processing sends `WM_SIZE` and `WM_MOVE`. Our timestamp also
+includes that default processing and any intervening scheduling. It is neither
+a compositor visibility timestamp nor proof that observation alone explains the
+remaining latency.
+[Message contract](https://learn.microsoft.com/en-us/windows/win32/winmsg/wm-windowposchanged).
+
+The smallest further discriminator, if needed, is an entry timestamp with the
+same actual rectangle plus the existing post-default timestamp in this owned
+helper. It would establish whether elapsed time lies inside default callback
+processing. A late entry would still leave request delivery, target scheduling
+and pre-callback window-manager work unresolved; attributing those requires a
+correlated scheduler/wait trace rather than more priority or repaint-flag
+experiments. [Windows CPU trace analysis](https://learn.microsoft.com/en-us/windows-hardware/test/wpt/cpu-analysis).
+No such follow-up or production optimization is claimed here. Existing latency
+budgets remain unmet, and diagnostic overhead is included rather than deducted.
+
+Build/test identities and successful portable correlation checks are retained
+in `target/placement-observer-build.json`; the actual target run is
+`target/surface-pools-target-placement.json`, with cleanup and desktop
+restoration in `target/target-placement-{cleanup,restored}.json`.
+
+### Final factory candidate, 13 November 2026
+
+Ordinary daemon
+`9608872A54F93B28221A918D48E2CB1B487884D10A2BCC1A19ECF4945D4FCE94`
+passes all 128 exact placements with no daemon error in
+`target/factory-final-performance.json`. Readiness is **120.659 ms**, external
+median/p99 **12.348/44.500 ms**, own-hook p99 **104 µs**, and whole-callback p99
+**938 µs**. The ten-second idle sample is **0.4687147%** of one core. Input
+dispatch profiling and target-window callback profiling are both disabled;
+the probe's existing aggregate readback timings remain included.
+
+Working set is **45,961,216 / 49,188,864 / 47,472,640 bytes** before input, after
+input and after idle. All three samples are below 50,000,000 bytes in this run.
+They do not establish a continuous peak or universal memory bound: the earlier
+E9 runs retained different executable-image residency and one exceeded the
+limit. Readiness passes; placement latency, hook latency and literal-zero idle
+CPU remain unmet. The exact final binary also passes 14 lifecycle and ten
+carousel cases. Its per-target visual inspection passes all 13 reviewed PNGs:
+eight complete rings, five bar hashes matching D583 and zero residual pixels in
+the removed-split region. All 13 ordering brackets held on attempt one. This
+covers explicit inspection ordering at 4K/125%, not normal Z-order or other DPI.
+Reports are in `target/factory-final-target-visual/`; the earlier E9 and 960
+lowest-helper partial reviews remain preserved. The recapture is consistent
+with earlier fixture occlusion but does not identify an intervening window.
+Build identities are in
+`target/factory-{final,install,validation}-build.json`; the staged UIAccess image
+`9ECFCE8BF68424B9DB46D344D4938445076FB1F886C9DD799D644C8815DC7040`
+has not completed signed installation or runtime acceptance.
+
+After these checks, the same ordinary 960 daemon was promoted through Explorer
+and verified running as PID 10844 with EC22 Settings adjacent. Four original
+window/process/birth identities, workspace assignments, exact visible frames,
+prior focus and the personal configuration are preserved; its token is medium
+integrity without UIAccess and no previous manager is running. This separate
+live result is in `target/factory-final-live.json`; it is not another performance
+measurement or completion of the pending signed-install and soak checks.
