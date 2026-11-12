@@ -3,7 +3,7 @@
 use moon_core::{
     geometry::{Point, Rect},
     ids::{MonitorId, WindowId},
-    scene::{self, BarScene, BorderScene, Scene},
+    scene::{self, BarItem, BarScene, BorderScene, Scene},
     world::World,
 };
 use std::{
@@ -91,8 +91,9 @@ impl SurfaceDrawDiagnostics {
     }
 }
 
-/// Bounded lifetime counters. Size observations cannot be summed into resident
-/// memory or a live-buffer count; no graphics pointers or contents are retained.
+/// Bounded lifetime counters and a current retained-layout count. Size observations
+/// cannot be summed into resident memory or a live-buffer count; no graphics
+/// pointers or contents are retained by these diagnostics.
 #[derive(Clone, Default, serde::Serialize)]
 pub struct RendererDiagnostics {
     render_calls: u64,
@@ -106,6 +107,7 @@ pub struct RendererDiagnostics {
     border_atlases_created: u64,
     text_formats_created: u64,
     text_layouts_created: u64,
+    text_layouts_retained: usize,
     gradient_brushes_created: u64,
     bar: SurfaceDrawDiagnostics,
     border: SurfaceDrawDiagnostics,
@@ -832,6 +834,79 @@ struct TextFormat {
     format: IDWriteTextFormat,
 }
 
+struct TextLayout {
+    text: String,
+    font: String,
+    size: f32,
+    width: i32,
+    height: i32,
+    layout: IDWriteTextLayout,
+}
+
+#[derive(Default)]
+struct TextLayouts(Vec<Option<TextLayout>>);
+
+impl TextLayouts {
+    /// Retain only current visible item slots, including when no drawing is needed.
+    fn prepare(&mut self, count: usize, visible: bool) {
+        let count = if visible { count } else { 0 };
+        let shrinking = count < self.0.len();
+        self.0.resize_with(count, || None);
+        if shrinking {
+            // Release the slot storage as well as the removed COM/string values.
+            self.0.shrink_to_fit();
+        }
+    }
+}
+
+fn text_layout(
+    graphics: &Graphics,
+    format: &mut Option<TextFormat>,
+    cached: &mut Option<TextLayout>,
+    text: &str,
+    bounds: Rect,
+    font: &str,
+    size: f32,
+) -> Result<IDWriteTextLayout> {
+    let width = bounds.width.max(1);
+    let height = bounds.height.max(1);
+    if cached.as_ref().is_none_or(|cached| {
+        cached.text != text
+            || cached.font != font
+            || cached.size != size
+            || cached.width != width
+            || cached.height != height
+    }) {
+        let format = text_format(graphics, format, font, size)?;
+        let utf16: Vec<u16> = text.encode_utf16().collect();
+        let layout = unsafe {
+            graphics.write.CreateTextLayout(&utf16, &format, width as f32, height as f32)?
+        };
+        {
+            let mut counters = graphics.diagnostics.borrow_mut();
+            counters.text_layouts_created = counters.text_layouts_created.saturating_add(1);
+        }
+        let mut offset = 0u32;
+        for character in text.chars() {
+            let len = character.len_utf16() as u32;
+            if ('\u{e000}'..='\u{f8ff}').contains(&character)
+                || ('\u{f0000}'..='\u{10ffff}').contains(&character)
+            {
+                let range = DWRITE_TEXT_RANGE { startPosition: offset, length: len };
+                unsafe {
+                    layout.SetFontCollection(&graphics.symbols, range)?;
+                    layout.SetFontFamilyName(w!("Symbols Nerd Font"), range)?;
+                }
+            }
+            offset += len;
+        }
+        // Never publish a partially configured layout after a fallible font override.
+        *cached =
+            Some(TextLayout { text: text.into(), font: font.into(), size, width, height, layout });
+    }
+    Ok(cached.as_ref().expect("created text layout").layout.clone())
+}
+
 fn text_format(
     graphics: &Graphics,
     cached: &mut Option<TextFormat>,
@@ -917,8 +992,10 @@ struct Canvas {
     surface: Option<IDCompositionSurface>,
     strips: Vec<IDCompositionVisual>,
     border_atlas: Option<(Rect, IDCompositionSurface)>,
-    // One format per canvas and one brush per current ring: no history cache.
+    // One format per canvas, one layout per visible item and one brush per ring.
+    // Entries are replaced in place; no text or widget history is retained.
     text_format: Option<TextFormat>,
+    text_layouts: TextLayouts,
     border_brushes: Vec<BorderBrush>,
     _target: IDCompositionTarget,
     visual: IDCompositionVisual,
@@ -1103,6 +1180,7 @@ impl Canvas {
                 strips: Vec::new(),
                 border_atlas: None,
                 text_format: None,
+                text_layouts: TextLayouts::default(),
                 border_brushes: Vec::new(),
                 _target: target,
                 visual,
@@ -1165,37 +1243,22 @@ impl Canvas {
     fn text(
         &mut self,
         graphics: &Graphics,
-        text: &str,
+        index: usize,
+        item: &BarItem,
         bounds: Rect,
         font: &str,
-        size: f32,
         color: &str,
     ) -> Result<()> {
+        let layout = text_layout(
+            graphics,
+            &mut self.text_format,
+            &mut self.text_layouts.0[index],
+            &item.text,
+            bounds,
+            font,
+            item.font_size,
+        )?;
         unsafe {
-            let format = text_format(graphics, &mut self.text_format, font, size)?;
-            let utf16: Vec<u16> = text.encode_utf16().collect();
-            let layout = graphics.write.CreateTextLayout(
-                &utf16,
-                &format,
-                bounds.width.max(1) as f32,
-                bounds.height.max(1) as f32,
-            )?;
-            {
-                let mut counters = graphics.diagnostics.borrow_mut();
-                counters.text_layouts_created = counters.text_layouts_created.saturating_add(1);
-            }
-            let mut offset = 0u32;
-            for character in text.chars() {
-                let len = character.len_utf16() as u32;
-                if ('\u{e000}'..='\u{f8ff}').contains(&character)
-                    || ('\u{f0000}'..='\u{10ffff}').contains(&character)
-                {
-                    let range = DWRITE_TEXT_RANGE { startPosition: offset, length: len };
-                    layout.SetFontCollection(&graphics.symbols, range)?;
-                    layout.SetFontFamilyName(w!("Symbols Nerd Font"), range)?;
-                }
-                offset += len;
-            }
             let brush = self.context.CreateSolidColorBrush(&parse_color(color, 1.0), None)?;
             self.context.DrawTextLayout(
                 Vector2 { X: bounds.x as f32, Y: bounds.y as f32 },
@@ -1229,7 +1292,7 @@ impl Canvas {
                 })
                 .collect();
             let scale = GetDpiForWindow(self.hwnd).max(96) as f32 / 96.0;
-            for item in &bar.items {
+            for (index, item) in bar.items.iter().enumerate() {
                 let bounds = item.rect.translated(-bar.rect.x, -bar.rect.y);
                 let highlighted = preferences.contrast
                     && item.command.is_some()
@@ -1254,7 +1317,8 @@ impl Canvas {
                 }
                 self.text(
                     graphics,
-                    &item.text,
+                    index,
+                    item,
                     bounds.inset(moon_core::geometry::Edges {
                         left: (7.0 * scale).round() as i32,
                         right: (7.0 * scale).round() as i32,
@@ -1262,7 +1326,6 @@ impl Canvas {
                         bottom: 0,
                     }),
                     &bar.font,
-                    item.font_size,
                     if highlighted { &preferences.highlight_text } else { &item.foreground },
                 )?;
                 if item.selected {
@@ -1610,7 +1673,10 @@ pub struct Surfaces {
 }
 impl Surfaces {
     pub fn diagnostics(&self) -> RendererDiagnostics {
-        self.graphics.diagnostics.borrow().clone()
+        let mut diagnostics = self.graphics.diagnostics.borrow().clone();
+        diagnostics.text_layouts_retained =
+            self.bars.values().map(|canvas| canvas.text_layouts.0.iter().flatten().count()).sum();
+        diagnostics
     }
     /// Nominal RGBA surface pixels, excluding compositor buffers, caches and other process memory.
     pub fn surface_pixel_bytes(&self) -> u64 {
@@ -1793,6 +1859,7 @@ impl Surfaces {
                 );
             }
             let canvas = self.bars.get_mut(&bar.monitor).expect("inserted canvas");
+            canvas.text_layouts.prepare(bar.items.len(), bar.visible);
             let entering = bar.visible && !canvas.visible;
             canvas.position(bar.rect, bar.visible)?;
             let same = self
@@ -2201,6 +2268,125 @@ mod tests {
             assert_eq!(actual[0].color, parse_color("#00ff00", 1.0));
             assert_eq!(actual[1].color, parse_color("#ffffff", 1.0));
         }
+
+        let mut layouts = TextLayouts::default();
+        layouts.prepare(2, true);
+        // The emoji occupies two UTF-16 units before the private-use glyphs.
+        let text = "A\u{1f600}\u{f017}\u{f0001}B";
+        let bounds = Rect::new(20, 10, 240, 32);
+        let initial =
+            text_layout(&graphics, &mut format, &mut layouts.0[0], text, bounds, "Segoe UI", 14.0)
+                .unwrap();
+        for _ in 0..128 {
+            let reused = text_layout(
+                &graphics,
+                &mut format,
+                &mut layouts.0[0],
+                text,
+                bounds.translated(100, 50),
+                "Segoe UI",
+                14.0,
+            )
+            .unwrap();
+            assert_eq!(reused.as_raw(), initial.as_raw());
+        }
+        assert_eq!(diagnostics.borrow().text_layouts_created, 1);
+        unsafe {
+            let mut family = [0u16; 64];
+            initial.GetFontFamilyName(0, &mut family, None).unwrap();
+            assert_eq!(String::from_utf16_lossy(&family[..8]), "Segoe UI");
+            for position in [3, 4] {
+                family.fill(0);
+                initial.GetFontFamilyName(position, &mut family, None).unwrap();
+                let length = family.iter().position(|&unit| unit == 0).unwrap();
+                assert_eq!(String::from_utf16_lossy(&family[..length]), "Symbols Nerd Font");
+                let mut collection = None;
+                initial.GetFontCollection(position, &mut collection, None).unwrap();
+                assert_eq!(collection.unwrap().as_raw(), graphics.symbols.as_raw());
+            }
+            let mut effect = None;
+            initial.GetDrawingEffect(0, &mut effect, None).unwrap();
+            assert!(effect.is_none(), "theme colours must remain supplied by the drawing brush");
+            assert_eq!(initial.GetMaxWidth(), 240.0);
+            assert_eq!(initial.GetMaxHeight(), 32.0);
+            assert_eq!(initial.GetWordWrapping(), DWRITE_WORD_WRAPPING_NO_WRAP);
+            assert_eq!(initial.GetParagraphAlignment(), DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            let mut trimming = DWRITE_TRIMMING::default();
+            let mut ellipsis = None;
+            initial.GetTrimming(&mut trimming, &mut ellipsis).unwrap();
+            assert_eq!(trimming.granularity, DWRITE_TRIMMING_GRANULARITY_CHARACTER);
+            assert!(ellipsis.is_some());
+        }
+
+        let mut previous = initial;
+        for (text, font, size, bounds) in [
+            ("Changed text", "Segoe UI", 14.0, bounds),
+            ("Changed text", "Arial", 14.0, bounds),
+            ("Changed text", "Arial", 18.0, bounds),
+            ("Changed text", "Arial", 18.0, Rect::new(20, 10, 120, 32)),
+            ("Changed text", "Arial", 18.0, Rect::new(20, 10, 120, 40)),
+        ] {
+            let updated =
+                text_layout(&graphics, &mut format, &mut layouts.0[0], text, bounds, font, size)
+                    .unwrap();
+            assert_ne!(updated.as_raw(), previous.as_raw());
+            unsafe {
+                assert_eq!(updated.GetMaxWidth(), bounds.width as f32);
+                assert_eq!(updated.GetMaxHeight(), bounds.height as f32);
+                let mut actual_size = 0.0;
+                updated.GetFontSize(0, &mut actual_size, None).unwrap();
+                assert_eq!(actual_size, size);
+                let mut actual_font = [0u16; 64];
+                updated.GetFontFamilyName(0, &mut actual_font, None).unwrap();
+                let length = actual_font.iter().position(|&unit| unit == 0).unwrap();
+                assert_eq!(String::from_utf16_lossy(&actual_font[..length]), font);
+                let mut line = [DWRITE_LINE_METRICS::default(); 1];
+                let mut lines = 0;
+                updated.GetLineMetrics(Some(&mut line), &mut lines).unwrap();
+                assert_eq!(lines, 1);
+                assert_eq!(line[0].length as usize, text.encode_utf16().count());
+            }
+            previous = updated;
+        }
+        assert_eq!(diagnostics.borrow().text_layouts_created, 6);
+
+        let removed = text_layout(
+            &graphics,
+            &mut format,
+            &mut layouts.0[1],
+            "Removed widget",
+            bounds,
+            "Segoe UI",
+            14.0,
+        )
+        .unwrap();
+        layouts.prepare(1, true);
+        assert_eq!(layouts.0.len(), 1);
+        assert_eq!(layouts.0[0].as_ref().unwrap().layout.as_raw(), previous.as_raw());
+        layouts.prepare(2, true);
+        assert!(layouts.0[1].is_none(), "removed widget must not retain a history entry");
+        let readded = text_layout(
+            &graphics,
+            &mut format,
+            &mut layouts.0[1],
+            "Removed widget",
+            bounds,
+            "Segoe UI",
+            14.0,
+        )
+        .unwrap();
+        assert_ne!(readded.as_raw(), removed.as_raw());
+        assert_eq!(diagnostics.borrow().text_layouts_created, 8);
+        layouts.prepare(0, true);
+        assert!(layouts.0.is_empty());
+        layouts.prepare(2, true);
+        assert!(layouts.0.iter().all(Option::is_none));
+        let _ =
+            text_layout(&graphics, &mut format, &mut layouts.0[0], text, bounds, "Segoe UI", 14.0)
+                .unwrap();
+        layouts.prepare(2, false);
+        assert!(layouts.0.is_empty(), "a hidden bar must release every retained layout");
+        assert_eq!(diagnostics.borrow().text_layouts_created, 9);
     }
 
     #[test]

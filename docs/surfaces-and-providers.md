@@ -173,20 +173,35 @@ account for DLL, tooltip, icon, or compositor overhead. The full-process memory
 budget must be measured again against the completed application.
 
 A separate provider worker samples local CPU, memory, network, battery, volume,
-keyboard language and clock values no faster than once a second. Media metadata
-uses pending WinRT operations and cancellation after five seconds; it never
-waits for a player on the message-loop thread. Missing hardware stays absent;
-failed providers expose `<provider>.error` instead of fabricated values.
+keyboard language and clock values no faster than once a second. Configuration
+changes select the built-in provider families needed by bar templates, including
+subkeys and error values. Literal templates do not poll unrelated providers.
+Formats on `exec` widgets still count because they also control optional-widget
+visibility. Direct `exec` widget IDs retain their provider dependencies and the
+existing fallback/override order when an ID overlaps a built-in value, even
+with the bar disabled. Explicit custom commands keep their configured schedule.
+
+Media metadata uses pending WinRT operations and cancellation after five seconds;
+it never waits for a player on the message-loop thread. When media becomes
+unused, Moon requests cancellation and releases its retained requests, manager
+and metadata. Re-enabling media permits acquisition on the next sample without
+waiting for the previous retry deadline. Re-enabled CPU sampling starts with a
+fresh baseline. Missing hardware stays absent; failed providers expose
+`<provider>.error` instead of fabricated values.
 `system.theme` follows Microsoft's documented `UISettings` foreground-luminance
 test and supplies `dark` or `light` to both the bar palette and native floating
-window border colors.
+window border colors. It remains sampled for the system theme setting or an
+explicit theme-value dependency, including when the bar is disabled. These
+selection rules do not change the regular maintenance loop or establish a CPU
+performance improvement by themselves.
 
 `exec` widgets run through the medium-integrity desktop shell. The capture
 worker joins a kill-on-close Windows job before executing the command. Output
 is bounded to 4 KiB and runtime to five seconds. Results are cached for each
 widget's configured interval. Reloading a changed command invalidates its cache.
 
-Weather makes no request unless a location is explicitly configured. It uses
+Weather makes no request unless a location is explicitly configured and a
+template or direct `exec` ID needs a weather value. It uses
 Open-Meteo HTTPS with Windows certificate validation, finite request timeouts,
 a bounded response and a location-specific cache (15 minutes by default).
 Open-Meteo weather data is attributed by `weather.source`. No API key is needed.

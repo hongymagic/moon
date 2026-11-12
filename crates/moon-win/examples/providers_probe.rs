@@ -4,7 +4,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     use moon_win::{providers::Providers, runtime};
     use std::time::{Duration, Instant};
     let mut providers = Providers::new();
-    providers.set_config(&Config::default());
+    // This diagnostic explicitly exercises the system palette provider; dark
+    // configurations without a theme placeholder do not need to sample it.
+    let mut config = Config { theme: "system".into(), ..Config::default() };
+    providers.set_config(&config);
     let first = providers.sample();
     assert!(
         !first.keys().any(|key| key.starts_with("weather")),
@@ -16,7 +19,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         assert!(values.contains_key(key), "provider missing: {key}; keys: {:?}", values.keys());
     }
     assert!(matches!(values.get("system.theme").map(String::as_str), Some("dark" | "light")));
-    let mut config = Config::default();
     config.bar.widgets.push(moon_core::config::WidgetConfig {
         id: "exec-smoke".into(),
         format: "{exec-smoke}".into(),

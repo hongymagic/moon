@@ -61,6 +61,12 @@ pub fn format_template(template: &str, values: &BTreeMap<String, String>) -> Str
     out.push_str(rest);
     out
 }
+/// Keys used by optional-widget visibility. Keep its existing split semantics:
+/// nested braces may expose a key even when substitution treats it differently.
+/// Provider selection must preserve that conservative dependency too.
+pub fn template_placeholders(template: &str) -> impl Iterator<Item = &str> {
+    template.split('{').skip(1).filter_map(|s| s.split_once('}').map(|(key, _)| key))
+}
 pub fn derive(world: &World, providers: &BTreeMap<String, String>, error: Option<&str>) -> Scene {
     let config = &world.config;
     let plan = world.plan();
@@ -152,12 +158,7 @@ pub fn derive(world: &World, providers: &BTreeMap<String, String>, error: Option
                 format_template(&widget.format, &values)
             };
             // Optional providers do not reserve blank slots or display dangling units.
-            let placeholders = widget
-                .format
-                .split('{')
-                .skip(1)
-                .filter_map(|s| s.split_once('}').map(|(key, _)| key))
-                .collect::<Vec<_>>();
+            let placeholders = template_placeholders(&widget.format).collect::<Vec<_>>();
             if text.trim().is_empty()
                 || (!placeholders.is_empty()
                     && placeholders.iter().all(|key| values.get(*key).is_none_or(String::is_empty)))
@@ -744,5 +745,48 @@ widgets=[{id="custom",format="Hello",color="#abcdef"}]
             format_template("CPU {cpu}% {missing}", &BTreeMap::from([("cpu".into(), "7".into())])),
             "CPU 7% "
         );
+    }
+    #[test]
+    fn placeholder_dependencies_preserve_optional_visibility_and_substitution() {
+        let values = BTreeMap::from([("cpu".into(), "7%".into())]);
+        assert_eq!(
+            template_placeholders("fixed {cpu.percent} {volume.error}").collect::<Vec<_>>(),
+            ["cpu.percent", "volume.error"]
+        );
+        assert_eq!(template_placeholders("fixed {cpu").count(), 0);
+        assert_eq!(format_template("fixed {cpu", &values), "fixed {cpu");
+        // The existing optional visibility scan sees the inner key, whereas
+        // substitution looks up the literal key "{cpu". Preserve both rules.
+        assert_eq!(template_placeholders("prefix {{cpu}").collect::<Vec<_>>(), ["cpu"]);
+        assert_eq!(format_template("prefix {{cpu}", &values), "prefix ");
+        assert_eq!(
+            template_placeholders("{} {cpu}} {unknown}").collect::<Vec<_>>(),
+            ["", "cpu", "unknown"]
+        );
+    }
+    #[test]
+    fn exec_text_still_requires_its_optional_format_dependency() {
+        let config = Config::load(
+            r#"
+            [bar]
+            widgets=[{id="custom",format="prefix {{memory.percent}",exec="echo fixture"}]
+        "#,
+        )
+        .unwrap();
+        let world = World::new(
+            config,
+            vec![Monitor {
+                id: MonitorId(1),
+                name: "screen".into(),
+                bounds: Rect::new(0, 0, 1920, 1080),
+                work_area: Rect::new(0, 0, 1920, 1080),
+                scale: 1.0,
+            }],
+        )
+        .unwrap();
+        let mut values = BTreeMap::from([("custom".into(), "fixture".into())]);
+        assert!(derive(&world, &values, None).bars[0].items.is_empty());
+        values.insert("memory.percent".into(), "42".into());
+        assert_eq!(derive(&world, &values, None).bars[0].items[0].text, "fixture");
     }
 }

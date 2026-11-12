@@ -36,6 +36,16 @@ struct PlacementStamp {
     sequence: u64,
     qpc: i64,
     outer: [i32; 4],
+    entry_qpc: i64,
+    entry_outer: [i32; 4],
+}
+
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TargetTicks {
+    callback: u64,
+    entry: u64,
+    entry_to_post_default: u64,
 }
 
 #[cfg(any(windows, test))]
@@ -44,7 +54,7 @@ fn changed_target_ticks(
     after: PlacementStamp,
     expected: [i32; 4],
     key_qpc: i64,
-) -> Result<Option<u64>, &'static str> {
+) -> Result<Option<TargetTicks>, &'static str> {
     if before.sequence == 0
         || after.sequence < before.sequence
         || !before.sequence.is_multiple_of(2)
@@ -52,8 +62,12 @@ fn changed_target_ticks(
     {
         return Err("missing, incomplete or regressed helper placement sequence");
     }
-    if after.outer != expected {
+    if after.outer != expected || after.entry_outer != expected {
         return Err("helper placement snapshot does not match the exact expected outer rectangle");
+    }
+    let span = after.qpc.checked_sub(after.entry_qpc).ok_or("helper callback QPC overflow")?;
+    if span < 0 {
+        return Err("helper post-default timestamp precedes its paired entry timestamp");
     }
     if before.outer == expected {
         return Ok(None);
@@ -61,12 +75,17 @@ fn changed_target_ticks(
     if after.sequence == before.sequence {
         return Err("changed target has no new helper placement callback");
     }
-    let elapsed = after.qpc.checked_sub(key_qpc).ok_or("helper placement QPC overflow")?;
-    if elapsed < -1 {
-        return Err("changed target callback predates the trigger");
+    let entry = after.entry_qpc.checked_sub(key_qpc).ok_or("helper entry QPC overflow")?;
+    let callback = after.qpc.checked_sub(key_qpc).ok_or("helper placement QPC overflow")?;
+    if entry < -1 {
+        return Err("changed target callback entry predates the trigger");
     }
     // Microsoft documents +/- one tick ordering uncertainty across threads.
-    Ok(Some(elapsed.max(0) as u64))
+    Ok(Some(TargetTicks {
+        callback: callback.max(0) as u64,
+        entry: entry.max(0) as u64,
+        entry_to_post_default: span as u64,
+    }))
 }
 
 #[cfg(windows)]
@@ -114,22 +133,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             let counter = read(1);
             let encoded = [read(2), read(3), read(4), read(5)];
+            let entry_counter = read(6);
+            let entry_encoded = [read(7), read(8), read(9), read(10)];
             if sequence != read(0) {
                 continue;
             }
             if platform::process_id(id) != owner {
                 return Err("placement diagnostic owner changed while reading the snapshot");
             }
-            if counter == 0 || counter > i64::MAX as u64 {
+            if counter == 0
+                || counter > i64::MAX as u64
+                || entry_counter == 0
+                || entry_counter > counter
+            {
                 return Err("helper placement QPC is missing or invalid");
             }
-            if encoded.iter().any(|&value| value == 0 || value > u64::from(u32::MAX) + 1) {
+            if encoded
+                .iter()
+                .chain(&entry_encoded)
+                .any(|&value| value == 0 || value > u64::from(u32::MAX) + 1)
+            {
                 return Err("helper placement rectangle is missing or invalid");
             }
             return Ok(PlacementStamp {
                 sequence,
                 qpc: counter as i64,
                 outer: encoded.map(|value| (value - 1) as u32 as i32),
+                entry_qpc: entry_counter as i64,
+                entry_outer: entry_encoded.map(|value| (value - 1) as u32 as i32),
             });
         }
         Err("helper placement snapshot remained inconsistent across eight reads")
@@ -481,12 +512,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sequence_before: u64,
         sequence_after: u64,
         callback_us: Option<u64>,
+        entry_us: Option<u64>,
+        entry_to_post_default_us: Option<u64>,
     }
     #[derive(serde::Serialize)]
     struct TargetTrial {
         trial: usize,
         changed_windows: usize,
         latest_callback_us: u64,
+        latest_entry_us: u64,
         windows: Vec<TargetWindowTiming>,
     }
     // Exactly one fixed-size record per trial; never retain per-poll histories.
@@ -613,6 +647,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 trial: index,
                 changed_windows: 0,
                 latest_callback_us: 0,
+                latest_entry_us: 0,
                 windows: Vec::with_capacity(expected.len()),
             };
             for (window, placement) in expected.iter().enumerate() {
@@ -625,17 +660,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     placement.rect.right() + right,
                     placement.rect.bottom() + bottom,
                 ];
-                let callback_us = changed_target_ticks(before, after, outer, key_qpc)?
-                    .map(|ticks| (u128::from(ticks) * 1_000_000 / qpc_frequency as u128) as u64);
-                if let Some(elapsed) = callback_us {
+                let ticks = changed_target_ticks(before, after, outer, key_qpc)?;
+                let to_us = |ticks| (u128::from(ticks) * 1_000_000 / qpc_frequency as u128) as u64;
+                let callback_us = ticks.map(|ticks| to_us(ticks.callback));
+                let entry_us = ticks.map(|ticks| to_us(ticks.entry));
+                let entry_to_post_default_us =
+                    ticks.map(|ticks| to_us(ticks.entry_to_post_default));
+                if let Some(ticks) = ticks {
                     trial.changed_windows += 1;
-                    trial.latest_callback_us = trial.latest_callback_us.max(elapsed);
+                    trial.latest_callback_us = trial.latest_callback_us.max(to_us(ticks.callback));
+                    trial.latest_entry_us = trial.latest_entry_us.max(to_us(ticks.entry));
                 }
                 trial.windows.push(TargetWindowTiming {
                     window,
                     sequence_before: before.sequence,
                     sequence_after: after.sequence,
                     callback_us,
+                    entry_us,
+                    entry_to_post_default_us,
                 });
             }
             if trial.changed_windows == 0 {
@@ -687,7 +729,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "target_placement_enabled":target_timing,
         "target_placement_qpc_frequency":qpc_frequency,
         "target_placement_trials":target_trials,
-        "target_placement_scope":"Opt-in MOON_PERF_PLACEMENT_TIMING=1. Owned testwin publishes actual outer rectangle and same-system QPC after WM_WINDOWPOSCHANGED default handling, an upper bound on geometry change, not compositor visibility. Stable odd/even sequence and process ownership are checked. Exact unchanged targets contribute no timestamp; changed targets require a fresh sequence and QPC at or after trigger (one-tick cross-thread uncertainty). Metadata reads occur before trial timing or after all existing completion timestamps; only the QPC start read is added inside the existing trigger interval. Helper publication overhead remains real work; these diagnostic timings do not replace acceptance metrics.",
+        "target_placement_scope":"Opt-in MOON_PERF_PLACEMENT_TIMING=1. Owned testwin publishes one V2 paired snapshot: entry QPC before its actual GetWindowRect read, and the existing callback QPC after DefWindowProc(WM_WINDOWPOSCHANGED) and its actual rectangle read. Geometry is observed at each read, not at the QPC instant. entry_to_post_default_us includes both rectangle reads, default WM_SIZE/WM_MOVE processing and scheduling; it is not pure default-handler CPU time or compositor visibility. Stable odd/even sequence and process ownership are checked. Both rectangles must exactly match; unchanged targets contribute no timestamp, and changed targets require a fresh sequence and entry at or after trigger (one-tick cross-thread uncertainty). Metadata reads occur before trial timing or after all existing completion timestamps; only the QPC start read is added inside the existing trigger interval. Helper publication overhead remains real work; these diagnostic timings do not replace acceptance metrics.",
         "observer_scope":"128 fixed-size records in trial order. Readback total/max nanoseconds time only the existing native_rect/platform::window_rect wrappers (the latter retains its DWM-to-GetWindowRect fallback); elapsed time may include descheduling. Trigger microseconds include the existing inject helper. Short-circuit skips count unqueried targets within attempted passes; completed-pass skips count whole native passes omitted after native completion. Input/read order, deadlines, polling and acceptance timing boundaries are unchanged; added measurement overhead remains included. This diagnostic is not an uninstrumented budget comparison.",
         "hook_phase_timings":active["hooks"]["phases"],
         "hook_phase_scope":"Cumulative elapsed microseconds through after_input; diagnostic phases remain included in the unchanged own/whole callback metrics. Percentiles are not additive; 4096 is the terminal bucket lower bound.",
@@ -705,7 +747,11 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{PlacementStamp, ReadbackTiming, changed_target_ticks};
+    use super::{PlacementStamp, ReadbackTiming, TargetTicks, changed_target_ticks};
+
+    fn stamp(sequence: u64, entry_qpc: i64, qpc: i64, outer: [i32; 4]) -> PlacementStamp {
+        PlacementStamp { sequence, qpc, outer, entry_qpc, entry_outer: outer }
+    }
 
     #[test]
     fn readback_timing_preserves_short_circuit_and_read_errors() {
@@ -737,16 +783,19 @@ mod tests {
 
     #[test]
     fn unchanged_targets_do_not_contribute_old_callback_times() {
-        let old = PlacementStamp { sequence: 2, qpc: 50, outer: [-400, 20, 0, 320] };
+        let old = stamp(2, 40, 50, [-400, 20, 0, 320]);
         assert_eq!(changed_target_ticks(old, old, old.outer, 1000), Ok(None));
     }
 
     #[test]
     fn changed_targets_require_exact_fresh_consistent_snapshots() {
-        let before = PlacementStamp { sequence: 2, qpc: 50, outer: [-400, 20, 0, 320] };
+        let before = stamp(2, 40, 50, [-400, 20, 0, 320]);
         let expected = [-400, 20, 50, 350];
-        let after = PlacementStamp { sequence: 4, qpc: 1100, outer: expected };
-        assert_eq!(changed_target_ticks(before, after, expected, 1000), Ok(Some(100)));
+        let after = stamp(4, 1060, 1100, expected);
+        assert_eq!(
+            changed_target_ticks(before, after, expected, 1000),
+            Ok(Some(TargetTicks { callback: 100, entry: 60, entry_to_post_default: 40 }))
+        );
         assert!(changed_target_ticks(before, before, expected, 1000).is_err());
         assert!(
             changed_target_ticks(before, PlacementStamp { sequence: 2, ..after }, expected, 1000)
@@ -757,12 +806,52 @@ mod tests {
                 .is_err()
         );
         assert!(
-            changed_target_ticks(before, PlacementStamp { qpc: 998, ..after }, expected, 1000)
+            changed_target_ticks(
+                before,
+                PlacementStamp { entry_qpc: 998, ..after },
+                expected,
+                1000
+            )
+            .is_err()
+        );
+        assert_eq!(
+            changed_target_ticks(
+                before,
+                PlacementStamp { qpc: 999, entry_qpc: 999, ..after },
+                expected,
+                1000
+            ),
+            Ok(Some(TargetTicks { callback: 0, entry: 0, entry_to_post_default: 0 }))
+        );
+    }
+
+    #[test]
+    fn paired_samples_reject_different_geometry_or_reversed_callback_time() {
+        let before = stamp(2, 40, 50, [-400, 20, 0, 320]);
+        let expected = [-400, 20, 50, 350];
+        let after = stamp(4, 1060, 1100, expected);
+        // A fresh post-default record cannot legitimize an older/different entry.
+        assert!(
+            changed_target_ticks(
+                before,
+                PlacementStamp { entry_outer: before.outer, ..after },
+                expected,
+                1000
+            )
+            .is_err()
+        );
+        assert!(
+            changed_target_ticks(before, PlacementStamp { qpc: 1059, ..after }, expected, 1000)
                 .is_err()
         );
         assert_eq!(
-            changed_target_ticks(before, PlacementStamp { qpc: 999, ..after }, expected, 1000),
-            Ok(Some(0))
+            changed_target_ticks(
+                before,
+                PlacementStamp { entry_qpc: 999, ..after },
+                expected,
+                1000
+            ),
+            Ok(Some(TargetTicks { callback: 100, entry: 0, entry_to_post_default: 101 }))
         );
     }
 }

@@ -5,7 +5,61 @@ It was reviewed on 13 November 2026 (Sydney). Implemented event handling and pas
 simulated tests do not establish that the corresponding physical Windows event
 has been exercised.
 
-## Current renderer refinement, 13 November 2026
+## Current text-layout and provider refinement, 13 November 2026
+
+The ordinary daemon is now
+`43FD913681AD449967DEEBD2DD6BA38DAD59E37D384FD1142A30E9FC9F17E314`,
+with Settings
+`EC22F24B07DFAD2ABE6198B519016E26E2C119843351FE81AEAC13EE9799727C`.
+It runs through Explorer as the sole manager, PID 32520, from
+`Downloads\Moon-validation\moon-provider-demand-20261113\moon.exe`.
+All four original application identities and workspace assignments are preserved;
+visible native frames match their placements, hidden windows remain hidden,
+prior focus returned and the personal configuration is unchanged. The token is
+medium integrity without UIAccess. Evidence: `target/provider-demand-live.json`.
+
+The corresponding UIAccess installation image is
+`748B8829283BA55E7367EEE2F0820D3C3205914BF584B93668A44D9215D1F496`.
+Its embedded manifest is `asInvoker`, `uiAccess=true`; Settings remains
+`uiAccess=false`. All four staged installation inputs are hash-verified in
+`target/provider-install-build.json`. This image is built and staged, not yet
+signed or installed.
+
+Bar canvases now retain only their current visible text layouts. Provider
+sampling follows the configured templates and direct custom-command IDs,
+preserving existing native-value fallback and override behavior. Unused media
+requests are canceled and released. The default bar still requires all of its
+displayed native provider families. These changes retain the existing one-second
+maintenance cadence.
+
+This exact candidate passes 77 core tests, 36 native Windows unit tests, the
+local-provider/command probe, 14 lifecycle cases and ten workspace-carousel
+cases. Four interactive hook tests are explicitly ignored in the native unit
+run; previous separate hook evidence is unchanged. All 128 placement trials
+complete exactly without a daemon error. All 13 reviewed images are byte-identical
+to the accepted 960 captures. The visual result covers explicit per-target
+inspection ordering at 4K/125%, not other physical DPI settings or normal Z-order.
+Evidence: `target/provider-demand-build.json`, `target/provider-demand-native-units.log`,
+`target/provider-demand-providers.json`, `target/provider-demand-{integration,carousel,performance}.json`
+and `target/provider-demand-visual/{report,visual-review,pixel-review}.json`.
+
+A matched 60-second static-screen pair records CPU use falling from 0.234353% to
+0.078116% of one core and cycles from 429,596,270 to 99,043,820. Both intervals
+have zero revisions, scene changes, draws, layout creations and commits, with
+clean fixture teardown and restored personal windows. This single pair establishes
+an improvement in that controlled run, not literal-zero CPU or a universal
+performance guarantee. Reports: `target/provider-idle-{1-baseline-static,2-candidate-static}/report.json`.
+
+The default workload records external placement median/p99 of 11.944/29.496 ms:
+the median fails the 10 ms target; p99 meets 30 ms in this run. Own-hook p99 is
+101 microseconds and remains above its budget. Working-set samples before input,
+after input and after idle are 45,543,424 / 48,816,128 / 46,981,120 bytes; these
+samples do not establish a universal peak-memory pass. Signed installation,
+physical resilience, remaining performance budgets and the seven-day soak remain
+open. The [detailed measurements](validation-performance.md#provider-demand-selection-native-validation-and-matched-static-pair)
+preserve scope and comparison limits.
+
+## Earlier renderer refinement, 13 November 2026
 
 The current ordinary daemon is
 `9608872A54F93B28221A918D48E2CB1B487884D10A2BCC1A19ECF4945D4FCE94`;

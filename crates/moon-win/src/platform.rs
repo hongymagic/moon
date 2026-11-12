@@ -967,15 +967,21 @@ pub fn set_border_color(id: WindowId, rgb: Option<u32>) -> Result<()> {
     }
 }
 
-/// Owned test-window diagnostic properties: sequence, QPC, left, top, right, bottom.
+/// Owned test-window diagnostic properties: sequence, post-default QPC/rectangle,
+/// then callback-entry QPC/rectangle. V2 pairs both samples from one callback.
 /// Coordinates use their u32 bit pattern plus one, so NULL always means missing.
-pub const TESTWIN_PLACEMENT_PROPERTIES: [PCWSTR; 6] = [
-    windows::core::w!("Moon.TestPlacement.v1.Sequence"),
-    windows::core::w!("Moon.TestPlacement.v1.Qpc"),
-    windows::core::w!("Moon.TestPlacement.v1.Left"),
-    windows::core::w!("Moon.TestPlacement.v1.Top"),
-    windows::core::w!("Moon.TestPlacement.v1.Right"),
-    windows::core::w!("Moon.TestPlacement.v1.Bottom"),
+pub const TESTWIN_PLACEMENT_PROPERTIES: [PCWSTR; 11] = [
+    windows::core::w!("Moon.TestPlacement.v2.Sequence"),
+    windows::core::w!("Moon.TestPlacement.v2.Qpc"),
+    windows::core::w!("Moon.TestPlacement.v2.Left"),
+    windows::core::w!("Moon.TestPlacement.v2.Top"),
+    windows::core::w!("Moon.TestPlacement.v2.Right"),
+    windows::core::w!("Moon.TestPlacement.v2.Bottom"),
+    windows::core::w!("Moon.TestPlacement.v2.EntryQpc"),
+    windows::core::w!("Moon.TestPlacement.v2.EntryLeft"),
+    windows::core::w!("Moon.TestPlacement.v2.EntryTop"),
+    windows::core::w!("Moon.TestPlacement.v2.EntryRight"),
+    windows::core::w!("Moon.TestPlacement.v2.EntryBottom"),
 ];
 
 pub fn run_test_windows(count: usize) -> Result<()> {
@@ -989,7 +995,16 @@ pub fn run_test_windows(count: usize) -> Result<()> {
     const KEY_COUNTS_MESSAGE: u32 = WM_APP + 93;
     const CHARACTER_COUNT_MESSAGE: u32 = WM_APP + 94;
     const MOUSE_UP_COUNT_MESSAGE: u32 = WM_APP + 95;
-    unsafe fn publish_placement(handle: HWND) -> Result<()> {
+    unsafe fn placement_entry(handle: HWND) -> Result<(i64, RECT)> {
+        unsafe {
+            let mut counter = 0;
+            windows::Win32::System::Performance::QueryPerformanceCounter(&mut counter)?;
+            let mut outer = RECT::default();
+            GetWindowRect(handle, &mut outer)?;
+            Ok((counter, outer))
+        }
+    }
+    unsafe fn publish_placement(handle: HWND, entry: (i64, RECT)) -> Result<()> {
         unsafe {
             let mut outer = RECT::default();
             GetWindowRect(handle, &mut outer)?;
@@ -1006,6 +1021,11 @@ pub fn run_test_windows(count: usize) -> Result<()> {
                 outer.top as u32 as usize + 1,
                 outer.right as u32 as usize + 1,
                 outer.bottom as u32 as usize + 1,
+                entry.0 as usize,
+                entry.1.left as u32 as usize + 1,
+                entry.1.top as u32 as usize + 1,
+                entry.1.right as u32 as usize + 1,
+                entry.1.bottom as u32 as usize + 1,
             ];
             for (name, value) in TESTWIN_PLACEMENT_PROPERTIES[1..].iter().zip(values) {
                 SetPropW(handle, *name, Some(HANDLE(value as _)))?;
@@ -1021,10 +1041,13 @@ pub fn run_test_windows(count: usize) -> Result<()> {
     ) -> LRESULT {
         match message {
             WM_WINDOWPOSCHANGED if PLACEMENT_TIMING.load(Ordering::Relaxed) => {
-                // Keep normal WM_SIZE/WM_MOVE handling. This timestamp is an
-                // upper bound on geometry change, not compositor presentation.
+                // The entry timestamp precedes its rectangle read; the existing
+                // post-default timestamp follows its read. This bracket includes
+                // both reads, normal WM_SIZE/WM_MOVE handling and scheduling.
+                // Geometry is observed at each read, not at the QPC instant.
+                let entry = unsafe { placement_entry(handle) };
                 let result = unsafe { DefWindowProcW(handle, message, wparam, lparam) };
-                if unsafe { publish_placement(handle) }.is_err() {
+                if entry.and_then(|sample| unsafe { publish_placement(handle, sample) }).is_err() {
                     // Never leave an old complete sample after publication fails.
                     let _ = unsafe { RemovePropW(handle, TESTWIN_PLACEMENT_PROPERTIES[0]) };
                 }

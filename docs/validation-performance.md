@@ -620,3 +620,267 @@ prior focus and the personal configuration are preserved; its token is medium
 integrity without UIAccess and no previous manager is running. This separate
 live result is in `target/factory-final-live.json`; it is not another performance
 measurement or completion of the pending signed-install and soak checks.
+
+### Paired callback entry and post-default sampling, 13 November 2026
+
+The follow-up discriminator uses the unchanged ordinary 960 daemon above,
+with helper
+`BE6550EB8FEAC0BDA113AEB0C9BA6EB39FCC5A59891493633090AA47077C6CBB`
+and probe
+`596DCBF54EF6D7A09A0916B2E2C3C13BEBAC9695348C6BB28B85155ADAA51D36`.
+Settings remains EC22. `target/entry-observer-build.json` records these hashes,
+source hashes, four passing portable tests, Windows-target Clippy with warnings
+denied and the helper/probe release build. Neither daemon nor Settings was
+rebuilt for this experiment. Native evidence is `target/entry-placement.json`.
+
+The opt-in helper publishes eleven numeric `Moon.TestPlacement.v2.*` properties
+under one odd/even sequence: paired timestamps and actual outer rectangles,
+plus the sequence. It reads entry QPC **before** the entry `GetWindowRect`, then
+retains the previous `DefWindowProc`, post-default rectangle read and QPC order.
+Consequently the bracket includes both rectangle reads, default processing and
+any intervening scheduling; geometry is verified at the reads, not at the QPC
+instants. Default processing still sends `WM_SIZE` and `WM_MOVE` as documented.
+[Message contract](https://learn.microsoft.com/en-us/windows/win32/winmsg/wm-windowposchanged),
+[rectangle contract](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getwindowrect).
+
+All 128 trials have eight changed targets and 1,024 fresh, complete paired
+samples. Each target advances its even sequence by exactly two; all 1,016
+between-trial sequence comparisons are continuous. Both rectangles must match
+the expected target. Trial maxima agree with the individual records, and all
+entry and post-default timestamps follow target order on the helper's single
+GUI thread. The unchanged completion metrics agree with the corresponding
+observer records. Deltas below are calculated within each trial or adjacent
+pair before calculating quantiles, never by subtracting percentiles.
+
+| Recorded interval | Samples | Median | p99 | Maximum |
+| --- | ---: | ---: | ---: | ---: |
+| Trigger QPC → first target entry | 128 | 2.571 ms | 5.102 ms | 8.099 ms |
+| Trigger QPC → eighth target entry | 128 | 12.270 ms | 27.031 ms | 60.215 ms |
+| First → eighth target entry, paired | 128 | 9.630 ms | 18.932 ms | 57.489 ms |
+| Previous target post-default → next target entry | 896 | 1.326 ms | 4.193 ms | 21.949 ms |
+| Entry → post-default, same callback | 1,024 | 1 µs | 2 µs | 2 µs |
+| Existing external exact-placement completion | 128 | 12.248 ms | 26.752 ms | 59.979 ms |
+
+QPC frequency is 10 MHz. Reported microseconds are truncated independently:
+320 callback brackets report 0 µs, 690 report 1 µs and 14 report 2 µs. The
+reported maximum therefore bounds the underlying bracket below 3 µs; zero does
+not mean zero work. Subtracting the two rounded elapsed fields differs from
+the directly converted bracket by at most 1 µs in every record. Same-thread
+brackets avoid cross-thread ordering ambiguity; trigger-to-target comparisons
+retain the documented one-tick uncertainty, 0.1 µs here.
+[QPC precision and ordering](https://learn.microsoft.com/en-us/windows/win32/sysinfo/acquiring-high-resolution-time-stamps).
+
+In **82 of 128 matched trials**, the recorded latest entry exceeds the recorded
+external completion by 89–1,349 µs. Each is the eighth target; the same 82 trials
+also have a later post-default timestamp. The external `Instant` starts just
+before the separate trigger-QPC read, so their origins are not identical and
+the unrecorded gap cannot be removed. Moving the sample before default
+processing nevertheless leaves the late-entry observation intact: it is not a
+timestamp for when geometry first changed or when pixels became visible.
+
+Zero-based trial 66 illustrates the remaining interval: first entry is
+2.726 ms, eighth entry 60.215 ms, and external completion 59.979 ms. Target 2
+post-default to target 3 entry spans 21.949 ms, while every callback bracket in
+that trial reports at most 2 µs. The observer records 44 DWM-frame calls taking
+51.1966 ms cumulatively, with a 20.2151-ms maximum; its 50 native rectangle
+calls total 6.6 µs. These are overlapping observations in the same trial, not
+proof of which thread or API caused the gap, and must not be added together.
+
+This rules out millisecond-scale entry-to-post-default work in this owned
+fixture. It does not distinguish pre-callback native work, queued delivery,
+scheduling, other messages or the property publication performed **after** the
+post-default timestamp. That publication remains diagnostic overhead and may
+affect later targets. A correlated scheduler/wait trace is still needed for
+causal attribution; these samples do not establish real-application processing
+or compositor presentation latency.
+[Windows CPU trace analysis](https://learn.microsoft.com/en-us/windows-hardware/test/wpt/cpu-analysis).
+No latency-budget pass or production optimization is claimed.
+
+`target/entry-placement-cleanup.json` verifies zero owned daemon/helper
+processes, no recovery journal and unchanged personal configuration after the
+probe. `target/entry-placement-restored.json` verifies the same ordinary 960
+daemon restored as PID 11416 with all four original window/process/birth
+identities and workspace memberships preserved. This diagnostic did not
+replace the installed or live product binaries.
+
+### Bounded text-layout reuse and matched idle controls, 13 November 2026
+
+This comparison keeps the ordinary 960 baseline
+`9608872A54F93B28221A918D48E2CB1B487884D10A2BCC1A19ECF4945D4FCE94`
+and tests ordinary candidate
+`D973B039212A3A6DBE7727CF1FDE8C7E59BAE1BB716B27741BD1324450F75BC6`.
+The candidate retains one analyzed text layout per current visible bar item,
+keyed by text, font family, font size and clamped layout dimensions. Position
+and color remain draw-time properties. A changed key replaces that item's
+layout; shortened or hidden bars release removed entries, and canvas/device
+recreation releases the associated layouts. There is no map of previous titles
+or provider values. Retention is bounded by current items and strings, not a
+fixed byte limit. Microsoft documents repeated layout drawing as a way to avoid
+repeating text formatting and layout work; origin and the default fill brush
+are supplied to the draw call.
+[DrawTextLayout contract](https://learn.microsoft.com/en-us/windows/win32/api/d2d1/nf-d2d1-id2d1rendertarget-drawtextlayout).
+
+`target/layout-cache-build.json` records the immutable build, source hashes,
+Windows all-target Clippy with warnings denied, formatting and one passing
+windowless native resource test. That test exercises repeated reuse, text/font/
+size/bounds invalidation, UTF-16 symbol ranges and font collections, unchanged
+trimming/wrapping/alignment, and shortened/empty/hidden-bar release. The ordinary
+manifest remains `asInvoker` with UIAccess false. EC22 Settings was copied
+unchanged; no signed candidate or package was rebuilt for this experiment.
+The helper and probe are the same BE655 and 596D binaries identified above,
+verified in `target/layout-cache-validation-inputs.json`.
+
+The exact D973 candidate passes all 14 lifecycle cases and ten workspace
+carousel cases in `target/layout-cache-{integration,carousel}.json`. All 13
+original captures in `target/layout-cache-visual/` were visually reviewed and
+hash-checked against their capture manifest. Ten whole PNGs, including every
+bar and both full-width survivors, exactly match the previously accepted 960
+captures. The other three window images differ in 19 pixels total, with no
+channel difference greater than one. All rings, rounded corners, focus colors,
+font changes, bundled glyphs and the complete Arial 18 workspace label `10`
+remain correct. Both retired split-border samples contain zero nonwhite pixels
+out of 57,800. All 13 before/after ordering brackets hold on attempt one.
+
+These are per-target inspection-order captures at 4K/125%; they do not accept
+normal product Z-order, other physical DPI scales or animation smoothness.
+The five snapshots retain 12 current layouts, with cumulative creations
+12 → 12 → 24 → 24 → 36. Resize/focus and border-slot removal reuse unchanged
+layouts; font/style reload replaces the current entries. This fixture removes
+a border slot, not a bar item; bar-item release is covered by the native unit.
+One device and two factories persist, with no recreation, BeginDraw, descriptor
+or daemon error. Detailed scope and pixel comparisons are retained in
+`target/layout-cache-visual/{visual-review,pixel-review}.json`.
+
+The default eight-window, 128-chord workload completes every exact-placement
+check in `target/layout-cache-performance.json`. Readiness is **130.386 ms**,
+external median/p99 **11.870/39.996 ms**, own-hook p99 **96 µs** and whole-callback
+p99 **873 µs**. Input profiling and target callback profiling are disabled;
+existing aggregate observation overhead remains included. Working set is
+**46,407,680 / 49,393,664 / 47,632,384 bytes** before input, after input and after
+ten seconds idle. All three samples pass 50,000,000 bytes in this run, without
+establishing a continuous peak or universal bound. Nominal surface pixel bytes
+remain 2,865,156, not a measure of all backing allocation or resident memory.
+The ten-second idle reading is **0.1562473%** of one core. Placement/hook latency
+and literal-zero idle CPU remain unmet; these samples do not establish that
+layout reuse improved whole-process CPU or memory.
+
+The longer controls use `scripts/validate-idle.ps1`, eight owned helpers, a
+five-second warm-up and a requested 60-second quiet interval without IPC
+requests. Default mode keeps changing widgets; Static substitutes representative
+literal text while preserving widget order, icons, styles and width caps.
+Optional provider presence and exact text widths can differ, so Static is a
+no-scene-change discriminator rather than an identical pixel workload. Both
+modes retain the default provider worker and ordinary keyboard hooks/surfaces.
+All measured environment overrides are unset.
+
+The harness retains the daemon process handle and checks its birth time at both
+endpoints. State/counter queries occur outside the raw CPU interval. QPC endpoint
+midpoints measure wall time; reported endpoint-read uncertainty is 27.45–31.8 µs.
+CPU below sums process-wide kernel and user counters, in documented 100-ns
+units, divided by wall time for one-core percentage. Those units do not imply
+100-ns measurement precision: all observed time deltas here are multiples of
+15.625 ms. Cycles are reported independently and are not converted to CPU time.
+[GetProcessTimes](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocesstimes),
+[QueryProcessCycleTime](https://learn.microsoft.com/en-us/windows/win32/api/realtimeapiset/nf-realtimeapiset-queryprocesscycletime).
+
+| Run, in execution order | Wall interval | Kernel + user CPU | One-core CPU | Process cycles |
+| --- | ---: | ---: | ---: | ---: |
+| 960 Default | 60.007556 s | 93.750 + 46.875 ms | 0.234345% | 575,956,060 |
+| D973 Default | 60.007370 s | 62.500 + 109.375 ms | 0.286423% | 548,186,450 |
+| D973 Static | 60.007333 s | 78.125 + 0.000 ms | 0.130192% | 430,756,220 |
+| 960 Static | 60.013207 s | 78.125 + 31.250 ms | 0.182252% | 425,245,810 |
+
+| Run | Render calls | Changed scenes / bar draws / commits | New layouts | Working set, before → after |
+| --- | ---: | ---: | ---: | ---: |
+| 960 Default | 88 | 48 / 48 / 48 | 1,152 | 46,092,288 → 46,010,368 bytes |
+| D973 Default | 86 | 48 / 48 / 48 | 50 | 45,977,600 → 45,936,640 bytes |
+| D973 Static | 92 | 0 / 0 / 0 | 0 | 46,186,496 → 46,206,976 bytes |
+| 960 Static | 90 | 0 / 0 / 0 | 0 | 46,088,192 → 46,006,272 bytes |
+
+Every run preserves world revision, exact native frames and planned placements,
+and performs zero border redraws. Both Static runs satisfy the explicit
+zero-scene qualification: no revision, changed scene, bar/border draw, layout
+creation or commit. They still consume CPU and cycles, while render entry is
+called 90–92 times. Thus unchanged rendering is skipped, but the full daemon
+is not literally idle. These aggregate counters do not attribute that residual
+work to an individual provider, maintenance check or native subsystem.
+
+For the same 48 default redraws, new layouts fall from 1,152 to 50; D973 retains
+24 layouts at both endpoints. In Static it retains 30 current layouts at both
+endpoints. That is direct evidence of avoided reshaping and bounded current-item
+retention. The higher default CPU-time result despite fewer cycles, and the
+opposite ordering of static CPU time and cycles, do not justify a general CPU
+improvement claim from one sample per condition. These four runs are sequential,
+not randomized repetitions. All sampled working sets are below 50,000,000 bytes,
+without resolving earlier workload/residency variation or proving a peak bound.
+No result here applies to the separate provider-demand follow-up candidate.
+
+Reports are
+`target/layout-idle-v2-{1-baseline-default,2-candidate-default,3-candidate-static,4-baseline-static}/report.json`.
+Each reports success, restored owned originals and no cleanup error.
+`target/layout-idle-v2-cleanup.json` verifies no owned daemon/helper, no journal,
+no previous manager and unchanged personal configuration.
+`target/layout-idle-v2-restored.json` verifies the ordinary 960 daemon restored
+with the original four process/birth/window identities and workspace membership.
+
+The earlier failed fixture is preserved in
+`target/layout-idle-1-baseline-default/report.json`: its `--only` launch disabled
+surfaces and keyboard hooks, so the active-renderer precondition timed out
+before any CPU measurement. This was a harness invocation error, not a product
+regression or an idle result. The corrected v2 uses its owned ignore rule for
+isolation without `--only`. The failed attempt's cleanup and normal desktop
+restoration are retained in `target/layout-idle-{cleanup,restored}.json`; they
+show no remaining owned process/journal and unchanged personal configuration.
+
+### Provider demand selection: native validation and matched Static pair
+
+Ordinary candidate
+`43FD913681AD449967DEEBD2DD6BA38DAD59E37D384FD1142A30E9FC9F17E314`
+adds configuration-derived provider selection to D973's retained-layout renderer.
+The provider source is
+`F7E0CF3AA788B7A9886134AF806A24C89AD6447F4F0DBDCA83DF14967CF2A72E`;
+the renderer remains
+`FC8D56EA18E6F61D6413235196A037990724D8CE411F14F678F1E1B8F5434BB6`.
+`target/provider-demand-build.json` records the source and six staged file
+hashes; `target/provider-demand-windows-inputs.json` independently verifies the
+Windows copies. The ordinary Moon manifest remains `asInvoker`, `uiAccess=false`.
+
+The same eight-window Static harness ran D973 first, then 43FD. Both runs
+qualified: world revision, changed scenes, bar/border draws, new layouts and
+commits all remained unchanged, as did the world, planned placements and native
+frames. Neither interval contains IPC polling, and both reports have empty
+cleanup-error lists and verified original-window restoration.
+
+| Static run | Wall interval | Kernel + user CPU | One-core CPU | Process cycles | Render calls |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| D973 baseline | 60.005637 s | 62.500 + 78.125 ms | 0.234353% | 429,596,270 | 94 |
+| 43FD provider selection | 60.006920 s | 31.250 + 15.625 ms | 0.078116% | 99,043,820 | 80 |
+
+This pair records less process CPU time and fewer cycles while the display
+stayed unchanged. It is one sequential pair, with quantized CPU-time counters,
+not a universal improvement or a literal-zero-CPU pass. The default 13-widget
+configuration still requests every displayed local provider family; these
+Static results must not be presented as a default-bar CPU improvement.
+The regular maintenance and provider-worker cadence remain unchanged.
+Reports: `target/provider-idle-{1-baseline-static,2-candidate-static}/report.json`.
+`target/provider-idle-{cleanup,restored}.json` records no remaining owned process
+or journal, unchanged personal configuration, no previous manager and restoration
+of the ordinary desktop.
+
+The same candidate passes 36 native unit tests with four interactive cases
+explicitly ignored, the real provider probe, all 14 lifecycle cases and all ten
+workspace-animation cases. The scoped visual review verifies all 13 images,
+byte-identical to the retained comparison captures; it retains the explicit
+inspection-order and single-DPI limits. Evidence is
+`target/provider-demand-native-units.log`,
+`target/provider-demand-{providers,integration,carousel}.json` and
+`target/provider-demand-visual/{report,visual-review,pixel-review}.json`.
+
+In `target/provider-demand-performance.json`, all 128 placements match.
+Readiness is 118.223 ms; external median/p99 are **11.944/29.496 ms**. The median
+budget still fails; the p99 passes in this run only. Own/whole hook p99 remain
+**101/886 microseconds**, and the ten-second default idle CPU sample is
+**0.156248%** of one core. Both optional profiling modes are disabled. Working
+sets are 45,543,424 / 48,816,128 / 46,981,120 bytes before input, after input and
+after idle. These three samples are below 50,000,000 bytes, without proving a
+peak bound or resolving earlier variability. No daemon error was reported.
