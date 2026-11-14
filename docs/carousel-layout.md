@@ -40,6 +40,9 @@ checks establish state and final geometry, not native animation timing or visual
 clipping; those require the separate Windows integration checks.
 
 Portable interruption checks cover a third destination, reversal, bounded retention
-over repeated changes and final committed focus/layout. The updated native probe
-and hidden-popup cleanup regression still require Windows execution; earlier
-captures validate the previous cancellation behavior, not this refinement.
+over repeated changes and final committed focus/layout. The hidden-popup cleanup
+regression passed on Windows on 15 November 2026, covering cancellation, removed
+monitors, disabled motion, expiry, stale sources, subsequent reuse and destruction.
+It installs no input hook and never shows a popup. The updated visible native
+probe still requires execution; earlier captures validate the previous cancellation
+behavior, not this refinement.

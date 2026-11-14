@@ -3,6 +3,7 @@ param(
     [Parameter(Mandatory=$true,ParameterSetName='Launch')][ValidateSet('Install','Handover')][string]$Mode,
     [Parameter(Mandatory=$true,ParameterSetName='Launch')][string]$Binary,
     [Parameter(ParameterSetName='Launch')][string]$SettingsBinary,
+    [Parameter(ParameterSetName='Launch')][string]$PortableBinary,
     [Parameter(ParameterSetName='Launch')][switch]$KeepPreviousDesktopStopped,
     [Parameter(Mandatory=$true,ParameterSetName='Worker')][string]$WorkerDirectory
 )
@@ -157,6 +158,7 @@ try {
     if($KeepPreviousDesktopStopped -and $Mode -ne 'Handover'){throw 'The desktop recovery preference applies only to handover.'}
     $arguments=@('-Binary',(Resolve-Path -LiteralPath $Binary).ProviderPath)
     if($SettingsBinary){$arguments+=@('-SettingsBinary',(Resolve-Path -LiteralPath $SettingsBinary).ProviderPath)}
+    if($PortableBinary){$arguments+=@('-PortableBinary',(Resolve-Path -LiteralPath $PortableBinary).ProviderPath)}
     if($KeepPreviousDesktopStopped){$arguments+='-KeepPreviousDesktopStopped'}
     exit (Invoke-MoonExplorerScript (Join-Path $PSScriptRoot ($Mode.ToLowerInvariant()+'.ps1')) $arguments)
 } catch {

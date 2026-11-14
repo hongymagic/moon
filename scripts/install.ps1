@@ -2,6 +2,10 @@
 param(
     [Parameter(Mandatory=$true)][string]$Binary,
     [string]$SettingsBinary,
+    [string]$PortableBinary,
+    [uint32]$PortableProcessId,
+    [long]$PortableBirth,
+    [string]$PortableSha256,
     [string]$OwnerSid,
     [string]$ExpectedSha256,
     [string]$ExpectedSettingsSha256,
@@ -10,10 +14,13 @@ param(
 )
 . (Join-Path $PSScriptRoot 'install-common.ps1')
 $recoveryComplete=$true
+$checkpointReceipt=$null
 trap {
     $cancelled=$_.Exception -is [OperationCanceledException]
     $message=if ($cancelled) {'Setup was canceled. Your previous setup is unchanged.'} elseif ($recoveryComplete) {'Moon could not finish setup. Your previous setup was preserved.'} else {'Moon needs to finish recovering your desktop. Open details before trying again.'}
-    Write-MoonSetupStatus $OperationId $(if($cancelled){'cancelled'}elseif($recoveryComplete){'failed'}else{'recovery_required'}) $message ($_ | Out-String)
+    $detail=($_ | Out-String)
+    if ($checkpointReceipt) {$detail+="`r`nSaved desktop checkpoint: $checkpointReceipt"}
+    Write-MoonSetupStatus $OperationId $(if($cancelled){'cancelled'}elseif($recoveryComplete){'failed'}else{'recovery_required'}) $message $detail
     Write-Error $_ -ErrorAction Continue
     exit $(if($cancelled){1223}else{1})
 }
@@ -28,13 +35,22 @@ if (!$OwnerSid) { $OwnerSid=$currentSid }
 if ($OwnerSid -ne $currentSid) { throw 'Install must be elevated by the same Windows account that will run moon.' }
 Test-MoonSetupCancellation $OperationId
 if (!(Test-MoonAdministrator)) {
+    $portable=Get-MoonPortableSource $PortableBinary
+    if (!$portable -and !(Get-MoonDaemon -Installed)) {Wait-MoonMigrationDrained 'moon.exe'}
     $arguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$PSCommandPath,'-Binary',$Binary,'-SettingsBinary',$SettingsBinary,'-OwnerSid',$OwnerSid,'-ExpectedSha256',$ExpectedSha256,'-ExpectedSettingsSha256',$ExpectedSettingsSha256)
     if ($OperationId) {$arguments+=@('-OperationId',$OperationId)}
     if ($HandoverId) {$arguments+=@('-HandoverId',$HandoverId)}
+    if ($portable) {$arguments+=@('-PortableBinary',$portable.peer.Path,'-PortableProcessId',[string]$portable.peer.ProcessId,'-PortableBirth',[string]$portable.peer.Birth,'-PortableSha256',$portable.sha256)}
     Write-MoonSetupStatus $OperationId 'waiting' 'Approve the Windows prompt to continue.'
     try {$exitCode=Invoke-MoonShellProcess (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') $arguments -Elevate}
     catch {if (Test-MoonApprovalCancelled $_) {throw [OperationCanceledException]::new('The Windows approval prompt was canceled.')} else {throw}}
     exit $exitCode
+}
+$portablePeer=$null
+if ($PortableBinary -or $PortableProcessId -or $PortableBirth -or $PortableSha256) {
+    if (!$PortableBinary -or !$PortableProcessId -or $PortableBirth -le 0 -or $PortableSha256 -notmatch '^[A-Fa-f0-9]{64}$') {throw 'Portable migration requires the identity captured before Windows approval.'}
+    $portablePeer=[MoonInstallNative+ProcessIdentityInfo]::new()
+    $portablePeer.Path=[IO.Path]::GetFullPath($PortableBinary);$portablePeer.ProcessId=$PortableProcessId;$portablePeer.Birth=$PortableBirth
 }
 Write-MoonSetupStatus $OperationId 'working' 'Preparing a safe place for Moon.'
 
@@ -50,6 +66,7 @@ else { Assert-MoonSecurePath $install }
 $previousState=$null
 if (Test-Path -LiteralPath $statePath) { $previousState=Read-MoonInstallState $install }
 elseif (@(Get-ChildItem -Force -LiteralPath $install).Count -ne 0) { throw 'Program Files\moon contains files without owned installation metadata; nothing was replaced.' }
+if ($portablePeer -and $previousState) {throw 'Portable migration cannot replace an existing installed Moon. Update that installation separately.'}
 if ($HandoverId -and $previousState) {throw 'Another Moon installation appeared during handover. It was left unchanged.'}
 $installId=if ($previousState) {$previousState.install_id} else {[guid]::NewGuid().ToString('N')}
 $taskName='moon-'+$OwnerSid
@@ -83,8 +100,8 @@ $oldTask=Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
 Assert-MoonOwnedTask $oldTask $state $target
 $oldTaskXml=if ($oldTask) {Export-ScheduledTask -TaskName $taskName} else {$null}
 if (@(Get-Process -Name moon-settings -ErrorAction SilentlyContinue | Where-Object {$_.Path -and [string]::Equals($_.Path,(Join-Path $install 'moon-settings.exe'),[StringComparison]::OrdinalIgnoreCase)}).Count) {throw 'Close Moon Settings, then try updating Moon again.'}
-$daemon=Get-MoonDaemon -Installed
-if ($daemon -and ![string]::Equals([IO.Path]::GetFullPath($daemon.executable),$target,[StringComparison]::OrdinalIgnoreCase)) {
+$daemon=if($portablePeer){Invoke-MoonRpc query stats -ExpectedPortablePeer $portablePeer -ExpectedPortableSha256 $PortableSha256}else{Get-MoonDaemon -Installed}
+if (!$portablePeer -and $daemon -and ![string]::Equals([IO.Path]::GetFullPath($daemon.executable),$target,[StringComparison]::OrdinalIgnoreCase)) {
     throw "A development daemon is running from $($daemon.executable). Exit that daemon before the first signed installation; it cannot restart into a different binary."
 }
 $session=[Diagnostics.Process]::GetCurrentProcess().SessionId
@@ -96,8 +113,9 @@ if ($daemon) {$state.config_path=Get-MoonSelectedConfigPath $daemon}
 $shellPlan=New-MoonShellPlan -Directory $install -State $state -Version $version -ShortcutArguments (Get-MoonLaunchArguments $state -Settings) -UninstallCommand $uninstallCommand
 $journalPath=Join-Path $env:LOCALAPPDATA ('moon\journal-v1-session'+$session+'.json')
 $oldConfig=if ($daemon) {Get-MoonConfigIdentity $daemon} else {$null}
-$oldPeer=if($daemon){$daemon.pipe_peer}else{$null}
-$oldSnapshot=if ($daemon) {Get-MoonUpgradeSnapshot -JournalPath $journalPath -ProcessId ([uint32]$daemon.process_id) -ExpectedPeer $oldPeer} else {$null}
+$oldPeer=if($daemon -and !$portablePeer){$daemon.pipe_peer}else{$null}
+$oldPins=if($portablePeer){@{ExpectedPortablePeer=$portablePeer;ExpectedPortableSha256=$PortableSha256}}else{@{ExpectedPeer=$oldPeer}}
+$oldSnapshot=if ($daemon) {Get-MoonUpgradeSnapshot -JournalPath $journalPath -ProcessId ([uint32]$daemon.process_id) @oldPins} else {$null}
 $oldLayout=if ($oldSnapshot) {$oldSnapshot.layout} else {$null}
 $oldJournal=if ($oldSnapshot) {,$oldSnapshot.journal} else {$null}
 $oldPid=if ($daemon) {[int]$daemon.process_id} else {0}
@@ -106,6 +124,7 @@ $transaction=[guid]::NewGuid().ToString('N')
 $candidateName='moon.next.'+$transaction+'.exe'; $candidate=Join-Path $install $candidateName
 $backupName='moon.previous.'+$transaction+'.exe'; $backup=Join-Path $install $backupName
 $newCertificate=$null; $targetReplaced=$false; $backupCreated=$false; $taskChanged=$false; $pathAdded=$false; $committed=$false; $shellStarted=$false
+$portableCheckpoint=$null;$portableStopIntent=$false
 $supportPublished=[Collections.Generic.List[string]]::new()
 try {
     Test-MoonSetupCancellation $OperationId
@@ -171,7 +190,7 @@ try {
         $state.files=@($state.files | Where-Object {$_ -ne $supportTemporary[$file]})
     }
     Test-MoonSetupCancellation $OperationId
-    if ($daemon) {
+    if ($daemon -and !$portablePeer) {
         # Signing can take time. Capture the latest settled layout before the
         # executable changes, and refuse a config edit instead of restarting
         # into different settings while promising the previous layout.
@@ -201,12 +220,21 @@ try {
     Write-MoonInstallState $install $state
     $launchAfter=[DateTime]::UtcNow
     if ($oldConfig) {Assert-MoonConfigIdentity $oldConfig $daemon}
-    if ($daemon) { Invoke-MoonRpc lifecycle -LifecycleAction restart -ExpectedPeer $oldPeer | Out-Null }
+    Test-MoonCandidateConfig $target $state $oldConfig
+    if ($portablePeer) {
+        $portableCheckpoint=Save-MoonPortableHandoff $portablePeer $PortableSha256 $oldConfig $journalPath (Join-Path $env:LOCALAPPDATA ('moon\install-checkpoint-'+$transaction))
+        $checkpointReceipt=$portableCheckpoint.receipt_path
+        $oldLayout=$portableCheckpoint.layout
+        Stop-MoonPortableCheckpoint $portableCheckpoint $portablePeer ([ref]$portableStopIntent)
+        Publish-MoonDesktopCheckpoint $portableCheckpoint $journalPath
+        Start-MoonLimitedOnce $target (Get-MoonLaunchArguments $state -Resume) $state
+    }
+    elseif ($daemon) { Invoke-MoonRpc lifecycle -LifecycleAction restart -ExpectedPeer $oldPeer | Out-Null }
     else { Start-ScheduledTask -TaskName $taskName }
     try {
         Wait-MoonCondition -Description 'the signed replacement daemon with UIAccess' -Condition {
             $running=Get-MoonDaemon -Installed
-            $running -and $running.process_id -ne $oldPid -and [string]::Equals($running.executable,$target,[StringComparison]::OrdinalIgnoreCase) -and $running.token.ui_access
+            $running -and $running.process_id -ne $oldPid -and [string]::Equals($running.executable,$target,[StringComparison]::OrdinalIgnoreCase) -and $running.token.ui_access -and (Get-MoonSelectedConfigPath $running) -eq (Get-MoonConfiguredPath $state)
         }
     }catch{throw "$($_.Exception.Message)`n$(Get-MoonTaskStartupDiagnostic $target $launchAfter)"}
     if ($null -ne $oldLayout) {
@@ -241,9 +269,13 @@ try {
         }
         Write-MoonInstallState $install $state
     }
+    if ($portableCheckpoint) {
+        $portableCheckpoint.status='installed'
+        try {Write-MoonJsonFile $checkpointReceipt $portableCheckpoint} catch {Write-Warning 'Moon was installed, but its checkpoint receipt could not be updated.'}
+    }
     $committed=$true
     Write-MoonSetupStatus $OperationId 'succeeded' 'Moon is ready. Make it yours in Settings.'
-    [pscustomobject]@{installed=$target;install_id=$installId;handover_id=$savedHandoverId;task=$taskName;signature='Valid';ui_access=$true;upgrade_layout_verified=($null -ne $oldLayout);certificate=$state.active_certificate;user_path_entry=$install;open_new_terminal=$true} | ConvertTo-Json
+    [pscustomobject]@{installed=$target;install_id=$installId;handover_id=$savedHandoverId;task=$taskName;signature='Valid';ui_access=$true;upgrade_layout_verified=($null -ne $oldLayout);portable_checkpoint=$checkpointReceipt;certificate=$state.active_certificate;user_path_entry=$install;open_new_terminal=$true} | ConvertTo-Json
 } catch {
     $failure=$_
     $recoveryComplete=$false
@@ -284,7 +316,11 @@ try {
         }
         Remove-Item -LiteralPath "Cert:\LocalMachine\My\$($newCertificate.Thumbprint)" -DeleteKey -Force
     }
-    if ($oldJournal -and ![MoonInstallNative]::ProcessStillRunning($oldPeer)) {
+    if ($portableStopIntent) {
+        try {Resume-MoonPortableCheckpoint $portableCheckpoint $journalPath $state $portablePeer | Out-Null}
+        catch {throw "Setup failed and portable Moon needs recovery. Checkpoint: $checkpointReceipt. Original failure: $failure; recovery: $_"}
+    }
+    elseif (!$portablePeer -and $oldJournal -and ![MoonInstallNative]::ProcessStillRunning($oldPeer)) {
         Wait-MoonCondition -Description 'old recovery watchdogs before rollback adoption' -Condition {
             @((Get-CimInstance Win32_Process) | Where-Object {$_.SessionId -eq $session -and $_.ExecutablePath -and $_.ExecutablePath.StartsWith($install+'\',[StringComparison]::OrdinalIgnoreCase)}).Count -eq 0
         }

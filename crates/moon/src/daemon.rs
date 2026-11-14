@@ -1286,6 +1286,7 @@ impl Daemon {
             "windows" => serde_json::to_value(self.world.plan().placements)?,
             "monitors" => serde_json::to_value(&self.world.monitors)?,
             "config" => serde_json::to_value(&self.world.config)?,
+            "restart-config" => serde_json::to_value(crate::restart_config(&self.options)?)?,
             "shortcuts" => serde_json::to_value(moon_core::help::shortcuts(
                 &self.world,
                 self.options.hook_enabled(),

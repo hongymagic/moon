@@ -1,6 +1,6 @@
 # moon: build plan
 
-Status: implementation and Windows acceptance in progress, 2026-11-13. Source is committed on `codex/moon-v1`; measured results and remaining acceptance conditions are tracked in `docs/acceptance-status.md`. M5 and the seven-day sole-manager soak are not complete.
+Status: implementation and Windows acceptance in progress, 2026-11-15. The combined review and product refinements are on `codex/polish-20261115`; measured results and remaining acceptance conditions are tracked in `docs/acceptance-status.md`. M5 and the seven-day installed sole-manager soak are not complete.
 
 Scope update, 2026-11-12: the user explicitly requested a polished installation experience, product icons, settings pages, theme controls, Windows 11 features, and animated carousel navigation between whole workspaces. Focusing a window activates its containing workspace; windows retain their tiled or floating geometry within it. Those requests supersede the original exclusions for a settings GUI and animations below. The daemon remains native and independent; a separate ordinary-privilege `moon-settings.exe` hosts the on-demand settings interface. Its memory and startup are measured separately from the daemon. Settings, installation, and carousel validation are required in addition to the original acceptance checks; none substitutes for the signed-install or seven-day checks.
 

@@ -21,26 +21,34 @@ portable continuity/bounds tests and a Windows cross-build; it has not yet been
 visually validated on the Windows desktop. Previous carousel results below cover
 the earlier implementation.
 
-Installer changes preserve the active custom configuration path through startup,
-recovery and Settings entry points. The isolated PowerShell 5.1 suites pass
-20 checkpoint/configuration checks and 33 setup-state checks, without installing,
-requesting elevation or changing the live daemon. Reports are
-`target/polish-upgrade-snapshot-20261115.json` and
-`target/polish-setup-state-20261115.json`. Portable-to-installed handoff is still
-being integrated with the separate review's authenticated IPC changes; checkpoint
-helpers alone do not establish that handoff.
+Installer changes preserve both an explicitly selected configuration and implicit
+defaults through startup, recovery and Settings entry points. Portable transfer
+authenticates the exact running image, retains a durable workspace checkpoint
+before exit, and restores that same Moon build after a failed installation. It
+refuses a paused, suspended or diagnostic session and checks that saved settings
+match the running configuration and can be parsed by the signed replacement.
+It never restores another window manager during portable recovery.
+The isolated PowerShell 5.1 suites pass 20 checkpoint/configuration checks,
+33 setup-state checks and 22 recovery checks without installing, requesting
+elevation or changing the live daemon. Reports are under
+`target/polish-20261115/` with `-final.json` names. Actual signed transfer remains
+a separate Windows acceptance check. The additional 34 checks in
+`portable-install.json` cover exact peer identity using private connected pipes,
+settings equivalence and the actual capture/stop/recovery helpers with desktop
+actions substituted. They pass after correcting JSON value comparison on
+PowerShell 5.1; all 41 scripts also parse successfully.
 
-The portable core suite passed 83 tests before the final help metadata changes;
-the affected help and motion checks were rerun afterward. The daemon's 12 portable
-tests pass, including standalone-help routing. Settings passes 41 browser checks
-and 11 portable Rust checks. Its Windows-target Clippy check also passes. The
-frontend receipt is `target/polish-20261115/settings-validation.json`; screenshots
+After merging the repository review, all 123 portable Rust tests pass (96 core,
+14 daemon, 13 Settings), including standalone-help routing and restart preflight. Settings passes 44
+browser checks, and Windows-target Clippy passes for all affected crates. The
+frontend receipt is `target/polish-20261115/settings-merge-validation.json`; screenshots
 in `target/settings-polish/` include the live overview and shortcut list, dark and
 high-contrast appearances, and narrow previews with no caption overlap.
-Windows-target Clippy passes for the daemon and platform crates; the native unit
-executable and ordinary debug daemon compile without being executed. The exact
-inputs, commands and outputs are in
-`target/polish-20261115/core-motion-build.json`. These results are development
+Ordinary and UIAccess release images are built with 116 unchanged source inputs;
+their exact identities and manifests are in
+`target/polish-20261115-final/release-build.json`. One new native cleanup regression
+passes using hidden owned popups, without input hooks or foreign windows.
+The images have not been promoted, signed or installed. These are development
 checks, not signed-installation, live desktop, performance or soak acceptance.
 
 ## Recorded ordinary candidate, 13 November 2026

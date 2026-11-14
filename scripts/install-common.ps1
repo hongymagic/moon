@@ -81,6 +81,9 @@ public static class MoonInstallNative {
         } finally {CloseHandle(process);}
     }
     public static ProcessIdentityInfo VerifyPipeServer(Microsoft.Win32.SafeHandles.SafePipeHandle pipe,string expectedPath,ProcessIdentityInfo previous,string developmentPath,string installedPath,bool exactDevelopmentPath) {
+        return VerifyPipeServer(pipe,expectedPath,previous,developmentPath,installedPath,exactDevelopmentPath,null,null);
+    }
+    public static ProcessIdentityInfo VerifyPipeServer(Microsoft.Win32.SafeHandles.SafePipeHandle pipe,string expectedPath,ProcessIdentityInfo previous,string developmentPath,string installedPath,bool exactDevelopmentPath,ProcessIdentityInfo portable,string portableSha256) {
         uint maximum;
         if(!GetNamedPipeInfo(pipe,IntPtr.Zero,IntPtr.Zero,IntPtr.Zero,out maximum))throw Error();
         if(maximum!=1)throw new InvalidOperationException("Moon IPC requires one server instance per pipe name.");
@@ -94,7 +97,20 @@ public static class MoonInstallNative {
                     if(PipeName(token)!=PipeName(current.Token) || TokenWord(token,12)!=TokenWord(current.Token,12) || TokenWord(token,29)!=0)
                         throw new InvalidOperationException("The Moon pipe server belongs to a different Windows logon.");
                     peer.UiAccess=TokenWord(token,26)!=0;
-                    if(!String.IsNullOrEmpty(expectedPath)) {
+                    if(portable!=null) {
+                        if(previous!=null || !String.IsNullOrEmpty(expectedPath) || exactDevelopmentPath || portable.UiAccess
+                            || peer.UiAccess || TokenWord(token,20)!=0 || TokenIntegrity(token)!=8192
+                            || portable.ProcessId!=pid || portable.Birth!=peer.Birth
+                            || !String.Equals(portable.Path,peer.Path,StringComparison.OrdinalIgnoreCase)
+                            || portableSha256==null || !System.Text.RegularExpressions.Regex.IsMatch(portableSha256,@"\A[0-9a-fA-F]{64}\z"))
+                            throw new InvalidOperationException("The portable Moon process no longer matches its approved identity.");
+                        using(var image=System.IO.File.Open(peer.Path,System.IO.FileMode.Open,System.IO.FileAccess.Read,System.IO.FileShare.Read|System.IO.FileShare.Delete))
+                        using(var sha=System.Security.Cryptography.SHA256.Create()) {
+                            var actual=BitConverter.ToString(sha.ComputeHash(image)).Replace("-","");
+                            if(!String.Equals(actual,portableSha256,StringComparison.OrdinalIgnoreCase))
+                                throw new InvalidOperationException("The portable Moon executable changed after it was selected.");
+                        }
+                    } else if(!String.IsNullOrEmpty(expectedPath)) {
                         var matchesPrevious=previous!=null && previous.ProcessId==pid && previous.Birth==peer.Birth;
                         if(!peer.UiAccess || (previous!=null ? !matchesPrevious : !String.Equals(peer.Path,expectedPath,StringComparison.OrdinalIgnoreCase)))
                             throw new InvalidOperationException("The Moon pipe server is not the expected installed daemon.");
@@ -125,7 +141,8 @@ public static class MoonInstallNative {
     }
     static uint TokenWord(IntPtr token,int kind) {var memory=Marshal.AllocHGlobal(4); try {uint length; if(!GetTokenInformation(token,kind,memory,4,out length)) throw Error(); return unchecked((uint)Marshal.ReadInt32(memory));} finally {Marshal.FreeHGlobal(memory);} }
     public static uint TokenWord(int kind) { using(var identity=WindowsIdentity.GetCurrent()) {return TokenWord(identity.Token,kind);} }
-    public static uint Integrity() { using(var identity=WindowsIdentity.GetCurrent()) {uint length;GetTokenInformation(identity.Token,25,IntPtr.Zero,0,out length);var memory=Marshal.AllocHGlobal((int)length);try {if(!GetTokenInformation(identity.Token,25,memory,length,out length)) throw Error();var sid=Marshal.ReadIntPtr(memory);var count=Marshal.ReadByte(GetSidSubAuthorityCount(sid));return unchecked((uint)Marshal.ReadInt32(GetSidSubAuthority(sid,(uint)(count-1))));}finally{Marshal.FreeHGlobal(memory);}} }
+    static uint TokenIntegrity(IntPtr token) {uint length;GetTokenInformation(token,25,IntPtr.Zero,0,out length);var memory=Marshal.AllocHGlobal((int)length);try {if(!GetTokenInformation(token,25,memory,length,out length))throw Error();var sid=Marshal.ReadIntPtr(memory);var count=Marshal.ReadByte(GetSidSubAuthorityCount(sid));return unchecked((uint)Marshal.ReadInt32(GetSidSubAuthority(sid,(uint)(count-1))));}finally{Marshal.FreeHGlobal(memory);}}
+    public static uint Integrity() {using(var identity=WindowsIdentity.GetCurrent()){return TokenIntegrity(identity.Token);}}
     public static void LowerToLowIntegrity() {IntPtr token,sid;if(!OpenProcessToken(GetCurrentProcess(),0x88,out token))throw Error();try{if(!ConvertStringSidToSid("S-1-16-4096",out sid))throw Error();try{var label=new Label{Sid=sid,Attributes=0x20};if(!SetTokenInformation(token,25,ref label,(uint)Marshal.SizeOf(typeof(Label))+GetLengthSid(sid)))throw Error();}finally{LocalFree(sid);}}finally{CloseHandle(token);}}
     public static string Manifest(string path) {var module=LoadLibraryEx(path,IntPtr.Zero,0x22);if(module==IntPtr.Zero)throw Error();try{var resource=FindResource(module,new IntPtr(1),new IntPtr(24));if(resource==IntPtr.Zero)throw Error();var loaded=LoadResource(module,resource);if(loaded==IntPtr.Zero)throw Error();uint length=SizeofResource(module,resource);if(length==0||length>1048576)throw new InvalidOperationException("Invalid manifest size");var bytes=new byte[length];Marshal.Copy(LockResource(loaded),bytes,0,(int)length);return Encoding.UTF8.GetString(bytes).TrimEnd('\0');}finally{FreeLibrary(module);}}
     public static void EnvironmentChanged() {UIntPtr result;SendMessageTimeout(new IntPtr(0xffff),0x1a,IntPtr.Zero,"Environment",2,200,out result);}
@@ -340,7 +357,7 @@ function Invoke-MoonShellProcess {
         return $process.ExitCode
     } finally {$process.Dispose()}
 }
-function Connect-MoonRpc([string]$Name,[string]$Expected,[MoonInstallNative+ProcessIdentityInfo]$ExpectedPeer,[string]$Development,[string]$InstalledPath,[bool]$ExactDevelopment) {
+function Connect-MoonRpc([string]$Name,[string]$Expected,[MoonInstallNative+ProcessIdentityInfo]$ExpectedPeer,[string]$Development,[string]$InstalledPath,[bool]$ExactDevelopment,[MoonInstallNative+ProcessIdentityInfo]$ExpectedPortablePeer,[string]$ExpectedPortableSha256) {
     $until=[DateTime]::UtcNow.AddMilliseconds(1500)
     $lastError=$null
     do {
@@ -349,7 +366,7 @@ function Connect-MoonRpc([string]$Name,[string]$Expected,[MoonInstallNative+Proc
             $pipe=[IO.Pipes.NamedPipeClientStream]::new('.',$endpoint,[IO.Pipes.PipeDirection]::InOut,[IO.Pipes.PipeOptions]::Asynchronous,[Security.Principal.TokenImpersonationLevel]::Identification)
             try {
                 $pipe.Connect(25)
-                $peer=[MoonInstallNative]::VerifyPipeServer($pipe.SafePipeHandle,$Expected,$ExpectedPeer,$Development,$InstalledPath,$ExactDevelopment)
+                $peer=[MoonInstallNative]::VerifyPipeServer($pipe.SafePipeHandle,$Expected,$ExpectedPeer,$Development,$InstalledPath,$ExactDevelopment,$ExpectedPortablePeer,$ExpectedPortableSha256)
                 return [pscustomobject]@{pipe=$pipe;peer=$peer}
             } catch {
                 $pipe.Dispose()
@@ -362,11 +379,16 @@ function Connect-MoonRpc([string]$Name,[string]$Expected,[MoonInstallNative+Proc
 }
 function Invoke-MoonRpc {
     param([ValidateSet('query','command','lifecycle')][string]$Method,[string]$Query,[string[]]$Commands,[long]$ExpectedFocus,
-        [switch]$Installed,[MoonInstallNative+ProcessIdentityInfo]$ExpectedPeer,[string]$DevelopmentPath,[ValidateSet('restart','exit')][string]$LifecycleAction)
+        [switch]$Installed,[MoonInstallNative+ProcessIdentityInfo]$ExpectedPeer,[string]$DevelopmentPath,[ValidateSet('restart','exit')][string]$LifecycleAction,
+        [MoonInstallNative+ProcessIdentityInfo]$ExpectedPortablePeer,[string]$ExpectedPortableSha256)
+    if ($ExpectedPortablePeer -or $ExpectedPortableSha256) {
+        if (!$ExpectedPortablePeer -or $ExpectedPortableSha256 -notmatch '^[A-Fa-f0-9]{64}$' -or $Installed -or $ExpectedPeer -or $DevelopmentPath) {throw 'Portable peer verification requires one explicit, complete identity.'}
+        if (!(($Method -eq 'query' -and $Query -in @('stats','world','windows','restart-config')) -or ($Method -eq 'lifecycle' -and $LifecycleAction -eq 'exit'))) {throw 'Portable migration only permits reading its checkpoint and a normal exit.'}
+    }
     $installedPath=Join-Path (Get-MoonInstallDirectory) 'moon.exe'
     $expected=if($Installed -or $ExpectedPeer){$installedPath}else{$null}
     $development=if($DevelopmentPath){[IO.Path]::GetFullPath($DevelopmentPath)}else{Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'moon-dev\moon.exe'}
-    $connection=Connect-MoonRpc ([MoonInstallNative]::PipeName()) $expected $ExpectedPeer $development $installedPath ([bool]$DevelopmentPath)
+    $connection=Connect-MoonRpc ([MoonInstallNative]::PipeName()) $expected $ExpectedPeer $development $installedPath ([bool]$DevelopmentPath) $ExpectedPortablePeer $ExpectedPortableSha256
     $pipe=$connection.pipe
     $peer=$connection.peer
     try {
@@ -400,8 +422,146 @@ function Invoke-MoonRpc {
     } finally { $pipe.Dispose() }
 }
 function Get-MoonDaemon {
-    param([switch]$Installed,[MoonInstallNative+ProcessIdentityInfo]$ExpectedPeer,[string]$DevelopmentPath)
-    try {Invoke-MoonRpc query stats -Installed:$Installed -ExpectedPeer $ExpectedPeer -DevelopmentPath $DevelopmentPath} catch {return $null}
+    param([switch]$Installed,[MoonInstallNative+ProcessIdentityInfo]$ExpectedPeer,[string]$DevelopmentPath,[MoonInstallNative+ProcessIdentityInfo]$ExpectedPortablePeer,[string]$ExpectedPortableSha256)
+    try {Invoke-MoonRpc query stats -Installed:$Installed -ExpectedPeer $ExpectedPeer -DevelopmentPath $DevelopmentPath -ExpectedPortablePeer $ExpectedPortablePeer -ExpectedPortableSha256 $ExpectedPortableSha256} catch {return $null}
+}
+function Assert-MoonPortableActive($Daemon) {
+    if (!$Daemon.PSObject.Properties['paused'] -or $Daemon.paused -isnot [bool] -or $Daemon.paused) {throw 'Resume tiling in portable Moon before setup; the current desktop was left unchanged.'}
+    if (!$Daemon.PSObject.Properties['session_suspended'] -or $Daemon.session_suspended -isnot [bool] -or $Daemon.session_suspended) {throw 'Return to the unlocked desktop before switching Moon installations; the current desktop was left unchanged.'}
+}
+function Get-MoonPortableSource([string]$Path) {
+    if ($Path) {
+        $Path=(Resolve-Path -LiteralPath $Path).ProviderPath
+        $running=Get-MoonDaemon -DevelopmentPath $Path
+        if (!$running) {throw 'The selected portable Moon could not be verified. Older versions must exit from their tray menu once before setup.'}
+    } else {
+        # The reviewed development location is the only implicit candidate.
+        $running=Get-MoonDaemon
+        if (!$running -or $running.token.ui_access) {return $null}
+    }
+    if ($running.token.ui_access) {throw 'Portable migration requires an ordinary Moon instance.'}
+    $sha=(Get-FileHash -LiteralPath $running.executable -Algorithm SHA256).Hash
+    $verified=Invoke-MoonRpc query stats -ExpectedPortablePeer $running.pipe_peer -ExpectedPortableSha256 $sha
+    Assert-MoonPortableActive $verified
+    [void](Get-MoonSelectedConfigPath $verified)
+    [pscustomobject]@{daemon=$verified;peer=$verified.pipe_peer;sha256=$sha}
+}
+function Find-MoonPortableDaemon([string]$Path,[string]$Sha256) {
+    # Recovery may have a new PID, but never a new image, logon or privilege.
+    # Inspect only the explicitly selected image; no arbitrary Moon discovery.
+    if ((Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash -ne $Sha256) {throw 'The saved portable executable changed; it was not launched or trusted.'}
+    $session=[Diagnostics.Process]::GetCurrentProcess().SessionId
+    foreach ($process in @(Get-CimInstance Win32_Process | Where-Object {$_.SessionId -eq $session -and $_.Name -ieq [IO.Path]::GetFileName($Path)})) {
+        try {
+            $peer=[MoonInstallNative]::ProcessIdentity([uint32]$process.ProcessId)
+            if (![string]::Equals($peer.Path,$Path,[StringComparison]::OrdinalIgnoreCase)) {continue}
+            $running=Get-MoonDaemon -ExpectedPortablePeer $peer -ExpectedPortableSha256 $Sha256
+            if ($running) {return $running}
+        } catch {Write-Verbose 'A portable candidate exited or could not be verified.'}
+    }
+    return $null
+}
+function Wait-MoonMigrationDrained([string]$PortablePath) {
+    $session=[Diagnostics.Process]::GetCurrentProcess().SessionId
+    $names=@('moon.exe',[IO.Path]::GetFileName($PortablePath))
+    Wait-MoonCondition -Description 'Moon and its recovery watchdogs to finish restoring windows' -Condition {
+        @(Get-CimInstance Win32_Process | Where-Object {$_.SessionId -eq $session -and $names -contains $_.Name}).Count -eq 0
+    }
+}
+function Get-MoonConfigFingerprint($Value) {
+    if ($null -eq $Value) {return 'null'}
+    # PowerShell can wrap JSON arrays/scalars in PSObject. Test their native
+    # shapes first; inspecting wrapper properties would discard actual values.
+    if ($Value -is [Array]) {
+        $parts=foreach($item in $Value) {Get-MoonConfigFingerprint $item}
+        return '['+(@($parts) -join ',')+']'
+    }
+    if ($Value -is [string] -or $Value -is [ValueType]) {return (ConvertTo-Json -InputObject $Value -Compress)}
+    if ($Value -is [pscustomobject]) {
+        $parts=foreach($property in @($Value.PSObject.Properties | Sort-Object Name)) {(ConvertTo-Json -InputObject $property.Name -Compress)+':'+(Get-MoonConfigFingerprint $property.Value)}
+        return '{'+(@($parts) -join ',')+'}'
+    }
+    throw 'The configuration checkpoint has an unsupported value.'
+}
+function Assert-MoonRestartConfig {
+    param($Snapshot,$ConfigIdentity,[hashtable]$PeerArguments)
+    $state=[pscustomobject]@{config_path=$ConfigIdentity.config_path}
+    Assert-MoonConfigIdentity $ConfigIdentity $state
+    # Parsing happens in the existing daemon under its own token. A failed
+    # reload may leave a working desktop whose current file cannot be restarted.
+    $restart=Invoke-MoonRpc query restart-config @PeerArguments
+    $record=([Text.UTF8Encoding]::new($false,$true)).GetString($Snapshot.journal) | ConvertFrom-Json
+    if (!$record.world.PSObject.Properties['paused'] -or $record.world.paused -isnot [bool] -or $record.world.paused) {throw 'Resume tiling before setup; a paused desktop checkpoint cannot preserve native positions through a normal exit.'}
+    if (!$record.world.PSObject.Properties['config'] -or $restart -isnot [pscustomobject] -or (Get-MoonConfigFingerprint $record.world.config) -cne (Get-MoonConfigFingerprint $restart)) {
+        throw 'Saved settings do not match the running desktop. Apply or correct them before setup; Moon was left running.'
+    }
+    Assert-MoonConfigIdentity $ConfigIdentity $state
+}
+function Test-MoonCandidateConfig {
+    param([string]$Target,$State,$ConfigIdentity)
+    $arguments=@('config','validate')
+    $selected=Get-MoonConfiguredPath $State
+    if ($selected) {$arguments+=@('--config',$selected)}
+    if ($ConfigIdentity) {Assert-MoonConfigIdentity $ConfigIdentity ([pscustomobject]@{config_path=$ConfigIdentity.config_path})}
+    # Target is the signed executable already published in protected Program
+    # Files. Never execute the user-writable portable image from this process.
+    Invoke-MoonNative $Target $arguments -TimeoutSeconds 20 | Out-Null
+    if ($ConfigIdentity) {Assert-MoonConfigIdentity $ConfigIdentity ([pscustomobject]@{config_path=$ConfigIdentity.config_path})}
+}
+function Save-MoonPortableHandoff {
+    param([MoonInstallNative+ProcessIdentityInfo]$Peer,[string]$Sha256,$ConfigIdentity,[string]$JournalPath,[string]$Directory)
+    $pins=@{ExpectedPortablePeer=$Peer;ExpectedPortableSha256=$Sha256}
+    $current=Invoke-MoonRpc query stats @pins
+    Assert-MoonPortableActive $current
+    $identity=Get-MoonDesktopIdentity $current
+    if ($identity.sha256 -ne $Sha256) {throw 'The portable executable changed during setup.'}
+    Assert-MoonConfigIdentity $ConfigIdentity $current
+    $snapshot=Get-MoonUpgradeSnapshot -JournalPath $JournalPath -ProcessId $Peer.ProcessId @pins
+    Assert-MoonRestartConfig $snapshot $ConfigIdentity $pins
+    Save-MoonDesktopCheckpoint $snapshot $identity $Directory
+}
+function Stop-MoonPortableCheckpoint {
+    param($Checkpoint,[MoonInstallNative+ProcessIdentityInfo]$Peer,[ref]$ShutdownRequested)
+    $pins=@{ExpectedPortablePeer=$Peer;ExpectedPortableSha256=$Checkpoint.identity.sha256}
+    $running=Invoke-MoonRpc query stats @pins
+    Assert-MoonPortableActive $running
+    Assert-MoonDesktopIdentity $Checkpoint.identity $running
+    if ((Get-MoonLayoutFingerprint @pins) -ne $Checkpoint.layout) {throw 'Your window layout changed before the switch. Moon was left running; retry setup.'}
+    $record=([Text.UTF8Encoding]::new($false,$true)).GetString((Read-MoonDesktopCheckpoint $Checkpoint)) | ConvertFrom-Json
+    if (!$record.world.PSObject.Properties['paused'] -or $record.world.paused -isnot [bool] -or $record.world.paused) {throw 'Resume tiling before setup; the paused checkpoint was not transferred.'}
+    $Checkpoint.status='stopping'
+    Write-MoonJsonFile $Checkpoint.receipt_path $Checkpoint
+    # A reply can be lost after exit was accepted. Own recovery before sending,
+    # and decide whether exit finished from native process identity and drainage.
+    $ShutdownRequested.Value=$true
+    try {Invoke-MoonRpc lifecycle -LifecycleAction exit @pins | Out-Null} catch {Write-Verbose $_}
+    Wait-MoonCondition -Description 'the captured portable Moon to exit' -Condition {![MoonInstallNative]::ProcessStillRunning($Peer)}
+    Wait-MoonMigrationDrained $Checkpoint.identity.path
+}
+function Resume-MoonPortableCheckpoint {
+    param($Checkpoint,[string]$JournalPath,$State,[MoonInstallNative+ProcessIdentityInfo]$OriginalPeer)
+    $identity=$Checkpoint.identity
+    Assert-MoonConfigIdentity $identity ([pscustomobject]@{config_path=$identity.config_path})
+    $running=if([MoonInstallNative]::ProcessStillRunning($OriginalPeer)) {
+        Invoke-MoonRpc query stats -ExpectedPortablePeer $OriginalPeer -ExpectedPortableSha256 $identity.sha256
+    } else {Find-MoonPortableDaemon $identity.path $identity.sha256}
+    if (!$running) {
+        Wait-MoonMigrationDrained $identity.path
+        [void](Read-MoonDesktopCheckpoint $Checkpoint)
+        if (Test-Path -LiteralPath $JournalPath) {
+            Assert-MoonNoReparse $JournalPath
+            if ((Get-FileHash -LiteralPath $JournalPath -Algorithm SHA256).Hash -ne $Checkpoint.journal_sha256) {throw 'Another recovery journal remains. The original checkpoint was retained for recovery.'}
+        } else {Publish-MoonDesktopCheckpoint $Checkpoint $JournalPath}
+        $launch=[pscustomobject]@{owner_sid=$State.owner_sid;install_id=$State.install_id;config_path=$identity.launch_config_path}
+        Start-MoonLimitedOnce $identity.path (Get-MoonLaunchArguments $launch -Resume) $launch -ExpectedPortableSha256 $identity.sha256
+        $running=Find-MoonPortableDaemon $identity.path $identity.sha256
+    }
+    if (!$running -or (Get-MoonSelectedConfigPath $running) -ne $identity.launch_config_path) {throw 'The portable Moon recovery did not retain its original settings selection.'}
+    $pins=@{ExpectedPortablePeer=$running.pipe_peer;ExpectedPortableSha256=$identity.sha256}
+    Wait-MoonCondition -Description 'the original portable desktop layout' -Condition {(Get-MoonLayoutFingerprint @pins) -eq $Checkpoint.layout}
+    $Checkpoint.status='restored'
+    try {Write-MoonJsonFile $Checkpoint.receipt_path $Checkpoint} catch {Write-Warning 'Moon recovered, but its checkpoint receipt could not be updated.'}
+    return $running
 }
 function Wait-MoonCondition([scriptblock]$Condition,[string]$Description,[int]$Seconds=20) {
     $until=[DateTime]::UtcNow.AddSeconds($Seconds); $last=''
@@ -583,9 +743,9 @@ function Assert-MoonOwnedTask($Task,$State,[string]$Target) {
     if ($principal -ne $State.owner_sid) { throw 'Unexpected startup task user.' }
 }
 function Get-MoonLayoutFingerprint {
-    param($World,[object[]]$Placements,[switch]$Installed,[MoonInstallNative+ProcessIdentityInfo]$ExpectedPeer,[string]$DevelopmentPath)
-    if (!$PSBoundParameters.ContainsKey('World')) {$World=Invoke-MoonRpc query world -Installed:$Installed -ExpectedPeer $ExpectedPeer -DevelopmentPath $DevelopmentPath}
-    if (!$PSBoundParameters.ContainsKey('Placements')) {$Placements=@(Invoke-MoonRpc query windows -Installed:$Installed -ExpectedPeer $ExpectedPeer -DevelopmentPath $DevelopmentPath)}
+    param($World,[object[]]$Placements,[switch]$Installed,[MoonInstallNative+ProcessIdentityInfo]$ExpectedPeer,[string]$DevelopmentPath,[MoonInstallNative+ProcessIdentityInfo]$ExpectedPortablePeer,[string]$ExpectedPortableSha256)
+    if (!$PSBoundParameters.ContainsKey('World')) {$World=Invoke-MoonRpc query world -Installed:$Installed -ExpectedPeer $ExpectedPeer -DevelopmentPath $DevelopmentPath -ExpectedPortablePeer $ExpectedPortablePeer -ExpectedPortableSha256 $ExpectedPortableSha256}
+    if (!$PSBoundParameters.ContainsKey('Placements')) {$Placements=@(Invoke-MoonRpc query windows -Installed:$Installed -ExpectedPeer $ExpectedPeer -DevelopmentPath $DevelopmentPath -ExpectedPortablePeer $ExpectedPortablePeer -ExpectedPortableSha256 $ExpectedPortableSha256)}
     # Preserve tree child order, but normalize unordered maps and window lists.
     # Revisions, process lifetimes and changing titles are not layout semantics.
     $state=[ordered]@{
@@ -599,14 +759,15 @@ function Get-MoonLayoutFingerprint {
     $state | ConvertTo-Json -Depth 100 -Compress
 }
 function Get-MoonUpgradeSnapshot {
-    param([string]$JournalPath,[uint32]$ProcessId,[int]$TimeoutMilliseconds=5000,[MoonInstallNative+ProcessIdentityInfo]$ExpectedPeer)
-    $identity=if($ExpectedPeer){$ExpectedPeer}else{[MoonInstallNative]::ProcessIdentity($ProcessId)}
+    param([string]$JournalPath,[uint32]$ProcessId,[int]$TimeoutMilliseconds=5000,[MoonInstallNative+ProcessIdentityInfo]$ExpectedPeer,[MoonInstallNative+ProcessIdentityInfo]$ExpectedPortablePeer,[string]$ExpectedPortableSha256)
+    $pins=@{ExpectedPeer=$ExpectedPeer;ExpectedPortablePeer=$ExpectedPortablePeer;ExpectedPortableSha256=$ExpectedPortableSha256}
+    $identity=if($ExpectedPortablePeer){$ExpectedPortablePeer}elseif($ExpectedPeer){$ExpectedPeer}else{[MoonInstallNative]::ProcessIdentity($ProcessId)}
     $until=[DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
     $last='The journal checkpoint has not caught up with the current layout.'
     do {
         try {
-            $before=Invoke-MoonRpc query world -ExpectedPeer $ExpectedPeer
-            $layout=Get-MoonLayoutFingerprint -World $before -ExpectedPeer $ExpectedPeer
+            $before=Invoke-MoonRpc query world @pins
+            $layout=Get-MoonLayoutFingerprint -World $before @pins
             # The writer publishes by atomic rename; preserve delete-sharing
             # while reading one immutable opened version of the journal.
             $stream=[IO.FileStream]::new($JournalPath,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
@@ -616,7 +777,7 @@ function Get-MoonUpgradeSnapshot {
                 $stream.CopyTo($memory); $bytes=$memory.ToArray()
             } finally {$memory.Dispose(); $stream.Dispose()}
             $journal=([Text.UTF8Encoding]::new($false,$true)).GetString($bytes) | ConvertFrom-Json
-            $after=Invoke-MoonRpc query world -ExpectedPeer $ExpectedPeer
+            $after=Invoke-MoonRpc query world @pins
             if ($journal.version -eq 1 -and $journal.owner -eq $ProcessId -and $journal.owner_birth -eq $identity.Birth -and $before.revision -eq $after.revision -and $journal.world.revision -eq $after.revision) {
                 return [pscustomobject]@{layout=$layout;journal=$bytes;revision=$after.revision}
             }
@@ -694,7 +855,8 @@ function New-MoonTaskAction([string]$Target,[string]$Arguments='start --backgrou
     $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($launch))
     New-ScheduledTaskAction -Execute $powershell -Argument ('-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand '+$encoded)
 }
-function Start-MoonLimitedOnce([string]$Target,[string]$Arguments,$State) {
+function Start-MoonLimitedOnce([string]$Target,[string]$Arguments,$State,[string]$ExpectedPortableSha256) {
+    if ($ExpectedPortableSha256 -and (Get-FileHash -LiteralPath $Target -Algorithm SHA256).Hash -ne $ExpectedPortableSha256) {throw 'The portable recovery executable changed before launch.'}
     $name='moon-install-'+[guid]::NewGuid().ToString('N')
     $principal=New-ScheduledTaskPrincipal -UserId $State.owner_sid -LogonType Interactive -RunLevel Limited
     $settings=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::FromMinutes(1))
@@ -703,7 +865,8 @@ function Start-MoonLimitedOnce([string]$Target,[string]$Arguments,$State) {
         $launchAfter=[DateTime]::UtcNow
         Start-ScheduledTask -TaskName $name
         try {
-            Wait-MoonCondition -Description 'the restored signed daemon' -Condition {
+            Wait-MoonCondition -Description 'the restored Moon desktop' -Condition {
+                if ($ExpectedPortableSha256) {return [bool](Find-MoonPortableDaemon $Target $ExpectedPortableSha256)}
                 $running=Get-MoonDaemon -Installed
                 $running -and [string]::Equals($running.executable,$Target,[StringComparison]::OrdinalIgnoreCase) -and $running.token.ui_access
             }

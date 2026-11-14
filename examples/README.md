@@ -20,7 +20,9 @@ Each UTF-8 JSON frame ends in a newline. Requests are at most 64 KiB; responses 
 {"version":1,"id":3,"method":"subscribe"}
 ```
 
-Replies contain `version`, the same `id`, `ok`, `result`, `error`, and the committed `revision`. Queries accept `world`, `windows` (desired placements), `monitors`, `config`, `transactions`, `stats`, `shortcuts`, and `overview`. Command arrays execute in order and stop on an error; earlier successful commands remain committed. The grammar is shared with bindings, rules, aliases and widget clicks.
+Replies contain `version`, the same `id`, `ok`, `result`, `error`, and the committed `revision`. Queries accept `world`, `windows` (desired placements), `monitors`, `config`, `transactions`, `stats`, `restart-config`, `shortcuts`, and `overview`. Command arrays execute in order and stop on an error; earlier successful commands remain committed. The grammar is shared with bindings, rules, aliases and widget clicks.
+
+`restart-config` is a read-only setup preflight. It parses the current file with the daemon’s original explicit/default selection and returns the same Config JSON shape as `world.config`; it does not apply the file. Invalid or missing explicitly selected files return an error. Sessions started with `--only`, `--no-hook` or `--no-surfaces` are refused because setup does not preserve those diagnostic options. Setup compares this result with its captured committed config and separately rechecks file identity before shutdown.
 
 `shortcuts` returns `{mode, paused, hook_enabled, bindings: [{chord, commands}], emergency}`.
 It uses the same resolver as the live keyboard hook: modes replace normal bindings,

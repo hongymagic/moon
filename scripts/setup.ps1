@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([ValidateSet('Install','Uninstall')][string]$Mode='Install',[string]$Binary,[string]$SettingsBinary,[switch]$KeepPreviousDesktopStopped,[switch]$CompileOnly)
+param([ValidateSet('Install','Uninstall')][string]$Mode='Install',[string]$Binary,[string]$SettingsBinary,[string]$PortableBinary,[switch]$KeepPreviousDesktopStopped,[switch]$CompileOnly)
 . (Join-Path $PSScriptRoot 'install-common.ps1')
 function Get-MoonSetupHandoverArguments {
     param([switch]$KeepStopped,[string]$StatePath=(Join-Path $env:LOCALAPPDATA 'moon\handover.json'))
@@ -163,7 +163,7 @@ $ui.Primary.Add_Click({
         $context.detail=Join-Path $context.files.directory ($context.operation+'.log')
         $entry=if($Mode -eq 'Uninstall'){'uninstall.ps1'}elseif(!$installed -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'handover.ps1'))){'handover.ps1'}else{'install.ps1'}
         $arguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $PSScriptRoot $entry),'-OperationId',$context.operation)
-        if ($Mode -eq 'Install') {$arguments+=@('-Binary',$Binary,'-SettingsBinary',$SettingsBinary)}
+        if ($Mode -eq 'Install') {$arguments+=@('-Binary',$Binary,'-SettingsBinary',$SettingsBinary);if($PortableBinary){$arguments+=@('-PortableBinary',$PortableBinary)}}
         if ($entry -eq 'handover.ps1') {$arguments+=@(Get-MoonSetupHandoverArguments -KeepStopped:$KeepPreviousDesktopStopped)}
         $powershell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
         $context.process=Start-Process -FilePath $powershell -ArgumentList (($arguments|ForEach-Object {ConvertTo-MoonArgument $_}) -join ' ') -WindowStyle Hidden -RedirectStandardOutput ($context.detail+'.out') -RedirectStandardError $context.detail -PassThru

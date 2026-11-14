@@ -280,6 +280,69 @@ This restores the saved startup shortcuts without replacing a different shortcut
 that somebody has created since handover. Original configurations are backed up
 but are not overwritten during rollback, since handover never edits them.
 
+## Installing from a running portable copy
+
+A current portable Moon can hand its layout to the installed copy without exiting
+before Windows approval. Select the running executable explicitly when it is
+outside the standard `moon-dev` directory:
+
+```powershell
+./scripts/setup.ps1 -Binary 'C:\Moon release\moon.exe' `
+  -SettingsBinary 'C:\Moon release\moon-settings.exe' `
+  -PortableBinary 'C:\My portable Moon\moon.exe' -KeepPreviousDesktopStopped
+```
+
+From WSL or a packaged host, pass the same `-PortableBinary` to
+`launch-from-explorer.ps1 -Mode Handover`; its ordinary Explorer worker forwards
+the selection. Setup retains that selection on retry. An arbitrary process called
+`moon.exe` is never accepted by name. Older shared-pipe builds still need the
+one-time exit described below; this flow does not weaken their IPC check.
+
+The ordinary parent captures the exact native process ID, creation time, image
+path and image hash before approval. Each elevated checkpoint/exit request checks
+that identity on the connected single-instance pipe, in the same Windows logon
+and session. Only an ordinary, non-UIAccess, non-AppContainer peer is eligible;
+the existing installed-peer and default privilege policies remain intact. The
+portable exception permits only checkpoint/restartability reads and normal exit.
+
+The portable copy stays active while setup signs and stages the installation.
+Immediately before switching, setup saves a consistent journal and semantic layout
+to a separate durable checkpoint, verifies configuration and identity again, then
+requests normal exit. A read-only request asks the current daemon to parse its own
+saved settings; they must match the checkpoint's committed configuration. The new
+signed, protected executable separately validates the same selection before exit,
+so a target-parser incompatibility leaves portable Moon running. Paused, locked or
+diagnostic sessions (`--only`, `--no-hook`, `--no-surfaces`) must return to an ordinary
+active session first; setup does not silently unpause or change their behavior. It waits for Moon and its watchdogs before publishing that
+checkpoint for the signed copy's one-time `--resume` launch. The normal logon task
+does not retain `--resume`. Both launches use an Interactive, Limited principal,
+following Microsoft's [Task Scheduler run-level contract](https://learn.microsoft.com/en-us/windows/win32/taskschd/principal-runlevel).
+
+Explicit configuration paths are preserved across first launch, startup, updates,
+recovery and the Settings shortcut. Implicit defaults stay implicit, including
+when there is no configuration file. Setup never copies or creates personal
+configuration to perform the transfer. A missing or ambiguous selection flag is
+refused instead of guessed.
+
+If setup is canceled before the switch, the original copy remains running. A
+failure after the switch restores that exact portable image and configuration
+from the saved checkpoint after the failed signed copy and watchdogs finish.
+A changed image, changed configuration, unverified replacement process or unrelated
+journal stops recovery and retains its receipt for diagnosis. Old-manager startup
+shortcuts remain backed up and disabled; portable-origin recovery never launches
+GlazeWM, Zebar or tacky-borders. A later signed-runtime verification failure retains
+the installed desktop and reports `recovery_required`; it does not uninstall a
+working transferred layout. The legacy `handover -Rollback` action refuses a
+portable-origin record, so it cannot revive the earlier window-manager stack.
+
+The reproducible isolated checks are `validate-portable-install.ps1`,
+`validate-upgrade-snapshot.ps1`, `validate-install-recovery.ps1` and
+`validate-setup-state.ps1`. The portable suite uses unique private connected pipes,
+private files and substituted desktop/task operations. It records whether the
+ordinary-token positive verification ran; an elevated CI process instead verifies
+that its own nonordinary peer is refused. These checks do not establish an accepted
+elevated-to-ordinary handoff or a successful signed installation.
+
 ## Upgrades and uninstall
 
 For an upgrade from a release that uses a shared multi-instance IPC pipe, exit

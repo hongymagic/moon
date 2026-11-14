@@ -144,6 +144,17 @@ pub fn load_config(options: &Options) -> Result<Config> {
     Config::load(&source).with_context(|| format!("config {}", path.display()))
 }
 
+/// Read-only installer preflight; the current daemon keeps its committed state.
+#[cfg(any(windows, test))]
+pub fn restart_config(options: &Options) -> Result<Config> {
+    if options.only.is_some() || options.no_hook || options.no_surfaces {
+        bail!(
+            "This Moon session uses --only, --no-hook or --no-surfaces and cannot be transferred by setup. Exit this diagnostic session before installing."
+        );
+    }
+    load_config(options)
+}
+
 #[cfg(windows)]
 pub fn open_settings(options: &Options) -> Result<()> {
     open_settings_page(options, None)
@@ -224,7 +235,7 @@ fn print_help() {
 moon [start] [--background] [--only PROCESS] [--no-hook] [--no-surfaces] [--takeover]\n\
 moon doctor                  Check capabilities and competing managers\n\
 moon settings                Open Moon Settings\n\
-moon query [world|stats|windows|monitors|transactions|config|shortcuts|overview]\n\
+moon query [world|stats|windows|monitors|transactions|config|restart-config|shortcuts|overview]\n\
 moon subscribe               Stream committed state changes\n\
 moon config default|show|validate|schema|reference|migrate|path\n\
 moon focus|move left|right|up|down\n\
@@ -246,6 +257,54 @@ Emergency recovery: Ctrl+Alt+Shift+F12.",
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn restart_preflight_reads_disk_without_applying_or_rewriting_settings() {
+        let directory = std::env::temp_dir().join(format!(
+            "moon-preflight-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("config.toml");
+        fs::write(&path, "[gaps]\ninner=17\n").unwrap();
+        let options = Options { config: Some(path.clone()), ..Options::default() };
+        let committed = load_config(&options).unwrap();
+        assert_eq!(restart_config(&options).unwrap(), committed);
+
+        let changed = "[gaps]\ninner=24\n";
+        fs::write(&path, changed).unwrap();
+        let proposed = restart_config(&options).unwrap();
+        assert_eq!(proposed.gaps.inner, 24);
+        assert_eq!(committed.gaps.inner, 17);
+        assert_eq!(fs::read_to_string(&path).unwrap(), changed);
+
+        let invalid = "[gaps]\ninner='invalid'\n";
+        fs::write(&path, invalid).unwrap();
+        assert!(restart_config(&options).is_err());
+        assert_eq!(committed.gaps.inner, 17);
+        assert_eq!(fs::read_to_string(&path).unwrap(), invalid);
+        fs::remove_file(&path).unwrap();
+        assert!(restart_config(&options).is_err());
+        assert!(!path.exists());
+        fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn restart_preflight_refuses_diagnostic_options_before_reading_configuration() {
+        for words in [
+            vec!["--no-hook"],
+            vec!["--no-surfaces"],
+            vec!["--only", "testwin"],
+            vec!["--only", "testwin", "--surfaces"],
+        ] {
+            let (options, _) = parse_args(words.into_iter().map(str::to_owned).collect()).unwrap();
+            let before = format!("{options:?}");
+            let error = restart_config(&options).unwrap_err().to_string();
+            assert!(error.contains("cannot be transferred by setup"));
+            assert_eq!(format!("{options:?}"), before);
+        }
+    }
+
     #[test]
     fn live_shortcut_status_matches_the_hook_startup_options() {
         assert!(Options::default().hook_enabled());

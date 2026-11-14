@@ -229,7 +229,7 @@ function Start-Process {
         $timer=[pscustomobject]@{started=$false};$timer|Add-Member ScriptMethod Start {$this.started=$true};$timer|Add-Member ScriptMethod Stop {$this.started=$false}
         $oldLog=Join-Path $temporary 'earlier-attempt.log';[IO.File]::WriteAllText($oldLog,'earlier diagnostics')
         $context=@{busy=$false;done=$false;process=$null;files=$null;operation='old';detail=$oldLog;status='failed';outcome=[pscustomobject]@{detail='old failure'}}
-        $Mode='Install';$installed=$false;$Binary='owned-moon.exe';$SettingsBinary='owned-settings.exe';$KeepPreviousDesktopStopped=$true
+        $Mode='Install';$installed=$false;$Binary='owned-moon.exe';$SettingsBinary='owned-settings.exe';$PortableBinary='C:\Owned portable\moon.exe';$KeepPreviousDesktopStopped=$true
         $ui.Secondary.IsEnabled=$false
         function Test-MoonAdministrator {$false}
         function Test-MoonSetupPayload {param($PackageDirectory,$Daemon,$Settings,$Installed)}
@@ -237,9 +237,9 @@ function Start-Process {
         function Show-MoonSetupProblem {param($Message,$Failure) $script:setupReportedProblem=$Message;$ui.Status.Text=$Message}
         function Start-Process {param($FilePath,$ArgumentList,$WindowStyle,$RedirectStandardOutput,$RedirectStandardError,[switch]$PassThru) $script:setupWorkerArguments=$ArgumentList;$child=[pscustomobject]@{HasExited=$false;ExitCode=0};$child|Add-Member ScriptMethod Dispose {};return $child}
         . $primaryHandler
-        if(!$context.busy -or $context.outcome -or $context.status -ne 'working' -or !$ui.Secondary.IsEnabled -or $ui.Details.Visibility -ne 'Collapsed' -or $script:setupWorkerArguments -notlike '*-KeepPreviousDesktopStopped*'){throw 'Actual retry did not reset stale UI state or forward no-fallback.'}
+        if(!$context.busy -or $context.outcome -or $context.status -ne 'working' -or !$ui.Secondary.IsEnabled -or $ui.Details.Visibility -ne 'Collapsed' -or $script:setupWorkerArguments -notlike '*-KeepPreviousDesktopStopped*' -or $script:setupWorkerArguments -notlike ('*-PortableBinary '+(ConvertTo-MoonArgument $PortableBinary)+'*')){throw 'Actual retry did not reset stale UI state or forward no-fallback.'}
         if([IO.File]::ReadAllText($oldLog) -ne 'earlier diagnostics'){throw 'Retry deleted earlier diagnostics.'}
-        $checks.Add('Actual guided retry resets stale controls/outcome, retains diagnostic history and forwards no-fallback')
+        $checks.Add('Actual guided retry resets stale controls/outcome, retains diagnostic history and forwards no-fallback plus the selected portable copy')
         function Read-MoonSetupStatus {param($OperationId) $script:setupFixtureStatus}
         $script:setupFixtureStatus=[pscustomobject]@{operation=$context.operation;status='cancelled';message='Moon setup was rolled back. Your previous desktop remains stopped.'}
         $context.process.HasExited=$true;$context.process.ExitCode=1223

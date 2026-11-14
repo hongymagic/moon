@@ -1,9 +1,62 @@
 # Acceptance evidence
 
 This ledger maps the checks in `.claude/plans/moon-v1.md` to observed evidence.
-It was reviewed on 13 November 2026 (Sydney). Implemented event handling and passing
+It was reviewed on 15 November 2026 (Sydney). Implemented event handling and passing
 simulated tests do not establish that the corresponding physical Windows event
 has been exercised.
+
+## Staged combined review and polish, 15 November 2026
+
+Commit `b2c9fc9` combines the completed repository review (`75e5468`, an exact
+45-file snapshot of the review working tree) with the polish implementation.
+The original review files were independently hash-checked and remain unchanged
+in their checkout. This candidate adds current shortcut help and workspace counts,
+draft Undo, truthful saved/loaded feedback, continuous carousel retargeting, and
+the reviewed IPC, reload, configuration, provider and workspace fixes.
+
+The final staged ordinary image, including the read-only restart preflight, is
+`512515BF2BB41FFC95776ECCEF26064076B865AE446CCE6DF9136DDC09883B8E`;
+the UIAccess image is
+`2B0AA7420F2CF206376BBB01606B0C46726211E6D9561FA4AE12FE2A26FD2CFF`;
+Settings is
+`53F48DA88434577EA18C99C0D81A949471E1D67A4EE9E168F79768D3EF7F2709`.
+All 116 build inputs remained unchanged during compilation. Manifest, icon and
+static-runtime import checks are recorded in
+`target/polish-20261115-final/release-build.json`; copied Windows images are verified
+in `target/polish-20261115-final/windows-stage.json`. The earlier combined-build
+artifacts and their receipts remain unchanged.
+
+The combined source passes 123 portable Rust tests (96 core, 14 daemon, 13
+Settings), 44 Settings browser checks, Windows-target Clippy, and formatting.
+The merged installer foundation passes 20 snapshot/configuration checks, 33
+setup-state checks and 22 recovery checks under PowerShell 5.1. These use private
+fixtures, not a live installation. All 34 portable-transfer checks pass, including
+actual private connected-pipe identity checks and mocked capture/stop/recovery
+failure paths. The effective-config comparison preserves array order and scalar
+values; a regression caught by the first run was corrected and the suite rerun.
+All 41 PowerShell scripts parse under Windows PowerShell 5.1.
+The native carousel cleanup regression also
+passes on the exact new unit executable using hidden owned popups only; it
+does not exercise visible animation, keyboard hooks or the user's windows.
+Reports are under `target/polish-20261115/` with prefixes `merged-core-checks`,
+`settings-merge-validation`, `combined-` and `native-hidden-popup-`.
+Final installer reports are `upgrade-snapshot-final.json`,
+`install-recovery-final.json`, `setup-state-final.json` and `portable-install.json`.
+The package regression suite also passes on the final executable inputs; it
+reads executable resources without launching them, checks archive integrity and
+failure cleanup, and confirms the original images are unchanged. Its report is
+`target/polish-20261115-final/package-validation.json`.
+
+The candidate is built and copied to Windows, not promoted, signed or installed.
+At the 19:09 UTC readiness check, Windows was still locked. The old 43FD daemon
+has not been stopped during this work. Its shared-pipe implementation cannot
+authenticate a live upgrade with the new client; migration must first end that
+specific old instance using the documented compatibility path. The new portable
+handoff does not relax the single-instance IPC requirement.
+
+Visible carousel and Settings validation, signed upgrade/rollback, physical
+resilience, performance budgets and the seven-day installed soak remain separate
+acceptance conditions. Earlier results below do not establish them for this build.
 
 ## Staged session-recovery update, 13 November 2026
 

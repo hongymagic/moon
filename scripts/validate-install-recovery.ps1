@@ -162,7 +162,7 @@ try {
         $supportSecurity=@{'moon-settings.exe'=$savedSecurity}
         [IO.File]::WriteAllText((Join-Path $install 'setup.ps1'),'new setup')
         $previousState=[pscustomobject]@{version=1;fixture='previous metadata'}
-        $targetReplaced=$true;$backupCreated=$true;$oldPid=123;$oldProcesses=@();$taskChanged=$false;$pathAdded=$false;$shellStarted=$false;$newCertificate=$null;$oldJournal=$null;$recoveryComplete=$false
+        $targetReplaced=$true;$backupCreated=$true;$oldPid=123;$oldProcesses=@();$taskChanged=$false;$pathAdded=$false;$shellStarted=$false;$newCertificate=$null;$oldJournal=$null;$recoveryComplete=$false;$portableStopIntent=$false;$portablePeer=$null
         $script:fixtureDaemon=[pscustomobject]@{process_id=456;executable=$target;pipe_peer=[MoonInstallNative+ProcessIdentityInfo]::new()};$script:fixtureExit=$false
         $OperationId=$operation
         $original=if($kind -eq 'cancelled'){[OperationCanceledException]::new('Injected cancellation checkpoint')}else{[IO.IOException]::new('Injected support replacement failure')}
@@ -178,6 +178,35 @@ try {
         if (Test-Path -LiteralPath (Join-Path $install 'setup.ps1')) {throw 'First-install support file survived rollback.'}
         if ((Get-Content -Raw -LiteralPath (Join-Path $install 'installation.json')|ConvertFrom-Json).fixture -ne 'previous metadata') {throw 'Previous ownership metadata was not restored.'}
         $checks.Add("Actual installer recovery preserves $kind despite progress I/O failure; RPC exit precedes binary restoration, missing support is restored, and new support is removed")
+    }
+
+    & {
+        function Resume-MoonPortableCheckpoint {
+            param($Checkpoint,$JournalPath,$State,$OriginalPeer)
+            if (Test-Path -LiteralPath $target) {throw 'Portable recovery ran before failed installed image cleanup.'}
+            if ($Checkpoint.receipt_path -ne $checkpointReceipt -or $OriginalPeer -ne $portablePeer) {throw 'Portable recovery lost its exact retained receipt or peer.'}
+            $script:portableRecoveryCalled=$true
+            if ($script:failPortableRecovery) {throw 'Injected portable recovery refusal'}
+        }
+        foreach($kind in @('before-stop','cancelled-after-stop','recovery-refused')) {
+            $install=Join-Path $temporary ('portable-'+$kind);[void][IO.Directory]::CreateDirectory($install)
+            $target=Join-Path $install 'moon.exe';$backup=Join-Path $install 'unused-backup.exe'
+            [IO.File]::WriteAllText($target,'new executable')
+            $targetReplaced=$true;$backupCreated=$false;$oldPid=123;$oldProcesses=@();$taskChanged=$false;$pathAdded=$false;$shellStarted=$false;$newCertificate=$null;$oldJournal=$null;$recoveryComplete=$false
+            $supportPublished=@();$previousState=$null;$statePath=Join-Path $install 'installation.json'
+            $portablePeer=[MoonInstallNative+ProcessIdentityInfo]::new();$portableStopIntent=$kind -ne 'before-stop'
+            $checkpointReceipt=Join-Path $install 'retained-checkpoint.json';[IO.File]::WriteAllText($checkpointReceipt,'retained checkpoint')
+            $portableCheckpoint=[pscustomobject]@{receipt_path=$checkpointReceipt};$journalPath=Join-Path $install 'journal.json';$state=[pscustomobject]@{}
+            $script:fixtureDaemon=$null;$script:portableRecoveryCalled=$false;$script:failPortableRecovery=$kind -eq 'recovery-refused'
+            $original=[OperationCanceledException]::new('Injected portable cancellation')
+            $caught=$null;try {try {throw $original} catch {. $rollback}} catch {$caught=$_.Exception}
+            if (!$caught -or $script:portableRecoveryCalled -ne $portableStopIntent) {throw "Portable cancellation recovered the wrong state in $kind"}
+            if ($kind -eq 'recovery-refused') {
+                if($recoveryComplete -or $caught.Message -notlike '*needs recovery*' -or $caught.Message -notlike ('*'+$checkpointReceipt+'*')){throw 'Failed portable recovery was falsely reported complete or lost its receipt path.'}
+            } elseif (!$recoveryComplete -or $caught.GetType() -ne $original.GetType() -or $caught.Message -ne $original.Message) {throw 'Successful portable recovery lost the original cancellation.'}
+            if (!(Test-Path -LiteralPath $checkpointReceipt)) {throw 'Cancellation discarded portable recovery evidence.'}
+            $checks.Add("Actual installer catch restores portable Moon only after shutdown intent and retains recoverable failure: $kind")
+        }
     }
 
     $tokens=$null;$errors=$null
@@ -224,6 +253,28 @@ try {
             } elseif (!$script:restoredDesktop -or !$caught -or $caught.Message -ne 'Injected handover child failure') {throw "Handover recovery did not preserve its original failure in $kind."}
             if ($kind -in @('unrelated','changed-install-id','changed-before-removal') -and !(Test-Path -LiteralPath $metadata)) {throw 'Handover removed a different installation.'}
             $checks.Add("Actual handover recovery respects installation ownership: $kind")
+        }
+    }
+    & {
+        $fixtureInstall=Join-Path $temporary 'portable-handover';[void][IO.Directory]::CreateDirectory($fixtureInstall)
+        function Get-MoonInstallDirectory {$fixtureInstall}
+        function Read-MoonInstallState {param($Directory) Get-Content -Raw -LiteralPath (Join-Path $Directory 'installation.json')|ConvertFrom-Json}
+        function Restore-PreviousDesktop {throw 'Portable handover must never restore old-manager shortcuts or launch a previous manager.'}
+        function Invoke-MoonNative {throw 'Portable handover must not uninstall a working or unclaimed signed installation.'}
+        function Find-MoonPortableDaemon {param($Path,$Sha256) if($script:portablePresent){[pscustomobject]@{config_path='C:\fixture\settings.toml';config_explicit=$false}}}
+        foreach($kind in @('cancelled-before-transfer','postcommit-verification-failure','portable-recovery-missing','unrelated-installation')) {
+            $StatePath=Join-Path $fixtureInstall 'handover.json';$metadata=Join-Path $fixtureInstall 'installation.json'
+            if(Test-Path -LiteralPath $metadata){Remove-Item -LiteralPath $metadata}
+            $saved=[pscustomobject]@{handover_id=[guid]::NewGuid().ToString('N');installation_id=$null;status='prepared';finished_at=$null;portable=[pscustomobject]@{path='C:\fixture\moon.exe';sha256=('1'*64);launch_config_path=$null}}
+            $script:portablePresent=$kind -ne 'portable-recovery-missing'
+            if($kind -in @('postcommit-verification-failure','unrelated-installation')) {Write-MoonJsonFile $metadata ([pscustomobject]@{install_id=[guid]::NewGuid().ToString('N');handover_id=$(if($kind -eq 'unrelated-installation'){[guid]::NewGuid().ToString('N')}else{$saved.handover_id})})}
+            $caught=$null;try{try{throw [IO.IOException]::new('Injected later verification failure')}catch{. $handoverRollback}}catch{$caught=$_.Exception}
+            if(!$caught){throw 'Failed verification was reported successful.'}
+            if($kind -eq 'cancelled-before-transfer') {
+                if($saved.status -ne 'rolled_back_portable' -or $caught.Message -ne 'Injected later verification failure'){throw 'A running portable desktop was not reported accurately after cancellation.'}
+            } elseif($saved.status -ne 'recovery_required'){throw 'Incomplete portable handover was falsely reported recovered.'}
+            if($kind -in @('postcommit-verification-failure','unrelated-installation') -and !(Test-Path -LiteralPath $metadata)){throw 'Later handover verification removed an installation.'}
+            $checks.Add("Actual portable handover catch keeps old managers stopped and never removes a retained signed desktop: $kind")
         }
     }
     $report=[pscustomobject]@{passed=$true;recorded_at=[DateTime]::UtcNow.ToString('o');checks=$checks.ToArray();scope='Private files, private named mutex, and exact owned noninteractive helpers; production rollback body with desktop RPC mocked; no elevation or real installation'}
