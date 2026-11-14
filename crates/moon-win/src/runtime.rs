@@ -537,7 +537,8 @@ $errors = Join-Path $root 'stderr'
             &limits as *const _ as *const _,
             std::mem::size_of_val(&limits) as u32,
         )?;
-        let worker = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, false, pid)?;
+        let worker =
+            OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, false, pid)?;
         job.1 = Some(worker);
         AssignProcessToJobObject(job.0, worker)?;
     }

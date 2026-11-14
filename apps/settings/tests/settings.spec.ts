@@ -330,7 +330,15 @@ test("clearing an optional workspace field and disabling weather request removal
   await navigate(page, "Workspaces");
   await change(page, "Icon", "");
   await navigate(page, "Advanced");
+  await change(page, "Latitude", "91");
+  await expect(page.getByLabel("Latitude", { exact: true })).toHaveAttribute(
+    "aria-invalid",
+    "true",
+  );
   await page.getByRole("button", { name: "Turn off", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Review errors" })).toHaveCount(
+    0,
+  );
   await page.getByRole("button", { name: "Save changes", exact: true }).click();
   await expect.poll(() => saveCalls(host).length).toBe(1);
   expect(saveCalls(host)[0]?.params.edits).toEqual([
@@ -440,8 +448,10 @@ test("saving makes the draft inert and returns to the saved state", async ({
     gaps: { inner: 24, outer: 32 },
   };
   await change(page, "Inner gap", "24");
+  await page.clock.install();
   await page.keyboard.press("Control+s");
   await expect.poll(() => saveCalls(host).length).toBe(1);
+  await page.clock.fastForward(21_000);
   await expect(page.locator(".page")).toHaveAttribute("inert", "");
   await expect(
     page.getByRole("button", { name: "Save changes", exact: true }),
@@ -668,6 +678,44 @@ test("polish: resetting a section clears its invalid draft fields", async ({
   await expect(
     page.getByRole("button", { name: "Save changes", exact: true }),
   ).toBeEnabled();
+});
+
+test("restoring bar defaults before editing a single field keeps other values inherited", async ({
+  page,
+}) => {
+  const host = await open(page, { bar: { ...defaults.bar, height: 60 } });
+  await navigate(page, "Appearance");
+  await page.getByRole("button", { name: "Reset bar appearance" }).click();
+  await page.getByRole("button", { name: "Restore defaults" }).click();
+  await change(page, "Height", "60");
+  await page.getByRole("button", { name: "Save changes", exact: true }).click();
+  await expect.poll(() => saveCalls(host).length).toBe(1);
+  expect(saveCalls(host)[0]?.params.edits).toEqual([
+    { op: "reset", path: ["bar"] },
+    { op: "set", path: ["bar", "height"], value: 60 },
+  ]);
+});
+
+test("valid decimal appearance and weather settings can be saved", async ({
+  page,
+}) => {
+  const host = await open(page, {
+    weather: { latitude: 0, longitude: 0, "interval-seconds": 900 },
+  });
+  await navigate(page, "Appearance");
+  await change(page, "Text size", "13.2");
+  await change(page, "Opacity", "0.99");
+  await navigate(page, "Advanced");
+  await change(page, "Latitude", "33.123456");
+  await change(page, "Update interval", "100000");
+  await page.getByRole("button", { name: "Save changes", exact: true }).click();
+  await expect.poll(() => saveCalls(host).length).toBe(1);
+  expect(saveCalls(host)[0]?.params.edits).toEqual([
+    { op: "set", path: ["bar", "font-size"], value: 13.2 },
+    { op: "set", path: ["bar", "opacity"], value: 0.99 },
+    { op: "set", path: ["weather", "latitude"], value: 33.123456 },
+    { op: "set", path: ["weather", "interval-seconds"], value: 100000 },
+  ]);
 });
 
 test("polish: JSON review reveals the invalid editor and its message", async ({

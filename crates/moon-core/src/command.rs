@@ -42,6 +42,41 @@ impl FromStr for Command {
             return Err("command exceeds 16 KiB".into());
         }
         let input = input.trim();
+        let (verb, args) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
+        let args = args.trim();
+        let workspace_name = |name: &str| {
+            if name.starts_with('"')
+                && let Ok(decoded) = serde_json::from_str::<String>(name)
+            {
+                decoded
+            } else {
+                name.into()
+            }
+        };
+        let (first_arg, remaining) = args.split_once(char::is_whitespace).unwrap_or((args, ""));
+        let remaining = remaining.trim_start();
+        match (verb, first_arg) {
+            ("workspace", _) if !args.is_empty() => {
+                return Ok(Self::Workspace(workspace_name(args)));
+            }
+            ("focus", "--workspace") if !remaining.is_empty() => {
+                return Ok(Self::Workspace(workspace_name(remaining)));
+            }
+            ("move", "--workspace") if !remaining.is_empty() => {
+                return Ok(Self::MoveToWorkspace {
+                    workspace: workspace_name(remaining),
+                    follow: false,
+                });
+            }
+            ("move-to-workspace", _) if !args.is_empty() => {
+                let (name, follow) = match args.rsplit_once(char::is_whitespace) {
+                    Some((name, "--follow")) => (name.trim_end(), true),
+                    _ => (args, false),
+                };
+                return Ok(Self::MoveToWorkspace { workspace: workspace_name(name), follow });
+            }
+            _ => {}
+        }
         let words: Vec<_> = input.split_whitespace().collect();
         let direction = |text: &str| {
             Direction::parse(text)
@@ -75,17 +110,8 @@ impl FromStr for Command {
             }
             ["set-floating"] => Ok(Self::SetFloating),
             ["set-tiling"] => Ok(Self::SetTiling),
-            ["workspace", name] | ["focus", "--workspace", name] => {
-                Ok(Self::Workspace((*name).into()))
-            }
             ["move-workspace", "--direction", d] | ["move-workspace", d] => {
                 Ok(Self::MoveWorkspace(direction(d)?))
-            }
-            ["move-to-workspace", name] | ["move", "--workspace", name] => {
-                Ok(Self::MoveToWorkspace { workspace: (*name).into(), follow: false })
-            }
-            ["move-to-workspace", name, "--follow"] => {
-                Ok(Self::MoveToWorkspace { workspace: (*name).into(), follow: true })
             }
             ["focus-monitor", d] => Ok(Self::FocusMonitor(direction(d)?)),
             ["move-to-monitor", d] => Ok(Self::MoveToMonitor(direction(d)?)),
@@ -98,11 +124,17 @@ impl FromStr for Command {
             ["settings"] => Ok(Self::Settings),
             ["mode", name] => Ok(Self::Mode((*name).into())),
             ["ignore"] => Ok(Self::Ignore),
-            ["exec" | "shell-exec", ..] if words.len() > 1 => {
-                Ok(Self::Exec(input.split_once(char::is_whitespace).unwrap().1.trim().into()))
-            }
+            ["exec" | "shell-exec", ..] if words.len() > 1 => Ok(Self::Exec(args.into())),
             _ => Err(format!("unknown command {input:?}; see moon help")),
         }
+    }
+}
+
+pub(crate) fn workspace_command(name: &str) -> String {
+    if name.trim() == name && !name.starts_with('"') && !name.chars().any(char::is_control) {
+        format!("workspace {name}")
+    } else {
+        format!("workspace {}", serde_json::Value::String(name.into()))
     }
 }
 
@@ -121,6 +153,27 @@ mod tests {
         assert_eq!(
             "exec cmd /c echo hello".parse::<Command>().unwrap(),
             Command::Exec("cmd /c echo hello".into())
+        );
+    }
+
+    #[test]
+    fn workspace_commands_preserve_names_with_spaces_and_escaped_text() {
+        for (name, command) in [
+            ("Web Browsing", "workspace Web Browsing"),
+            ("Web  Browsing", "focus --workspace Web  Browsing"),
+            (" Quoted \"name\" ", r#"workspace " Quoted \"name\" ""#),
+        ] {
+            let expected = Command::Workspace(name.into());
+            assert_eq!(command.parse(), Ok(expected.clone()));
+            assert_eq!(workspace_command(name).parse(), Ok(expected));
+        }
+        assert_eq!(
+            "move-to-workspace Web Browsing --follow".parse(),
+            Ok(Command::MoveToWorkspace { workspace: "Web Browsing".into(), follow: true })
+        );
+        assert_eq!(
+            r#"move-to-workspace "Web --follow""#.parse(),
+            Ok(Command::MoveToWorkspace { workspace: "Web --follow".into(), follow: false })
         );
     }
 }

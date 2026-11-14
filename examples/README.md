@@ -8,6 +8,10 @@ powershell.exe -NoProfile -File examples\workspace-state.ps1 -Once
 
 The pipe is `\\.\pipe\moon-v1-S-1-5-5-X-Y`, using the actual `TokenLogonSid` returned by Windows. This identifier is shared by the ordinary and elevated tokens of the same sign-in session; their authentication LUIDs can differ. The pipe ACL uses that same logon SID, and the mandatory integrity label remains medium. No network transport is supported. Microsoft documents this SID as [unique to each logon session](https://learn.microsoft.com/en-us/windows/win32/secauthz/well-known-sids).
 
+The base pipe and slots with suffixes `-1` through `-15` share the same protocol. Try another slot when one is busy. The example requires a maximum of one server instance per name and checks the connected server's executable before sending its request. Use `-DaemonPath` for a development executable outside the default `moon-dev` directory. Clients should use identification-only impersonation and check the server identity independently of the reply contents. [Windows named-pipe access rights](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights)
+
+Setup uses the `lifecycle` method with an `action` of `restart` or `exit` to control an authenticated daemon. These actions work independently of the user's command aliases.
+
 Each UTF-8 JSON frame ends in a newline. Requests are at most 64 KiB; responses at most 8 MiB. Each connection sends one request. A normal request receives one response and closes; subscriptions receive an initial world followed by committed worlds until disconnected. Slow subscriptions are disconnected so they cannot delay input or retain an unbounded queue.
 
 ```json

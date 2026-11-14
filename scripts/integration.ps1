@@ -183,9 +183,10 @@ function Read-Recovery {
 function Invoke-PublicRequest([hashtable]$Request) {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     try { $pipeName = [MoonExtensionIdentity]::PipeName($identity.Token) } finally { $identity.Dispose() }
-    $pipe = New-Object IO.Pipes.NamedPipeClientStream('.', $pipeName, [IO.Pipes.PipeDirection]::InOut, [IO.Pipes.PipeOptions]::Asynchronous)
+    $pipe = [IO.Pipes.NamedPipeClientStream]::new('.', $pipeName, [IO.Pipes.PipeDirection]::InOut, [IO.Pipes.PipeOptions]::Asynchronous, [Security.Principal.TokenImpersonationLevel]::Identification)
     try {
         $pipe.Connect(5000)
+        if ([MoonExtensionIdentity]::ServerImage($pipe.SafePipeHandle) -ine [IO.Path]::GetFullPath($MoonPath)) {throw 'The pipe does not belong to the owned Moon fixture.'}
         $reader = New-Object IO.StreamReader($pipe, $utf8, $false, 4096, $true)
         $writer = New-Object IO.StreamWriter($pipe, $utf8, 4096, $true)
         try {
@@ -443,7 +444,7 @@ try {
     }
     Assert-Placements
     Record-Pass 'four native windows tile exactly'
-    $extension = (& $ExtensionPath -Once) | ConvertFrom-Json
+    $extension = (& $ExtensionPath -Once -DaemonPath $MoonPath) | ConvertFrom-Json
     if (@($extension.workspaces).Count -ne 10) { throw 'The standalone IPC extension could not query all workspaces' }
     $guardState = Invoke-Moon query world
     $guardWindows = @($guardState.windows.PSObject.Properties.Name | Sort-Object)

@@ -129,7 +129,7 @@ function Close-OwnedSettings {
 function Assert-OwnedDaemon {
  if(!$daemon){throw 'No daemon is owned by this test.'}
  $daemon.Refresh();if($daemon.HasExited){throw 'Owned settings daemon exited unexpectedly.'}
- $state=Invoke-MoonRpc -Method query -Query stats
+ $state=Invoke-MoonRpc -Method query -Query stats -DevelopmentPath $MoonBinary
  if($state.process_id -ne $daemon.Id -or
     ![string]::Equals($state.executable,$MoonBinary,[StringComparison]::OrdinalIgnoreCase) -or
     ![string]::Equals($state.config_path,$config,[StringComparison]::OrdinalIgnoreCase)){
@@ -146,7 +146,7 @@ function Stop-OwnedDaemon {
   if(!$daemon.HasExited){
    try {
     $null=Assert-OwnedDaemon
-    $null=Invoke-MoonRpc -Method command -Commands @('exit')
+    $null=Invoke-MoonRpc -Method command -Commands @('exit') -DevelopmentPath $MoonBinary
     if(!$daemon.WaitForExit(5000)){throw 'Owned daemon did not exit after the exit command.'}
    } catch {
     # This retained Process object identifies only the child created by this test.
@@ -169,7 +169,7 @@ try {
    throw 'Live Settings validation requires no existing Moon process or recovery journal.'
   }
   $running=$null
-  try{$running=Invoke-MoonRpc -Method query -Query stats}catch{}
+  try{$running=Invoke-MoonRpc -Method query -Query stats -DevelopmentPath $MoonBinary}catch{}
   if($running){throw 'A Moon daemon already owns this session; it was left unchanged.'}
   if(Get-Process -Name $filter -ErrorAction SilentlyContinue){throw 'The unique process filter unexpectedly matches an existing process.'}
   $daemon=Start-Process -FilePath $MoonBinary -ArgumentList @('start','--only',$filter,'--no-hook','--no-surfaces','--config',(ConvertTo-MoonArgument $config)) -WindowStyle Hidden -PassThru -RedirectStandardOutput ($config+'.daemon.out') -RedirectStandardError ($config+'.daemon.err')
@@ -187,12 +187,13 @@ try {
  Wait-MoonCondition {(Find-MoonControl 'All changes saved') -and (Find-MoonControl 'Reload').Current.IsEnabled -and (Find-MoonValue 'Outer gap')} 'Saved state and editable content after the native reply'
  $checks.Add('Real native bridge saves validated TOML and preserves comments')
  if($MoonBinary){
-  Wait-MoonCondition {Find-MoonControl 'Saved and applied to your desktop.'} 'Live save reports that the settings were applied'
+  Wait-MoonCondition {Find-MoonControl 'Saved. Moon will apply the changes automatically.'} 'Live save acknowledges persistence'
+  Wait-MoonCondition { (Invoke-MoonRpc -Method query -Query config -DevelopmentPath $MoonBinary).gaps.inner -eq 24 } 'The owned daemon applies the saved configuration'
   $state=Assert-OwnedDaemon
-  $actual=Invoke-MoonRpc -Method query -Query config
+  $actual=Invoke-MoonRpc -Method query -Query config -DevelopmentPath $MoonBinary
   if($actual.gaps.inner -ne 24 -or $actual.bar.enabled -or $actual.borders.enabled){throw 'Settings reported success without applying the exact isolated configuration.'}
   $liveEvidence=[pscustomobject]@{process_id=$state.process_id;config_path=$state.config_path;managed_windows=$state.managed_windows;inner_gap=$actual.gaps.inner;revision=$state.revision}
-  $checks.Add('Save reloads the owned daemon: queried inner gap is 24 and the UI confirms it applied')
+  $checks.Add('The UI confirms persistence and the owned daemon applies the saved configuration')
  }
  Set-MoonField 'Outer gap' '48'
  [IO.File]::AppendAllText($config,"# concurrent editor`r`n",[Text.UTF8Encoding]::new($false))
@@ -229,7 +230,7 @@ try {
   Wait-MoonCondition {Find-MoonControl 'Saved. The running Moon instance is using a different configuration.'} 'Different configuration warning'
   if((Read-SettingsSource $otherConfig) -notmatch 'inner\s*=\s*28'){throw 'The different owned document did not save.'}
   $after=Assert-OwnedDaemon
-  $actual=Invoke-MoonRpc -Method query -Query config
+  $actual=Invoke-MoonRpc -Method query -Query config -DevelopmentPath $MoonBinary
   if($actual.gaps.inner -ne 24 -or $after.revision -ne $before.revision){throw 'Saving another configuration reloaded or changed the running daemon.'}
   $checks.Add('Saving a different owned file warns accurately and leaves the daemon configuration and revision unchanged')
  }

@@ -159,11 +159,11 @@ function Assert-IdleStats($Stats) {
     if ($Stats.managed_windows -ne 8 -or $null -ne $Stats.last_error -or $null -eq $Stats.renderer) {throw 'The fixture needs eight managed windows, active surfaces and no daemon error.'}
 }
 function Read-IdleEndpoint {
-    $stats=Invoke-MoonRpc query stats
+    $stats=Invoke-MoonRpc query stats -DevelopmentPath $moon
     Assert-IdleStats $stats
     Assert-IdleProcess $helper
-    $world=Invoke-MoonRpc query world
-    $placements=@(Invoke-MoonRpc query windows)
+    $world=Invoke-MoonRpc query world -DevelopmentPath $moon
+    $placements=@(Invoke-MoonRpc query windows -DevelopmentPath $moon)
     if ($placements.Count -ne 8 -or @($world.windows.PSObject.Properties).Count -ne 8 -or $world.revision -ne $stats.revision) {throw 'Fixture state changed while its endpoint was read.'}
     $native=@(foreach ($item in $windows) {
         if (![MoonElevatedNative]::IsWindow([IntPtr][long]$item.id) -or [MoonApplicationNative]::ProcessId([long]$item.id) -ne $helper.id) {throw 'An owned window identity changed.'}
@@ -228,9 +228,9 @@ finally {
     if ($sampler) {$sampler.Dispose()}
     if ($daemon -and !$daemon.process.HasExited) {
         try {
-            $current=Invoke-MoonRpc query stats
+            $current=Invoke-MoonRpc query stats -DevelopmentPath $moon
             Assert-IdleDaemonOwner $current
-            Invoke-MoonRpc -Method command -Commands @('exit') | Out-Null
+            Invoke-MoonRpc -Method command -DevelopmentPath $moon -Commands @('exit') | Out-Null
             if (!$daemon.process.WaitForExit(10000)) {throw 'Owned daemon did not exit cleanly.'}
         } catch {
             $cleanupErrors.Add($_.Exception.Message)

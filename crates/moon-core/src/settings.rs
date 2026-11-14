@@ -356,6 +356,24 @@ fn item_json(item: &Item) -> Option<Json> {
     }
     item.as_float().and_then(serde_json::Number::from_f64).map(Json::Number)
 }
+
+fn position_row(table: &mut Table, position: Option<isize>) {
+    // With the same position, toml_edit emits headers in subtree order. A
+    // nested header must follow its own row before any later row of the array.
+    table.set_position(position);
+    for (_, item) in table.iter_mut() {
+        match item {
+            Item::Table(table) => position_row(table, position),
+            Item::ArrayOfTables(rows) => {
+                for table in rows.iter_mut() {
+                    position_row(table, position);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 fn assign(item: &mut Item, value: &Json) -> Result<(), SettingsError> {
     if item_json(item).as_ref() == Some(value) {
         return Ok(());
@@ -375,6 +393,12 @@ fn assign(item: &mut Item, value: &Json) -> Result<(), SettingsError> {
         return Ok(());
     }
     if let Json::Array(values) = value {
+        if values.is_empty() && item.is_array_of_tables() {
+            // An empty array of tables emits no header, which would restore
+            // inherited defaults. Write an explicit empty array instead.
+            *item = json_item(value)?;
+            return Ok(());
+        }
         let length =
             item.as_array().map(|a| a.len()).or_else(|| item.as_array_of_tables().map(|a| a.len()));
         if let Some(length) = length {
@@ -423,8 +447,11 @@ fn assign(item: &mut Item, value: &Json) -> Result<(), SettingsError> {
                         Item::None
                     };
                     assign(&mut row, value)?;
-                    if let Some(table) = row.as_table_mut() {
-                        table.set_position(
+                    if existing != Some(index)
+                        && let Some(table) = row.as_table_mut()
+                    {
+                        position_row(
+                            table,
                             old.get(index).and_then(Item::as_table).and_then(Table::position),
                         );
                     }
@@ -696,6 +723,52 @@ mod tests {
         assert_eq!(updated.config.workspaces[0].name, "play");
         assert!(updated.source.contains("# work row"));
         assert!(updated.source.contains("# play row"));
+    }
+    #[test]
+    fn reordered_workspace_rows_keep_their_subtables() {
+        let source = "[[workspaces]] # Work\nname = 'work'\n[workspaces.gaps]\ninner = 20 # work gap\nouter = 25\n\n[[workspaces]] # Play\nname = 'play'\n[workspaces.gaps]\ninner = 30 # play gap\nouter = 35\n";
+        let updated = prepare_update(
+            Some(source),
+            Some(source),
+            &[edit(
+                json!(["workspaces"]),
+                json!([
+                    {"name":"play","gaps":{"inner":30,"outer":35}},
+                    {"name":"work","gaps":{"inner":20,"outer":25}}
+                ]),
+            )],
+        )
+        .unwrap();
+        let workspaces = &updated.config.workspaces;
+        assert_eq!(workspaces[0].name, "play");
+        assert_eq!(workspaces[0].gaps.as_ref().unwrap().inner, 30);
+        assert_eq!(workspaces[1].name, "work");
+        assert_eq!(workspaces[1].gaps.as_ref().unwrap().inner, 20);
+        assert!(
+            updated
+                .source
+                .contains("# Play\nname = 'play'\n[workspaces.gaps]\ninner = 30 # play gap")
+        );
+        assert!(
+            updated
+                .source
+                .contains("# Work\nname = 'work'\n[workspaces.gaps]\ninner = 20 # work gap")
+        );
+    }
+    #[test]
+    fn replacing_widgets_with_an_empty_list_preserves_the_override() {
+        let source = "[[bar.widgets]]\nid = 'clock'\nformat = '{clock}'\n";
+        let updated = prepare_update(
+            Some(source),
+            Some(source),
+            &[edit(json!(["bar", "widgets"]), json!([]))],
+        )
+        .unwrap();
+        assert!(updated.config.bar.widgets.is_empty());
+        assert_eq!(
+            Snapshot::load(Some(&updated.source)).unwrap().overrides["bar"]["widgets"],
+            json!([])
+        );
     }
     #[test]
     fn optional_json_nulls_in_complete_rows_become_absent_toml_fields() {

@@ -508,63 +508,13 @@ pub fn stats() -> HookStats {
 fn compile(bindings: Vec<HookBinding>) -> Result<Vec<Binding>> {
     bindings
         .into_iter()
+        .filter(|binding| !binding.commands.is_empty())
         .map(|binding| {
-            let mut modifiers = 0;
-            let mut key = None;
-            for part in binding.chord.to_lowercase().split('+') {
-                match part.trim() {
-                    "alt" => modifiers |= 1,
-                    "shift" => modifiers |= 2,
-                    "ctrl" | "control" => modifiers |= 4,
-                    "win" | "super" => modifiers |= 8,
-                    value => {
-                        let parsed = match value {
-                            "tab" => VK_TAB.0 as u32,
-                            "space" => VK_SPACE.0 as u32,
-                            "enter" | "return" => VK_RETURN.0 as u32,
-                            "esc" | "escape" => VK_ESCAPE.0 as u32,
-                            "left" => VK_LEFT.0 as u32,
-                            "right" => VK_RIGHT.0 as u32,
-                            "up" => VK_UP.0 as u32,
-                            "down" => VK_DOWN.0 as u32,
-                            "backspace" => VK_BACK.0 as u32,
-                            "delete" => VK_DELETE.0 as u32,
-                            "home" => VK_HOME.0 as u32,
-                            "end" => VK_END.0 as u32,
-                            "pageup" => VK_PRIOR.0 as u32,
-                            "pagedown" => VK_NEXT.0 as u32,
-                            "-" | "minus" | "oem_minus" => VK_OEM_MINUS.0 as u32,
-                            "=" | "plus" | "oem_plus" => VK_OEM_PLUS.0 as u32,
-                            "[" => VK_OEM_4.0 as u32,
-                            "]" => VK_OEM_6.0 as u32,
-                            ";" => VK_OEM_1.0 as u32,
-                            "/" | "oem_question" => VK_OEM_2.0 as u32,
-                            value
-                                if value.len() == 1
-                                    && value.as_bytes()[0].is_ascii_alphanumeric() =>
-                            {
-                                value.as_bytes()[0].to_ascii_uppercase() as u32
-                            }
-                            value if value.starts_with('f') => value[1..]
-                                .parse::<u32>()
-                                .ok()
-                                .filter(|n| (1..=24).contains(n))
-                                .map(|n| VK_F1.0 as u32 + n - 1)
-                                .unwrap_or(0),
-                            _ => 0,
-                        };
-                        if parsed == 0 || key.replace(parsed).is_some() {
-                            return Err(Error::new(
-                                E_INVALIDARG,
-                                format!("Invalid hotkey: {}", binding.chord),
-                            ));
-                        }
-                    }
-                }
-            }
+            let chord = moon_core::config::parse_chord(&binding.chord)
+                .map_err(|error| Error::new(E_INVALIDARG, error))?;
             Ok(Binding {
-                key: key.ok_or_else(|| Error::new(E_INVALIDARG, "Hotkey requires a key"))?,
-                modifiers,
+                key: chord.key,
+                modifiers: chord.modifiers,
                 commands: binding.commands.into(),
             })
         })

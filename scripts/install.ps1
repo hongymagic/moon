@@ -53,7 +53,8 @@ elseif (@(Get-ChildItem -Force -LiteralPath $install).Count -ne 0) { throw 'Prog
 if ($HandoverId -and $previousState) {throw 'Another Moon installation appeared during handover. It was left unchanged.'}
 $installId=if ($previousState) {$previousState.install_id} else {[guid]::NewGuid().ToString('N')}
 $taskName='moon-'+$OwnerSid
-$state=[pscustomobject]@{version=1;install_id=$installId;handover_id=$HandoverId;owner_sid=$OwnerSid;task_name=$taskName;certificate_thumbprints=@();active_certificate='';files=@('moon.exe');installed_at='';user_path=$null;shell=$null}
+$savedHandoverId=if ($previousState -and $previousState.PSObject.Properties['handover_id']) {$previousState.handover_id} else {$HandoverId}
+$state=[pscustomobject]@{version=1;install_id=$installId;handover_id=$savedHandoverId;owner_sid=$OwnerSid;task_name=$taskName;certificate_thumbprints=@();active_certificate='';files=@('moon.exe');installed_at='';user_path=$null;shell=$null}
 if ($previousState) { $state.certificate_thumbprints=@($previousState.certificate_thumbprints); $state.files=@($previousState.files) }
 if ($previousState -and $previousState.PSObject.Properties['user_path']) {$state.user_path=$previousState.user_path}
 if ($previousState -and $previousState.PSObject.Properties['shell']) {$state.shell=$previousState.shell}
@@ -82,17 +83,18 @@ $oldTask=Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
 Assert-MoonOwnedTask $oldTask $state $target
 $oldTaskXml=if ($oldTask) {Export-ScheduledTask -TaskName $taskName} else {$null}
 if (@(Get-Process -Name moon-settings -ErrorAction SilentlyContinue | Where-Object {$_.Path -and [string]::Equals($_.Path,(Join-Path $install 'moon-settings.exe'),[StringComparison]::OrdinalIgnoreCase)}).Count) {throw 'Close Moon Settings, then try updating Moon again.'}
-$daemon=Get-MoonDaemon
+$daemon=Get-MoonDaemon -Installed
 if ($daemon -and ![string]::Equals([IO.Path]::GetFullPath($daemon.executable),$target,[StringComparison]::OrdinalIgnoreCase)) {
     throw "A development daemon is running from $($daemon.executable). Exit that daemon before the first signed installation; it cannot restart into a different binary."
 }
 $session=[Diagnostics.Process]::GetCurrentProcess().SessionId
 if (!$daemon) {
     $unknown=@(Get-CimInstance Win32_Process -Filter "Name='moon.exe'" | Where-Object {$_.SessionId -eq $session})
-    if ($unknown.Count -gt 0) { throw 'A moon process is running but did not answer IPC. Recover or stop it before installing.' }
+    if ($unknown.Count -gt 0) { throw 'A running Moon process could not be verified. Exit Moon from its tray menu before upgrading, then try again.' }
 }
 $journalPath=Join-Path $env:LOCALAPPDATA ('moon\journal-v1-session'+$session+'.json')
-$oldSnapshot=if ($daemon) {Get-MoonUpgradeSnapshot -JournalPath $journalPath -ProcessId ([uint32]$daemon.process_id)} else {$null}
+$oldPeer=if($daemon){$daemon.pipe_peer}else{$null}
+$oldSnapshot=if ($daemon) {Get-MoonUpgradeSnapshot -JournalPath $journalPath -ProcessId ([uint32]$daemon.process_id) -ExpectedPeer $oldPeer} else {$null}
 $oldLayout=if ($oldSnapshot) {$oldSnapshot.layout} else {$null}
 $oldJournal=if ($oldSnapshot) {,$oldSnapshot.journal} else {$null}
 $oldPid=if ($daemon) {[int]$daemon.process_id} else {0}
@@ -108,7 +110,7 @@ try {
     if ($previousState) {
         if ($previousState.active_certificate -notmatch '^[A-Fa-f0-9]{40}$') { throw 'Invalid signing certificate thumbprint in installation metadata.' }
         $certificate=Get-Item -LiteralPath ('Cert:\LocalMachine\My\'+$previousState.active_certificate) -ErrorAction SilentlyContinue
-        Assert-MoonCertificate $certificate $installId
+        if ($certificate) {Assert-MoonCertificate $certificate $installId}
     }
     if (!$certificate -or $certificate.NotAfter -lt (Get-Date).AddDays(30)) {
         $certificate=New-SelfSignedCertificate -Subject "CN=moon code signing $installId" -Type CodeSigningCert -CertStoreLocation Cert:\LocalMachine\My `
@@ -186,16 +188,16 @@ try {
     $state.installed_at=[DateTime]::UtcNow.ToString('o')
     Write-MoonInstallState $install $state
     $launchAfter=[DateTime]::UtcNow
-    if ($daemon) { Invoke-MoonRpc command -Commands @('restart') | Out-Null }
+    if ($daemon) { Invoke-MoonRpc lifecycle -LifecycleAction restart -ExpectedPeer $oldPeer | Out-Null }
     else { Start-ScheduledTask -TaskName $taskName }
     try {
         Wait-MoonCondition -Description 'the signed replacement daemon with UIAccess' -Condition {
-            $running=Get-MoonDaemon
+            $running=Get-MoonDaemon -Installed
             $running -and $running.process_id -ne $oldPid -and [string]::Equals($running.executable,$target,[StringComparison]::OrdinalIgnoreCase) -and $running.token.ui_access
         }
     }catch{throw "$($_.Exception.Message)`n$(Get-MoonTaskStartupDiagnostic $target $launchAfter)"}
     if ($null -ne $oldLayout) {
-        Wait-MoonCondition -Description 'the preserved window layout after upgrade' -Condition {(Get-MoonLayoutFingerprint) -eq $oldLayout}
+        Wait-MoonCondition -Description 'the preserved window layout after upgrade' -Condition {(Get-MoonLayoutFingerprint -Installed) -eq $oldLayout}
     }
     Test-MoonSetupCancellation $OperationId
     Write-MoonSetupStatus $OperationId 'working' 'Adding Moon to Start and Settings.'
@@ -203,8 +205,7 @@ try {
     ($shellPlan.registry.values|Where-Object name -eq 'EstimatedSize').value=[int][Math]::Min([int]::MaxValue,[Math]::Ceiling($installedSize/1024.0))
     $state.shell=$shellPlan.ownership
     Write-MoonInstallState $install $state
-    $shellStarted=$true
-    Publish-MoonShellPlan $shellPlan $state
+    Publish-MoonShellPlan $shellPlan $state -Started ([ref]$shellStarted)
     $environment=[Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
     try {
         $pathChange=Get-MoonPathAddition (Read-MoonPathValue $environment) $install $state.user_path
@@ -229,15 +230,15 @@ try {
     }
     $committed=$true
     Write-MoonSetupStatus $OperationId 'succeeded' 'Moon is ready. Make it yours in Settings.'
-    [pscustomobject]@{installed=$target;install_id=$installId;handover_id=$HandoverId;task=$taskName;signature='Valid';ui_access=$true;upgrade_layout_verified=($null -ne $oldLayout);certificate=$state.active_certificate;user_path_entry=$install;open_new_terminal=$true} | ConvertTo-Json
+    [pscustomobject]@{installed=$target;install_id=$installId;handover_id=$savedHandoverId;task=$taskName;signature='Valid';ui_access=$true;upgrade_layout_verified=($null -ne $oldLayout);certificate=$state.active_certificate;user_path_entry=$install;open_new_terminal=$true} | ConvertTo-Json
 } catch {
     $failure=$_
     $recoveryComplete=$false
     Write-MoonSetupStatus $OperationId 'recovering' 'Putting your previous setup back.'
     if ($targetReplaced -or $backupCreated) {
-        $running=Get-MoonDaemon
+        $running=Get-MoonDaemon -Installed
         if ($running -and $running.process_id -ne $oldPid -and [string]::Equals($running.executable,$target,[StringComparison]::OrdinalIgnoreCase)) {
-            try {Invoke-MoonRpc command -Commands @('exit') | Out-Null; Wait-MoonCondition -Description 'failed replacement shutdown' -Condition {!(Get-MoonDaemon)}} catch {throw "Install failed and replacement recovery could not finish; binaries and trust retained for recovery. Original failure: $failure; recovery: $_"}
+            try {Invoke-MoonRpc lifecycle -LifecycleAction exit -ExpectedPeer $running.pipe_peer | Out-Null; Wait-MoonCondition -Description 'failed replacement shutdown' -Condition {![MoonInstallNative]::ProcessStillRunning($running.pipe_peer)}} catch {throw "Install failed and replacement recovery could not finish; binaries and trust retained for recovery. Original failure: $failure; recovery: $_"}
         }
         # IPC closes before a replacement's recovery watchdog has necessarily
         # exited. Do not remove an executable while that watchdog still needs it.
@@ -270,7 +271,7 @@ try {
         }
         Remove-Item -LiteralPath "Cert:\LocalMachine\My\$($newCertificate.Thumbprint)" -DeleteKey -Force
     }
-    if ($oldJournal -and !(Get-MoonDaemon)) {
+    if ($oldJournal -and ![MoonInstallNative]::ProcessStillRunning($oldPeer)) {
         Wait-MoonCondition -Description 'old recovery watchdogs before rollback adoption' -Condition {
             @((Get-CimInstance Win32_Process) | Where-Object {$_.SessionId -eq $session -and $_.ExecutablePath -and $_.ExecutablePath.StartsWith($install+'\',[StringComparison]::OrdinalIgnoreCase)}).Count -eq 0
         }
@@ -278,7 +279,7 @@ try {
         [IO.File]::WriteAllBytes($journalTemporary,$oldJournal)
         if (Test-Path -LiteralPath $journalPath) {[IO.File]::Replace($journalTemporary,$journalPath,[NullString]::Value)} else {[IO.File]::Move($journalTemporary,$journalPath)}
         Start-MoonLimitedOnce $target 'start --background --resume' $state
-        Wait-MoonCondition -Description 'the previous layout after rollback' -Condition {(Get-MoonLayoutFingerprint) -eq $oldLayout}
+        Wait-MoonCondition -Description 'the previous layout after rollback' -Condition {(Get-MoonLayoutFingerprint -Installed) -eq $oldLayout}
     }
     $recoveryComplete=$true
     throw $failure

@@ -70,9 +70,9 @@ if (!(Test-MoonAdministrator)) {
     return
 }
 if ([MoonInstallNative]::Integrity() -lt 12288) {throw 'This probe needs an actual high-integrity coordinator.'}
-$stats=Invoke-MoonRpc query stats
+$stats=Invoke-MoonRpc query stats -Installed
 if (!$stats.token.ui_access) {throw 'The daemon does not have UIAccess.'}
-$world=Invoke-MoonRpc query world
+$world=Invoke-MoonRpc query world -ExpectedPeer $stats.pipe_peer
 if ($world.paused -or $world.mode -ne 'default') {throw 'The daemon must be active and in its default keybinding mode.'}
 foreach ($binding in @(@('alt+h','focus left'),@('alt+l','focus right'),@('alt+k','focus up'),@('alt+j','focus down'),@('alt+f','toggle-fullscreen'))) {
     $configured=$world.config.bindings.PSObject.Properties[$binding[0]]
@@ -81,7 +81,7 @@ foreach ($binding in @(@('alt+h','focus left'),@('alt+l','focus right'),@('alt+k
 $originalTrees=@($world.workspaces | ForEach-Object {$_.tree}) | ConvertTo-Json -Depth 64 -Compress
 $helper=$null; $handles=@(); $integrity=$null; $results=[Collections.Generic.List[object]]::new(); $failure=$null
 [void][MoonElevatedNative]::SetThreadDpiAwarenessContext([IntPtr](-4))
-function OwnedPlacements { @(Invoke-MoonRpc query windows | Where-Object {$handles -contains [long]$_.id}) }
+function OwnedPlacements { @(Invoke-MoonRpc query windows -ExpectedPeer $stats.pipe_peer | Where-Object {$handles -contains [long]$_.id}) }
 function Test-OwnedFrames {
     $placements=OwnedPlacements
     if ($placements.Count -ne 2) {return $false}
@@ -106,13 +106,13 @@ try {
     $ordered=if($horizontal){@($placements | Sort-Object {$_.rect.x})}else{@($placements | Sort-Object {$_.rect.y})}
     $first=[long]$ordered[0].id; $second=[long]$ordered[1].id
     [void][MoonElevatedNative]::SetForegroundWindow([IntPtr]$first)
-    Wait-MoonCondition -Description 'owned elevated foreground before key injection' -Condition {[MoonElevatedNative]::GetForegroundWindow().ToInt64() -eq $first -and (Invoke-MoonRpc query world).focused -eq $first}
+    Wait-MoonCondition -Description 'owned elevated foreground before key injection' -Condition {[MoonElevatedNative]::GetForegroundWindow().ToInt64() -eq $first -and (Invoke-MoonRpc query world -ExpectedPeer $stats.pipe_peer).focused -eq $first}
     $focusPass=0
     for($trial=0;$trial -lt 20;$trial++) {
         $from=if($trial%2 -eq 0){$first}else{$second}; $to=if($trial%2 -eq 0){$second}else{$first}
         $key=if($horizontal){if($trial%2 -eq 0){76}else{72}}else{if($trial%2 -eq 0){74}else{75}}
         [MoonElevatedNative]::Chord($from,[uint16]$key)
-        Wait-MoonCondition -Description 'hook-driven focus between elevated owned windows' -Condition {[MoonElevatedNative]::GetForegroundWindow().ToInt64() -eq $to -and (Invoke-MoonRpc query world).focused -eq $to} -Seconds 3
+        Wait-MoonCondition -Description 'hook-driven focus between elevated owned windows' -Condition {[MoonElevatedNative]::GetForegroundWindow().ToInt64() -eq $to -and (Invoke-MoonRpc query world -ExpectedPeer $stats.pipe_peer).focused -eq $to} -Seconds 3
         $focusPass++
     }
     $results.Add([pscustomobject]@{check='elevated foreground hotkey focus';passed=$true;successes=$focusPass;trials=20})
@@ -130,7 +130,7 @@ finally {
         if (!$helper.WaitForExit(3000)) {$helper.Kill(); $helper.WaitForExit()}
         $helper.Dispose()
         Wait-MoonCondition -Description 'owned helper removal from the layout' -Condition {@(OwnedPlacements).Count -eq 0}
-        $afterTrees=@((Invoke-MoonRpc query world).workspaces | ForEach-Object {$_.tree}) | ConvertTo-Json -Depth 64 -Compress
+        $afterTrees=@((Invoke-MoonRpc query world -ExpectedPeer $stats.pipe_peer).workspaces | ForEach-Object {$_.tree}) | ConvertTo-Json -Depth 64 -Compress
         if ($afterTrees -ne $originalTrees -and !$failure) {$failure='Closing the owned probes did not restore the original workspace trees.'}
     }
     if ([MoonElevatedNative]::IsWindow([IntPtr]$PreviousForeground)) {

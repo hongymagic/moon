@@ -4,7 +4,7 @@ param([string]$ReportPath=(Join-Path $env:LOCALAPPDATA 'moon\uiaccess-results.js
 if ((Test-MoonAdministrator) -or [MoonInstallNative]::Integrity() -ne 8192 -or [MoonInstallNative]::TokenWord(26) -ne 0) {
     throw 'Run this verification from ordinary, medium-integrity PowerShell. It measures whether an unprivileged client can reach the installed daemon.'
 }
-$daemon=Invoke-MoonRpc query stats
+$daemon=Invoke-MoonRpc query stats -Installed
 if (!$daemon.token.ui_access) {throw 'The running daemon does not have UIAccess.'}
 $target=Join-Path (Get-MoonInstallDirectory) 'moon.exe'
 if (![string]::Equals($daemon.executable,$target,[StringComparison]::OrdinalIgnoreCase)) {throw 'Verification requires the signed Program Files installation.'}
@@ -27,7 +27,7 @@ $childScript=@"
 $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript))
 $powershell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 try {
-    Invoke-MoonRpc command -Commands @("exec `"$powershell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand $encoded") | Out-Null
+    Invoke-MoonRpc command -ExpectedPeer $daemon.pipe_peer -Commands @("exec `"$powershell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand $encoded") | Out-Null
     Wait-MoonCondition -Description 'the ordinary program launched by moon' -Condition {Test-Path -LiteralPath $childOutput}
     $ordinary=Get-Content -Raw -LiteralPath $childOutput | ConvertFrom-Json
     if ($ordinary.integrity_rid -ne 8192 -or $ordinary.ui_access -or $ordinary.elevated) {throw 'A program launched by moon inherited elevated privileges or UIAccess.'}

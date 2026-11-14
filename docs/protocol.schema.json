@@ -1,6 +1,13 @@
 {
   "request": {
     "$defs": {
+      "LifecycleAction": {
+        "enum": [
+          "restart",
+          "exit"
+        ],
+        "type": "string"
+      },
       "WindowId": {
         "description": "A top-level window. On Windows this is the numeric value of the `HWND`.",
         "format": "uint64",
@@ -65,6 +72,22 @@
         },
         "required": [
           "method"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "action": {
+            "$ref": "#/$defs/LifecycleAction"
+          },
+          "method": {
+            "const": "lifecycle",
+            "type": "string"
+          }
+        },
+        "required": [
+          "method",
+          "action"
         ],
         "type": "object"
       }

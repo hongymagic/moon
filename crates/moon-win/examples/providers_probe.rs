@@ -1,8 +1,24 @@
 #[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use moon_core::config::Config;
-    use moon_win::{providers::Providers, runtime};
+    use moon_win::{
+        providers::{Providers, Values},
+        runtime,
+    };
     use std::time::{Duration, Instant};
+    fn wait_for_value(providers: &mut Providers, key: &str, error_key: &str) -> Values {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let values = providers.sample();
+            if values.contains_key(key)
+                || values.contains_key(error_key)
+                || Instant::now() >= deadline
+            {
+                return values;
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
     let mut providers = Providers::new();
     // This diagnostic explicitly exercises the system palette provider; dark
     // configurations without a theme placeholder do not need to sample it.
@@ -34,7 +50,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     config.validate()?;
     providers.set_config(&config);
-    assert_eq!(providers.sample().get("exec-smoke").map(String::as_str), Some("widget-ok"));
+    let exec = wait_for_value(&mut providers, "exec-smoke", "exec-smoke.error");
+    assert_eq!(
+        exec.get("exec-smoke").map(String::as_str),
+        Some("widget-ok"),
+        "{:?}",
+        exec.get("exec-smoke.error")
+    );
     if std::env::args().any(|arg| arg == "--weather") {
         config.weather = Some(moon_core::config::WeatherConfig {
             latitude: 0.0,
@@ -42,7 +64,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             interval_seconds: 900,
         });
         providers.set_config(&config);
-        let weather = providers.sample();
+        let weather = wait_for_value(&mut providers, "weather.temperature", "weather.error");
         assert!(
             weather.contains_key("weather.temperature"),
             "configured weather missing: {:?}",

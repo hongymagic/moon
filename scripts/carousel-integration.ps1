@@ -63,7 +63,7 @@ function Measure-WorkspaceSwitch([string]$Workspace) {
  try {
   $process.Refresh();$before=[long]$process.WorkingSet64;$peak=$before
   $timer=[Diagnostics.Stopwatch]::StartNew()
-  $null=Invoke-MoonRpc -Method command -Commands @("workspace $Workspace")
+  $null=Invoke-MoonRpc -Method command -DevelopmentPath $moon -Commands @("workspace $Workspace")
   $response=$timer.Elapsed.TotalMilliseconds
   $observed=$false;$bounds=@();$samples=0;$lastSample=$response;$maxGap=0.0
   do {
@@ -108,7 +108,7 @@ try {
  Wait-Workspace 2
  Record 'Two populated workspaces retain two native tiles each'
  $activeObserved=$false
- if($Measure){$measurementMonitors=(Invoke-MoonRpc -Method query -Query world).monitors}
+ if($Measure){$measurementMonitors=(Invoke-MoonRpc -Method query -Query world -DevelopmentPath $moon).monitors}
  $switches=if($Measure){@('2','1','2','1','2','1')}else{@('2','1','2','1')}
  foreach($workspace in $switches){
   if($Measure){$sample=Measure-WorkspaceSwitch $workspace;$measurements.Add($sample);$activeObserved=$activeObserved -or $sample.overlay_observed}

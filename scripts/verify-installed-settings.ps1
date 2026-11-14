@@ -105,7 +105,7 @@ try {
         throw 'Run this verification from ordinary, medium-integrity PowerShell without UIAccess.'
     }
     if(@(Get-Process -Name 'moon-settings' -ErrorAction SilentlyContinue).Count){throw 'Close existing Moon Settings windows before this verification; none were changed.'}
-    $daemon=Invoke-MoonRpc query stats
+    $daemon=Invoke-MoonRpc query stats -Installed
     if(!$daemon.token.ui_access -or ![string]::Equals($daemon.executable,$target,[StringComparison]::OrdinalIgnoreCase)){
         throw 'Verification requires the running UIAccess daemon from the Program Files installation.'
     }
@@ -125,7 +125,7 @@ try {
     $checks.Add('An ordinary client reaches the signed installed UIAccess daemon')
 
     $launchedAt=[DateTime]::UtcNow.ToFileTimeUtc()
-    $null=Invoke-MoonRpc command -Commands @('settings')
+    $null=Invoke-MoonRpc command -ExpectedPeer $daemon.pipe_peer -Commands @('settings')
     $launchDeadline=[DateTime]::UtcNow.AddSeconds(20)
     do {
         $candidates=@(Get-Process -Name 'moon-settings' -ErrorAction SilentlyContinue | Where-Object {$_.SessionId -eq $session})
@@ -158,7 +158,7 @@ try {
     }
     $readOnlyUi=$true
     $checks.Add('Read-only UI Automation sees Moon is running and All changes saved')
-    $after=Invoke-MoonRpc query stats
+    $after=Invoke-MoonRpc query stats -ExpectedPeer $daemon.pipe_peer
     if($after.process_id -ne $daemon.process_id -or ![string]::Equals($after.config_path,$configPath,[StringComparison]::OrdinalIgnoreCase)){
         throw 'The daemon or selected configuration changed during Settings verification.'
     }

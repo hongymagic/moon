@@ -157,11 +157,11 @@ if([IO.Path]::GetFileName($TestwinPath) -ine 'testwin.exe'){throw 'Provide the d
 if((Get-FileHash -LiteralPath $ExpectedDaemonPath -Algorithm SHA256).Hash -ne $ExpectedDaemonSha256){throw 'The expected daemon file hash differs.'}
 if(@(Get-Process testwin -ErrorAction SilentlyContinue).Count){throw 'A testwin fixture is already running; it was left untouched.'}
 $daemonIdentity=[MoonInstallNative]::ProcessIdentity([uint32]$ExpectedDaemonId)
-$baselineStats=Invoke-MoonRpc query stats
+$baselineStats=Invoke-MoonRpc query stats -DevelopmentPath $ExpectedDaemonPath
 if($baselineStats.process_id -ne $ExpectedDaemonId -or $baselineStats.executable -ine $ExpectedDaemonPath -or $daemonIdentity.Path -ine $ExpectedDaemonPath -or $baselineStats.token.ui_access -or $baselineStats.token.elevated -or $baselineStats.token.integrity_rid -ne 8192 -or $baselineStats.token.session_id -ne [Diagnostics.Process]::GetCurrentProcess().SessionId){throw 'The live daemon does not match the explicitly pinned ordinary instance.'}
-$baselineWorld=Invoke-MoonRpc query world
+$baselineWorld=Invoke-MoonRpc query world -DevelopmentPath $ExpectedDaemonPath
 if($baselineWorld.paused -or $baselineWorld.mode -ne 'default' -or $baselineWorld.native_fullscreen -or $baselineStats.last_error){throw 'The current Moon session is not ready for an isolated desktop scenario.'}
-$baselinePlacements=@(Invoke-MoonRpc query windows)
+$baselinePlacements=@(Invoke-MoonRpc query windows -DevelopmentPath $ExpectedDaemonPath)
 $baselineFingerprint=Get-MoonLayoutFingerprint -World $baselineWorld -Placements $baselinePlacements
 $configExists=Test-Path -LiteralPath $baselineStats.config_path
 $configHash=if($configExists){(Get-FileHash -LiteralPath $baselineStats.config_path -Algorithm SHA256).Hash}else{$null}
@@ -193,7 +193,7 @@ function Assert-Input {
  try{[MoonDesktopNative]::CheckGuard($script:lastInput)}catch{$script:intervened=$true;throw 'Foreign input or input-guard failure detected; further switching and focus restoration were canceled.'}
 }
 function Assert-Daemon {
- $identity=[MoonInstallNative]::ProcessIdentity([uint32]$ExpectedDaemonId);$stats=Invoke-MoonRpc query stats
+ $identity=[MoonInstallNative]::ProcessIdentity([uint32]$ExpectedDaemonId);$stats=Invoke-MoonRpc query stats -DevelopmentPath $ExpectedDaemonPath
  if($identity.Birth -ne $daemonIdentity.Birth -or $identity.Path -ine $ExpectedDaemonPath -or $stats.process_id -ne $ExpectedDaemonId -or $stats.executable -ine $ExpectedDaemonPath -or $stats.last_error){throw 'The original daemon changed or reported an error.'}
  return $stats
 }
@@ -279,7 +279,7 @@ function New-Helper {
  Wait-MoonCondition -Seconds 5 -Description 'one owned fixture window' -Condition {@([MoonDesktopNative]::Windows()|Where-Object{$_.ProcessId -eq $process.Id -and $_.Class -eq 'MoonTestWindow'}).Count -eq 1}
  $window=@([MoonDesktopNative]::Windows()|Where-Object{$_.ProcessId -eq $process.Id -and $_.Class -eq 'MoonTestWindow'})[0];$helper.id=$window.Id
  $native=Assert-Owned $helper;if(!$native.Current -or $native.Cloak){throw 'The new helper is not visible on the current native desktop.'};$helper.desktop=$native.Desktop
- Wait-MoonCondition -Seconds 5 -Description 'the helper to join Moon' -Condition {$world=Invoke-MoonRpc query world;$item=$world.windows.PSObject.Properties[[string]$helper.id];return $item -and !$item.Value.suspended}
+ Wait-MoonCondition -Seconds 5 -Description 'the helper to join Moon' -Condition {$world=Invoke-MoonRpc query world -DevelopmentPath $ExpectedDaemonPath;$item=$world.windows.PSObject.Properties[[string]$helper.id];return $item -and !$item.Value.suspended}
  Save-Report;return $helper
 }
 function Send-DesktopKey([uint16]$Key,[long]$Foreground=0){
@@ -289,14 +289,14 @@ function Send-DesktopKey([uint16]$Key,[long]$Foreground=0){
 function Focus-Owned($Helper){
  Assert-Input;$native=Assert-Owned $Helper;if(!$native.Current){throw 'Never focus an off-desktop window.'}
  if(![MoonDesktopNative]::SetForegroundWindow([IntPtr][long]$Helper.id)){throw 'Windows refused foreground for the owned helper.'}
- Wait-MoonCondition -Seconds 5 -Description 'owned native and Moon focus' -Condition {Assert-Input;$world=Invoke-MoonRpc query world;return [MoonDesktopNative]::GetForegroundWindow().ToInt64() -eq $Helper.id -and $world.focused -eq $Helper.id}
+ Wait-MoonCondition -Seconds 5 -Description 'owned native and Moon focus' -Condition {Assert-Input;$world=Invoke-MoonRpc query world -DevelopmentPath $ExpectedDaemonPath;return [MoonDesktopNative]::GetForegroundWindow().ToInt64() -eq $Helper.id -and $world.focused -eq $Helper.id}
 }
 function Wait-Current($Helper,[bool]$Current){
  Wait-MoonCondition -Seconds 5 -Description "native current=$Current for owned helper" -Condition {Assert-Input;$native=Assert-Owned $Helper;return $native.Current -eq $Current}
 }
 function Observe-Desktop($Current,$Away,[string]$Name){
  Wait-MoonCondition -Seconds 8 -Description 'native-desktop suspension and visible placement' -Condition {
-  Assert-Input;$null=Assert-Daemon;$here=Assert-Owned $Current;$awayNative=Assert-Owned $Away;$world=Invoke-MoonRpc query world;$placements=@(Invoke-MoonRpc query windows)
+  Assert-Input;$null=Assert-Daemon;$here=Assert-Owned $Current;$awayNative=Assert-Owned $Away;$world=Invoke-MoonRpc query world -DevelopmentPath $ExpectedDaemonPath;$placements=@(Invoke-MoonRpc query windows -DevelopmentPath $ExpectedDaemonPath)
   $hereState=$world.windows.PSObject.Properties[[string]$Current.id];$awayState=$world.windows.PSObject.Properties[[string]$Away.id]
   $visible=@($placements|Where-Object{$_.id -eq $Current.id -and $_.visible})
   $exact=$visible.Count -eq 1
@@ -305,7 +305,7 @@ function Observe-Desktop($Current,$Away,[string]$Name){
  }
  $outer=(Assert-Owned $Away).Outer|ConvertTo-Json -Compress;$samples=[Collections.Generic.List[object]]::new()
  for($i=0;$i -lt 8;$i++){
-  Assert-Input;$null=Assert-Daemon;$native=Assert-Owned $Away;$here=Assert-Owned $Current;$world=Invoke-MoonRpc query world
+  Assert-Input;$null=Assert-Daemon;$native=Assert-Owned $Away;$here=Assert-Owned $Current;$world=Invoke-MoonRpc query world -DevelopmentPath $ExpectedDaemonPath
   if($native.Current -or !$native.Cloak -or !$here.Current -or (($native.Outer|ConvertTo-Json -Compress) -ne $outer) -or !$world.windows.PSObject.Properties[[string]$Away.id].Value.suspended){throw 'The inactive native-desktop helper changed or became active.'}
   $samples.Add([pscustomobject]@{sample=$i;away=$native;current=$here.Id;suspended=$true});Start-Sleep -Milliseconds 250
  }
@@ -377,10 +377,10 @@ try{
  Go-ToCreated $hops;Observe-Desktop $b $a 'second visit preserves both memberships'
  $null=Return-ToOriginal;Focus-Owned $a
  $beforeHooks=(Assert-Daemon).hooks.callbacks
- $initialFloating=(Invoke-MoonRpc query world).windows.PSObject.Properties[[string]$a.id].Value.floating
+ $initialFloating=(Invoke-MoonRpc query world -DevelopmentPath $ExpectedDaemonPath).windows.PSObject.Properties[[string]$a.id].Value.floating
  foreach($expected in @((-not $initialFloating),[bool]$initialFloating)){
   Focus-Owned $a;Assert-Input;$script:lastInput=[MoonDesktopNative]::Chord($hookKeys,$script:lastInput,$a.id)
-  Wait-MoonCondition -Seconds 5 -Description 'owned reversible hook command' -Condition {Assert-Input;return (Invoke-MoonRpc query world).windows.PSObject.Properties[[string]$a.id].Value.floating -eq $expected}
+  Wait-MoonCondition -Seconds 5 -Description 'owned reversible hook command' -Condition {Assert-Input;return (Invoke-MoonRpc query world -DevelopmentPath $ExpectedDaemonPath).windows.PSObject.Properties[[string]$a.id].Value.floating -eq $expected}
  }
  if((Assert-Daemon).hooks.callbacks -le $beforeHooks){throw 'No live keyboard-hook callback was recorded.'}
  $checks.Add([pscustomobject]@{check='configured hotkey works after native desktop return';passed=$true});Save-Report
@@ -388,7 +388,7 @@ try{
  $checks.Add([pscustomobject]@{check='only the identified empty owned desktop closed';passed=$true})
 }catch{
  $failure=$_.Exception.Message;$report.failure=$failure
- try{$report.failure_world=Invoke-MoonRpc query world;$report.failure_stats=Invoke-MoonRpc query stats}catch{$report.failure_query_error=$_.Exception.Message}
+ try{$report.failure_world=Invoke-MoonRpc query world -DevelopmentPath $ExpectedDaemonPath;$report.failure_stats=Invoke-MoonRpc query stats -DevelopmentPath $ExpectedDaemonPath}catch{$report.failure_query_error=$_.Exception.Message}
 }
 finally{
  # Never guess a desktop identity after a failed creation or interrupted switch.
@@ -404,14 +404,14 @@ finally{
    if($focus.Count -eq 1 -and ([MoonDesktopNative]::Read($focus[0].id)).Current){[void][MoonDesktopNative]::SetForegroundWindow([IntPtr][long]$focus[0].id);Start-Sleep -Milliseconds 200}
    Assert-Window $previous;if(!([MoonDesktopNative]::Read($previous.id)).Current){throw 'Original foreground is not on the current desktop; it was not activated.'}
    if(![MoonDesktopNative]::SetForegroundWindow([IntPtr][long]$previous.id)){throw 'Windows refused original foreground restoration.'}
-   Wait-MoonCondition -Seconds 8 -Description 'the exact original semantic layout and foreground' -Condition {Assert-Input;return (Get-MoonLayoutFingerprint) -eq $baselineFingerprint -and [MoonDesktopNative]::GetForegroundWindow().ToInt64() -eq $previous.id}
+   Wait-MoonCondition -Seconds 8 -Description 'the exact original semantic layout and foreground' -Condition {Assert-Input;return (Get-MoonLayoutFingerprint -DevelopmentPath $ExpectedDaemonPath) -eq $baselineFingerprint -and [MoonDesktopNative]::GetForegroundWindow().ToInt64() -eq $previous.id}
    $finalNative=@(Get-Inventory)
    foreach($window in $baselineNative){
     Assert-Window $window
     $after=@($finalNative|Where-Object{$_.id -eq $window.id -and $_.class -ceq $window.class})
     if($after.Count -ne 1 -or $after[0].desktop -ne $window.desktop -or $after[0].current -ne $window.current -or $after[0].cloak -ne $window.cloak -or (($after[0].outer|ConvertTo-Json -Compress) -ne ($window.outer|ConvertTo-Json -Compress))){throw 'An original native window state differs after cleanup.'}
    }
-   $report.restored_native=$finalNative;$report.restored_fingerprint=Get-MoonLayoutFingerprint;$report.final_stats=Assert-Daemon
+   $report.restored_native=$finalNative;$report.restored_fingerprint=Get-MoonLayoutFingerprint -DevelopmentPath $ExpectedDaemonPath;$report.final_stats=Assert-Daemon
   }catch{$cleanupErrors.Add($_.Exception.Message)}
  }
  $sameConfig=$false

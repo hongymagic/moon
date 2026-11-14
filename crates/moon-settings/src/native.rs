@@ -1,5 +1,8 @@
 use crate::store::Store;
-use moon_core::settings::{Edit, Snapshot};
+use moon_core::{
+    settings::{Edit, ErrorCode, SettingsError, Snapshot},
+    world::World,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -170,32 +173,39 @@ fn handle(call: &Call, path: &std::path::Path) -> Result<Value, Value> {
             if save.edits.len() > 512 {
                 return Err(failure("Too many changes in one save."));
             }
-            let snapshot =
-                store.save(save.expected_source.as_deref(), &save.edits).map_err(|e| json!(e))?;
             let state = runtime();
-            let message = if state["running"] == true {
-                if state["stats"]["config_path"].as_str().is_some_and(|p| same_path(p, path)) {
-                    match ipc_request("command", json!({"commands":["reload"]})) {
-                        Ok(_) => {
-                            let expected =
-                                serde_json::to_value(&snapshot.config).map_err(failure)?;
-                            if ipc_request("query", json!({"query":"config"}))
-                                .is_ok_and(|actual| actual == expected)
-                            {
-                                "Saved and applied to your desktop.".to_owned()
-                            } else {
-                                "Saved. Moon is using different settings; refresh its status before continuing.".to_owned()
-                            }
-                        }
-                        Err(error) => {
-                            format!("Saved. Moon could not apply the changes yet: {error}")
-                        }
+            let same_configuration = state["stats"]["config_path"]
+                .as_str()
+                .is_some_and(|configured| same_path(configured, path));
+            let snapshot = store
+                .save(save.expected_source.as_deref(), &save.edits, |config| {
+                    if same_configuration {
+                        let monitors = moon_win::platform::monitors().map_err(|error| {
+                            SettingsError::new(
+                                ErrorCode::Io,
+                                format!("Could not check the connected monitors: {error}"),
+                                "Try saving again after the display configuration has settled.",
+                            )
+                        })?;
+                        World::new(config.clone(), monitors).map_err(|error| {
+                            SettingsError::new(
+                                ErrorCode::Validation,
+                                format!(
+                                    "Moon cannot use this configuration on this desktop: {error}."
+                                ),
+                                "Review the workspace assignments and save again.",
+                            )
+                        })?;
                     }
-                } else {
-                    "Saved. The running Moon instance is using a different configuration.".into()
-                }
+                    Ok(())
+                })
+                .map_err(|error| json!(error))?;
+            let message = if same_configuration {
+                "Saved. Moon will apply the changes automatically."
+            } else if state["running"] == true {
+                "Saved. The running Moon instance is using a different configuration."
             } else {
-                "Saved. Your changes will apply when Moon starts.".into()
+                "Saved. Your changes will apply when Moon starts."
             };
             Ok(json!({"data":data(snapshot,path,state),"message":message}))
         }

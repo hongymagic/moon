@@ -166,8 +166,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err("helper placement snapshot remained inconsistent across eight reads")
     }
 
-    fn query(name: &str) -> Result<Value, Box<dyn std::error::Error>> {
-        let reply = ipc::request(&json!({"version":1,"id":1,"method":"query","query":name}))?;
+    fn query(
+        executable: &std::path::Path,
+        pid: u32,
+        name: &str,
+    ) -> Result<Value, Box<dyn std::error::Error>> {
+        let reply = ipc::request_to(
+            &json!({"version":1,"id":1,"method":"query","query":name}),
+            Some(pid),
+            Some(executable),
+        )?;
         if reply["ok"] != true {
             return Err(format!("query failed: {reply}").into());
         }
@@ -191,6 +199,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     struct Cleanup {
         daemon: Option<std::process::Child>,
+        executable: std::path::PathBuf,
         helper: Option<std::process::Child>,
         config: std::path::PathBuf,
         focus: Option<moon_core::ids::WindowId>,
@@ -202,9 +211,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 inject(&[(VK_LSHIFT, true), (VK_LMENU, true)]);
             }
             if let Some(child) = &mut self.daemon {
-                if query("stats").is_ok_and(|s| s["process_id"] == child.id()) {
-                    let _ = ipc::request(
+                if query(&self.executable, child.id(), "stats")
+                    .is_ok_and(|s| s["process_id"] == child.id())
+                {
+                    let _ = ipc::request_to(
                         &json!({"version":1,"id":2,"method":"command","commands":["exit"]}),
+                        Some(child.id()),
+                        Some(&self.executable),
                     );
                     for _ in 0..100 {
                         if child.try_wait().ok().flatten().is_some() {
@@ -377,11 +390,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let _apartment = platform::Apartment::new()?;
     let _ = platform::enable_dpi_awareness();
-    if query("stats").is_ok() {
+    if ipc::endpoint_present() {
         return Err("an existing moon daemon must be exited before this probe".into());
     }
     let config = std::env::temp_dir().join(format!("moon-performance-{}.toml", std::process::id()));
+    let executable = std::path::absolute(&args[1])?;
     let mut cleanup = Cleanup {
+        executable: executable.clone(),
         daemon: None,
         helper: None,
         config,
@@ -407,13 +422,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         thread::sleep(Duration::from_millis(20));
     }
-    let mut daemon = Command::new(&args[1]);
+    let mut daemon = Command::new(&executable);
     daemon.args(["start", "--config"]).arg(&cleanup.config);
     if std::env::var_os("MOON_PERF_NO_SURFACES").is_some() {
         daemon.arg("--no-surfaces");
     }
     cleanup.daemon = Some(daemon.stdout(std::process::Stdio::null()).spawn()?);
     let daemon_pid = cleanup.daemon.as_ref().unwrap().id();
+    let query = |name| query(&executable, daemon_pid, name);
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut world = loop {
         if let Some(status) = cleanup.daemon.as_mut().unwrap().try_wait()? {

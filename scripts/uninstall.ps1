@@ -42,11 +42,15 @@ if ($otherSessions.Count -gt 0) {throw 'moon is running in another Windows sessi
 if (@(Get-Process -Name moon-settings -ErrorAction SilentlyContinue | Where-Object {$_.Path -and [string]::Equals($_.Path,(Join-Path $install 'moon-settings.exe'),[StringComparison]::OrdinalIgnoreCase)}).Count) {throw 'Close Moon Settings, then try removing Moon again.'}
 Test-MoonSetupCancellation $OperationId
 Write-MoonSetupStatus $OperationId 'working' 'Restoring your windows before Moon leaves.'
-$daemon=Get-MoonDaemon
+$daemon=Get-MoonDaemon -Installed
 if ($daemon) {
     if (![string]::Equals($daemon.executable,$target,[StringComparison]::OrdinalIgnoreCase)) {throw 'A different development daemon is running; its windows and process were left unchanged.'}
-    Invoke-MoonRpc command -Commands @('exit') | Out-Null
-    Wait-MoonCondition -Description 'the installed daemon to restore its windows and exit' -Condition {!(Get-MoonDaemon)}
+    Invoke-MoonRpc lifecycle -LifecycleAction exit -ExpectedPeer $daemon.pipe_peer | Out-Null
+    Wait-MoonCondition -Description 'the installed daemon to restore its windows and exit' -Condition {![MoonInstallNative]::ProcessStillRunning($daemon.pipe_peer)}
+} elseif (@(Get-CimInstance Win32_Process -Filter "Name='moon.exe'" | Where-Object {
+    $_.SessionId -eq $session -and (!$_.ExecutablePath -or [string]::Equals($_.ExecutablePath,$target,[StringComparison]::OrdinalIgnoreCase))
+}).Count) {
+    throw 'A running installed Moon process could not be verified. Exit Moon from its tray menu before removing it, then try again.'
 }
 $journal=Join-Path $env:LOCALAPPDATA ('moon\journal-v1-session'+$session+'.json')
 if (Test-Path -LiteralPath $journal) {

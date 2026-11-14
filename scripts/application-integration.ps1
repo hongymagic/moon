@@ -183,7 +183,7 @@ function Test-Frame($Item,$Rectangle) {
 function Check-WinUI([bool]$Floating) {
     $item=$owned[2]
     Wait-MoonCondition -Description 'WinUI 3 committed state and native frame agree' -Condition {
-        $placements=@(Invoke-MoonRpc query windows)
+        $placements=@(Invoke-MoonRpc query windows -Installed:$SignedInstallation -DevelopmentPath $MoonPath)
         $placement=@($placements | Where-Object {$_.id -eq $item.id})
         return $placement.Count -eq 1 -and $placement[0].visible -and $placement[0].floating -eq $Floating -and [MoonApplicationNative]::Cloaked($item.id) -eq 0 -and (Test-Frame $item $placement[0].rect)
     }
@@ -193,7 +193,7 @@ function Switch-OwnedWorkspace($From,$To,[int]$Trial=-1) {
     $clock=[Diagnostics.Stopwatch]::StartNew()
     [MoonElevatedNative]::Chord([long]$From.id,[uint16](48+$To.workspace))
     Wait-MoonCondition -Description 'hook-driven foreground matches the requested application' -Seconds 3 -Condition {
-        [MoonElevatedNative]::GetForegroundWindow().ToInt64() -eq $To.id -and (Invoke-MoonRpc query world).focused -eq $To.id
+        [MoonElevatedNative]::GetForegroundWindow().ToInt64() -eq $To.id -and (Invoke-MoonRpc query world -Installed:$SignedInstallation -DevelopmentPath $MoonPath).focused -eq $To.id
     }
     $clock.Stop()
     if ($Trial -ge 0) {$transitions.Add([pscustomobject]@{trial=$Trial;from=$From.name;to=$To.name;from_pid=$From.process_id;to_pid=$To.process_id;foreground=$To.id;elapsed_ms=$clock.Elapsed.TotalMilliseconds;passed=$true})}
@@ -228,7 +228,7 @@ try {
         if ($SignedInstallation) {
             Invoke-SignedMoon @('start','--background','--no-surfaces','--config',$config)
             Wait-MoonCondition -Description 'the signed isolated UIAccess daemon' -Condition {
-                $running=Get-MoonDaemon
+                $running=Get-MoonDaemon -Installed
                 if ($running -and $running.token.ui_access -and [string]::Equals($running.executable,$MoonPath,[StringComparison]::OrdinalIgnoreCase)) {$script:daemonId=[int]$running.process_id;return $true}
                 return $false
             }
@@ -245,15 +245,15 @@ try {
         }
     }
     Wait-MoonCondition -Description 'only the three owned applications are managed' -Condition {
-        $world=Invoke-MoonRpc query world
+        $world=Invoke-MoonRpc query world -Installed:$SignedInstallation -DevelopmentPath $MoonPath
         $ids=@($world.windows.PSObject.Properties | ForEach-Object {[long]$_.Name})
         return $ids.Count -eq 3 -and @($ids | Where-Object {$owned.id -notcontains $_}).Count -eq 0
     }
-    Invoke-MoonRpc command -Commands @('workspace 3') | Out-Null
+    Invoke-MoonRpc command -Installed:$SignedInstallation -DevelopmentPath $MoonPath -Commands @('workspace 3') | Out-Null
     Wait-MoonCondition -Description 'WinUI application foreground' -Condition {[MoonElevatedNative]::GetForegroundWindow().ToInt64() -eq $owned[2].id}
     Check-WinUI $false
     $checks.Add([pscustomobject]@{check='WinUI 3 exact tiling';passed=$true})
-    Invoke-MoonRpc command -Commands @('toggle-floating') | Out-Null
+    Invoke-MoonRpc command -Installed:$SignedInstallation -DevelopmentPath $MoonPath -Commands @('toggle-floating') | Out-Null
     Check-WinUI $true
     $checks.Add([pscustomobject]@{check='WinUI 3 floating and exact frame';passed=$true})
     Switch-OwnedWorkspace $owned[2] $owned[0]
@@ -264,7 +264,7 @@ try {
     Switch-OwnedWorkspace $owned[0] $owned[2]
     Check-WinUI $true
     $checks.Add([pscustomobject]@{check='WinUI 3 hide and floating restoration';passed=$true})
-    Invoke-MoonRpc command -Commands @('toggle-floating') | Out-Null
+    Invoke-MoonRpc command -Installed:$SignedInstallation -DevelopmentPath $MoonPath -Commands @('toggle-floating') | Out-Null
     Check-WinUI $false
     Switch-OwnedWorkspace $owned[2] $owned[0]
     $from=$owned[0]
@@ -273,14 +273,14 @@ try {
         Switch-OwnedWorkspace $from $to $trial
         $from=$to
     }
-    $hookStats=(Invoke-MoonRpc query stats).hooks
+    $hookStats=(Invoke-MoonRpc query stats -Installed:$SignedInstallation -DevelopmentPath $MoonPath).hooks
     $checks.Add([pscustomobject]@{check='S4 hook-driven focus across three applications';passed=$true;successes=$transitions.Count;trials=100})
 } catch {$failure=$_}
 finally {
     if ($daemonId) {
         try {
-            $running=Get-MoonDaemon
-            if ($running -and $running.process_id -eq $daemonId) {Invoke-MoonRpc command -Commands @('exit') | Out-Null}
+            $running=Get-MoonDaemon -Installed:$SignedInstallation -DevelopmentPath $MoonPath
+            if ($running -and $running.process_id -eq $daemonId) {Invoke-MoonRpc command -Installed:$SignedInstallation -DevelopmentPath $MoonPath -Commands @('exit') | Out-Null}
             try {Wait-MoonCondition -Description 'owned daemon and watchdog restoration' -Seconds 5 -Condition {!(Get-Process -Id $daemonId -ErrorAction SilentlyContinue) -and !(Test-Path -LiteralPath $journal)}}
             catch {
                 $stuck=Get-CimInstance Win32_Process -Filter "ProcessId=$daemonId"

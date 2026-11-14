@@ -5,6 +5,7 @@ $ErrorActionPreference = 'Stop'
 if (!('MoonInstallNative' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
+using Microsoft.Win32;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Text;
@@ -22,6 +23,10 @@ public static class MoonInstallNative {
     [DllImport("kernel32.dll",SetLastError=true)] static extern IntPtr OpenProcess(uint access,bool inherit,uint processId);
     [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool QueryFullProcessImageName(IntPtr process,uint flags,StringBuilder path,ref uint length);
     [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetProcessTimes(IntPtr process,out long created,out long exited,out long kernel,out long user);
+    [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetNamedPipeServerProcessId(Microsoft.Win32.SafeHandles.SafePipeHandle pipe,out uint processId);
+    [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetNamedPipeInfo(Microsoft.Win32.SafeHandles.SafePipeHandle pipe,IntPtr flags,IntPtr outBuffer,IntPtr inBuffer,out uint maximumInstances);
+    [DllImport("kernel32.dll",SetLastError=true)] static extern uint WaitForSingleObject(IntPtr handle,uint milliseconds);
+    [DllImport("shell32.dll")] static extern int SHGetKnownFolderPath(ref Guid folder,uint flags,IntPtr token,out IntPtr path);
     [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
     [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
     [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern IntPtr LoadLibraryEx(string path,IntPtr file,uint flags);
@@ -32,8 +37,80 @@ public static class MoonInstallNative {
     [DllImport("kernel32.dll")] static extern bool FreeLibrary(IntPtr module);
     [DllImport("user32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern IntPtr SendMessageTimeout(IntPtr window,uint message,IntPtr wparam,string lparam,uint flags,uint timeout,out UIntPtr result);
     static Exception Error() { return new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error()); }
-    public sealed class ProcessIdentityInfo {public string Path; public long Birth;}
-    public static ProcessIdentityInfo ProcessIdentity(uint processId) {var process=OpenProcess(0x1000,false,processId);if(process==IntPtr.Zero)throw Error();try{var path=new StringBuilder(32768);uint length=(uint)path.Capacity;long created,exited,kernel,user;if(!QueryFullProcessImageName(process,0,path,ref length))throw Error();if(!GetProcessTimes(process,out created,out exited,out kernel,out user))throw Error();return new ProcessIdentityInfo{Path=path.ToString(),Birth=created};}finally{CloseHandle(process);}}
+    public static string ProgramFilesX64() {
+        if(!Environment.Is64BitProcess) {
+            using(var machine=RegistryKey.OpenBaseKey(RegistryHive.LocalMachine,RegistryView.Registry64))
+            using(var windows=machine.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion")) {
+                var directory=windows==null ? null : windows.GetValue("ProgramFilesDir") as string;
+                if(String.IsNullOrEmpty(directory))throw new InvalidOperationException("Windows did not provide the 64-bit Program Files directory.");
+                return directory;
+            }
+        }
+        var folder=new Guid("6d809377-6af0-444b-8957-a3773f02200e");
+        IntPtr path;Marshal.ThrowExceptionForHR(SHGetKnownFolderPath(ref folder,0,IntPtr.Zero,out path));
+        try{return Marshal.PtrToStringUni(path);}finally{Marshal.FreeCoTaskMem(path);}
+    }
+    public sealed class ProcessIdentityInfo {public string Path; public long Birth; public uint ProcessId; public bool UiAccess;}
+    static long ProcessBirth(IntPtr process) {
+        long created,exited,kernel,user;
+        if(!GetProcessTimes(process,out created,out exited,out kernel,out user))throw Error();
+        return created;
+    }
+    static ProcessIdentityInfo ReadProcessIdentity(IntPtr process,uint processId) {
+        var path=new StringBuilder(32768);uint length=(uint)path.Capacity;
+        if(!QueryFullProcessImageName(process,0,path,ref length))throw Error();
+        return new ProcessIdentityInfo{Path=path.ToString(),Birth=ProcessBirth(process),ProcessId=processId};
+    }
+    public static ProcessIdentityInfo ProcessIdentity(uint processId) {
+        var process=OpenProcess(0x1000,false,processId);if(process==IntPtr.Zero)throw Error();
+        try{return ReadProcessIdentity(process,processId);}finally{CloseHandle(process);}
+    }
+    public static bool ProcessStillRunning(ProcessIdentityInfo identity) {
+        var process=OpenProcess(0x101000,false,identity.ProcessId);
+        if(process==IntPtr.Zero) {
+            var error=Marshal.GetLastWin32Error();
+            if(error==87)return false;
+            throw new System.ComponentModel.Win32Exception(error);
+        }
+        try {
+            if(ProcessBirth(process)!=identity.Birth)return false;
+            var state=WaitForSingleObject(process,0);
+            if(state==0)return false;
+            if(state==258)return true;
+            throw Error();
+        } finally {CloseHandle(process);}
+    }
+    public static ProcessIdentityInfo VerifyPipeServer(Microsoft.Win32.SafeHandles.SafePipeHandle pipe,string expectedPath,ProcessIdentityInfo previous,string developmentPath,string installedPath,bool exactDevelopmentPath) {
+        uint maximum;
+        if(!GetNamedPipeInfo(pipe,IntPtr.Zero,IntPtr.Zero,IntPtr.Zero,out maximum))throw Error();
+        if(maximum!=1)throw new InvalidOperationException("Moon IPC requires one server instance per pipe name.");
+        uint pid;if(!GetNamedPipeServerProcessId(pipe,out pid))throw Error();
+        var process=OpenProcess(0x101000,false,pid);if(process==IntPtr.Zero)throw Error();
+        try {
+            var peer=ReadProcessIdentity(process,pid);
+            IntPtr token;if(!OpenProcessToken(process,8,out token))throw Error();
+            try {
+                using(var current=WindowsIdentity.GetCurrent()) {
+                    if(PipeName(token)!=PipeName(current.Token) || TokenWord(token,12)!=TokenWord(current.Token,12) || TokenWord(token,29)!=0)
+                        throw new InvalidOperationException("The Moon pipe server belongs to a different Windows logon.");
+                    peer.UiAccess=TokenWord(token,26)!=0;
+                    if(!String.IsNullOrEmpty(expectedPath)) {
+                        var matchesPrevious=previous!=null && previous.ProcessId==pid && previous.Birth==peer.Birth;
+                        if(!peer.UiAccess || (previous!=null ? !matchesPrevious : !String.Equals(peer.Path,expectedPath,StringComparison.OrdinalIgnoreCase)))
+                            throw new InvalidOperationException("The Moon pipe server is not the expected installed daemon.");
+                    } else {
+                        var installed=String.Equals(peer.Path,installedPath,StringComparison.OrdinalIgnoreCase);
+                        var development=String.Equals(peer.Path,developmentPath,StringComparison.OrdinalIgnoreCase);
+                        if((exactDevelopmentPath && !development) || (installed ? !peer.UiAccess : !development
+                            || (TokenWord(current.Token,20)!=0 && TokenWord(token,20)==0)))
+                            throw new InvalidOperationException("The Moon pipe server is not a daemon at the expected privilege level.");
+                    }
+                }
+                if(WaitForSingleObject(process,0)!=258)throw new InvalidOperationException("The Moon pipe server exited during verification.");
+                return peer;
+            } finally {CloseHandle(token);}
+        } finally {CloseHandle(process);}
+    }
     public static string PipeName() { using(var identity=WindowsIdentity.GetCurrent()) { return PipeName(identity.Token); } }
     public static string PipeName(IntPtr token) {
         uint length;GetTokenInformation(token,28,IntPtr.Zero,0,out length);
@@ -46,7 +123,8 @@ public static class MoonInstallNative {
             return "moon-v1-"+new SecurityIdentifier(groups.Group.Sid).Value;
         } finally {Marshal.FreeHGlobal(memory);}
     }
-    public static uint TokenWord(int kind) { using(var identity=WindowsIdentity.GetCurrent()) { var memory=Marshal.AllocHGlobal(4); try {uint length; if(!GetTokenInformation(identity.Token,kind,memory,4,out length)) throw Error(); return unchecked((uint)Marshal.ReadInt32(memory));} finally {Marshal.FreeHGlobal(memory);} } }
+    static uint TokenWord(IntPtr token,int kind) {var memory=Marshal.AllocHGlobal(4); try {uint length; if(!GetTokenInformation(token,kind,memory,4,out length)) throw Error(); return unchecked((uint)Marshal.ReadInt32(memory));} finally {Marshal.FreeHGlobal(memory);} }
+    public static uint TokenWord(int kind) { using(var identity=WindowsIdentity.GetCurrent()) {return TokenWord(identity.Token,kind);} }
     public static uint Integrity() { using(var identity=WindowsIdentity.GetCurrent()) {uint length;GetTokenInformation(identity.Token,25,IntPtr.Zero,0,out length);var memory=Marshal.AllocHGlobal((int)length);try {if(!GetTokenInformation(identity.Token,25,memory,length,out length)) throw Error();var sid=Marshal.ReadIntPtr(memory);var count=Marshal.ReadByte(GetSidSubAuthorityCount(sid));return unchecked((uint)Marshal.ReadInt32(GetSidSubAuthority(sid,(uint)(count-1))));}finally{Marshal.FreeHGlobal(memory);}} }
     public static void LowerToLowIntegrity() {IntPtr token,sid;if(!OpenProcessToken(GetCurrentProcess(),0x88,out token))throw Error();try{if(!ConvertStringSidToSid("S-1-16-4096",out sid))throw Error();try{var label=new Label{Sid=sid,Attributes=0x20};if(!SetTokenInformation(token,25,ref label,(uint)Marshal.SizeOf(typeof(Label))+GetLengthSid(sid)))throw Error();}finally{LocalFree(sid);}}finally{CloseHandle(token);}}
     public static string Manifest(string path) {var module=LoadLibraryEx(path,IntPtr.Zero,0x22);if(module==IntPtr.Zero)throw Error();try{var resource=FindResource(module,new IntPtr(1),new IntPtr(24));if(resource==IntPtr.Zero)throw Error();var loaded=LoadResource(module,resource);if(loaded==IntPtr.Zero)throw Error();uint length=SizeofResource(module,resource);if(length==0||length>1048576)throw new InvalidOperationException("Invalid manifest size");var bytes=new byte[length];Marshal.Copy(LockResource(loaded),bytes,0,(int)length);return Encoding.UTF8.GetString(bytes).TrimEnd('\0');}finally{FreeLibrary(module);}}
@@ -55,7 +133,7 @@ public static class MoonInstallNative {
 '@
 }
 
-function Get-MoonInstallDirectory { Join-Path $env:ProgramW6432 'moon' }
+function Get-MoonInstallDirectory { Join-Path ([MoonInstallNative]::ProgramFilesX64()) 'moon' }
 function Get-MoonStartupLinks {
     param([string[]]$Programs,[string]$Directory=([Environment]::GetFolderPath('Startup')))
     if (!(Test-Path -LiteralPath $Directory)) {return}
@@ -262,17 +340,46 @@ function Invoke-MoonShellProcess {
         return $process.ExitCode
     } finally {$process.Dispose()}
 }
+function Connect-MoonRpc([string]$Name,[string]$Expected,[MoonInstallNative+ProcessIdentityInfo]$ExpectedPeer,[string]$Development,[string]$InstalledPath,[bool]$ExactDevelopment) {
+    $until=[DateTime]::UtcNow.AddMilliseconds(1500)
+    $lastError=$null
+    do {
+        for ($slot=0; $slot -lt 16; $slot++) {
+            $endpoint=if($slot){$Name+'-'+$slot}else{$Name}
+            $pipe=[IO.Pipes.NamedPipeClientStream]::new('.',$endpoint,[IO.Pipes.PipeDirection]::InOut,[IO.Pipes.PipeOptions]::Asynchronous,[Security.Principal.TokenImpersonationLevel]::Identification)
+            try {
+                $pipe.Connect(25)
+                $peer=[MoonInstallNative]::VerifyPipeServer($pipe.SafePipeHandle,$Expected,$ExpectedPeer,$Development,$InstalledPath,$ExactDevelopment)
+                return [pscustomobject]@{pipe=$pipe;peer=$peer}
+            } catch {
+                $pipe.Dispose()
+                if ($_.Exception -isnot [TimeoutException]) {$lastError=$_}
+            }
+        }
+    } while ([DateTime]::UtcNow -lt $until)
+    if ($lastError) {throw $lastError}
+    throw 'Moon IPC connection timed out.'
+}
 function Invoke-MoonRpc {
-    param([ValidateSet('query','command')][string]$Method,[string]$Query,[string[]]$Commands,[long]$ExpectedFocus)
-    $pipe = [IO.Pipes.NamedPipeClientStream]::new('.', [MoonInstallNative]::PipeName(), [IO.Pipes.PipeDirection]::InOut, [IO.Pipes.PipeOptions]::Asynchronous)
+    param([ValidateSet('query','command','lifecycle')][string]$Method,[string]$Query,[string[]]$Commands,[long]$ExpectedFocus,
+        [switch]$Installed,[MoonInstallNative+ProcessIdentityInfo]$ExpectedPeer,[string]$DevelopmentPath,[ValidateSet('restart','exit')][string]$LifecycleAction)
+    $installedPath=Join-Path (Get-MoonInstallDirectory) 'moon.exe'
+    $expected=if($Installed -or $ExpectedPeer){$installedPath}else{$null}
+    $development=if($DevelopmentPath){[IO.Path]::GetFullPath($DevelopmentPath)}else{Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'moon-dev\moon.exe'}
+    $connection=Connect-MoonRpc ([MoonInstallNative]::PipeName()) $expected $ExpectedPeer $development $installedPath ([bool]$DevelopmentPath)
+    $pipe=$connection.pipe
+    $peer=$connection.peer
     try {
-        $pipe.Connect(1500)
         $encoding = [Text.UTF8Encoding]::new($false,$true)
         $reader = [IO.StreamReader]::new($pipe,$encoding,$false,4096,$true)
         $writer = [IO.StreamWriter]::new($pipe,$encoding,4096,$true)
         try {
             $request = @{version=1;id='installation';method=$Method}
-            if ($Method -eq 'query') { $request.query=$Query } else { $request.commands=$Commands }
+            switch ($Method) {
+                'query' {$request.query=$Query}
+                'command' {$request.commands=$Commands}
+                'lifecycle' {$request.action=$LifecycleAction}
+            }
             if ($PSBoundParameters.ContainsKey('ExpectedFocus')) {
                 if ($Method -ne 'command') {throw 'ExpectedFocus applies only to command requests.'}
                 $request.expected_focus=$ExpectedFocus
@@ -283,11 +390,19 @@ function Invoke-MoonRpc {
             if ($null -eq $read.Result -or $read.Result.Length -gt 8388608) { throw 'Invalid moon IPC response' }
             $response=$read.Result | ConvertFrom-Json
             if (!$response.ok) { throw "moon IPC: $($response.error)" }
+            if ($Method -eq 'query' -and $Query -eq 'stats') {
+                if ($response.result.process_id -ne $peer.ProcessId -or [bool]$response.result.token.ui_access -ne $peer.UiAccess) {throw 'Moon IPC reported the wrong process identity.'}
+                $response.result.executable=$peer.Path
+                $response.result | Add-Member -NotePropertyName pipe_peer -NotePropertyValue $peer
+            }
             return $response.result
         } finally { $reader.Dispose(); try { $writer.Dispose() } catch [IO.IOException] {} }
     } finally { $pipe.Dispose() }
 }
-function Get-MoonDaemon { try { Invoke-MoonRpc query stats } catch { return $null } }
+function Get-MoonDaemon {
+    param([switch]$Installed,[MoonInstallNative+ProcessIdentityInfo]$ExpectedPeer,[string]$DevelopmentPath)
+    try {Invoke-MoonRpc query stats -Installed:$Installed -ExpectedPeer $ExpectedPeer -DevelopmentPath $DevelopmentPath} catch {return $null}
+}
 function Wait-MoonCondition([scriptblock]$Condition,[string]$Description,[int]$Seconds=20) {
     $until=[DateTime]::UtcNow.AddSeconds($Seconds); $last=''
     do { try { if (& $Condition) { return } } catch { $last=$_.Exception.Message }; Start-Sleep -Milliseconds 150 } while ([DateTime]::UtcNow -lt $until)
@@ -373,9 +488,9 @@ function Assert-MoonOwnedTask($Task,$State,[string]$Target) {
     if ($principal -ne $State.owner_sid) { throw 'Unexpected startup task user.' }
 }
 function Get-MoonLayoutFingerprint {
-    param($World,[object[]]$Placements)
-    if (!$PSBoundParameters.ContainsKey('World')) {$World=Invoke-MoonRpc query world}
-    if (!$PSBoundParameters.ContainsKey('Placements')) {$Placements=@(Invoke-MoonRpc query windows)}
+    param($World,[object[]]$Placements,[switch]$Installed,[MoonInstallNative+ProcessIdentityInfo]$ExpectedPeer,[string]$DevelopmentPath)
+    if (!$PSBoundParameters.ContainsKey('World')) {$World=Invoke-MoonRpc query world -Installed:$Installed -ExpectedPeer $ExpectedPeer -DevelopmentPath $DevelopmentPath}
+    if (!$PSBoundParameters.ContainsKey('Placements')) {$Placements=@(Invoke-MoonRpc query windows -Installed:$Installed -ExpectedPeer $ExpectedPeer -DevelopmentPath $DevelopmentPath)}
     # Preserve tree child order, but normalize unordered maps and window lists.
     # Revisions, process lifetimes and changing titles are not layout semantics.
     $state=[ordered]@{
@@ -389,14 +504,14 @@ function Get-MoonLayoutFingerprint {
     $state | ConvertTo-Json -Depth 100 -Compress
 }
 function Get-MoonUpgradeSnapshot {
-    param([string]$JournalPath,[uint32]$ProcessId,[int]$TimeoutMilliseconds=5000)
-    $identity=[MoonInstallNative]::ProcessIdentity($ProcessId)
+    param([string]$JournalPath,[uint32]$ProcessId,[int]$TimeoutMilliseconds=5000,[MoonInstallNative+ProcessIdentityInfo]$ExpectedPeer)
+    $identity=if($ExpectedPeer){$ExpectedPeer}else{[MoonInstallNative]::ProcessIdentity($ProcessId)}
     $until=[DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
     $last='The journal checkpoint has not caught up with the current layout.'
     do {
         try {
-            $before=Invoke-MoonRpc query world
-            $layout=Get-MoonLayoutFingerprint -World $before
+            $before=Invoke-MoonRpc query world -ExpectedPeer $ExpectedPeer
+            $layout=Get-MoonLayoutFingerprint -World $before -ExpectedPeer $ExpectedPeer
             # The writer publishes by atomic rename; preserve delete-sharing
             # while reading one immutable opened version of the journal.
             $stream=[IO.FileStream]::new($JournalPath,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
@@ -406,7 +521,7 @@ function Get-MoonUpgradeSnapshot {
                 $stream.CopyTo($memory); $bytes=$memory.ToArray()
             } finally {$memory.Dispose(); $stream.Dispose()}
             $journal=([Text.UTF8Encoding]::new($false,$true)).GetString($bytes) | ConvertFrom-Json
-            $after=Invoke-MoonRpc query world
+            $after=Invoke-MoonRpc query world -ExpectedPeer $ExpectedPeer
             if ($journal.version -eq 1 -and $journal.owner -eq $ProcessId -and $journal.owner_birth -eq $identity.Birth -and $before.revision -eq $after.revision -and $journal.world.revision -eq $after.revision) {
                 return [pscustomobject]@{layout=$layout;journal=$bytes;revision=$after.revision}
             }
@@ -494,7 +609,7 @@ function Start-MoonLimitedOnce([string]$Target,[string]$Arguments,$State) {
         Start-ScheduledTask -TaskName $name
         try {
             Wait-MoonCondition -Description 'the restored signed daemon' -Condition {
-                $running=Get-MoonDaemon
+                $running=Get-MoonDaemon -Installed
                 $running -and [string]::Equals($running.executable,$Target,[StringComparison]::OrdinalIgnoreCase) -and $running.token.ui_access
             }
         }catch{throw "$($_.Exception.Message)`n$(Get-MoonTaskStartupDiagnostic $Target $launchAfter)"}
@@ -582,7 +697,7 @@ function Set-MoonShellRegistry([Microsoft.Win32.RegistryKey]$Root,[string]$Path,
         foreach ($entry in @($Snapshot.values|Sort-Object @{Expression={if($_.name -in @('MoonInstallId','MoonOwnerSid')){0}else{1}}},name)) {$key.SetValue($entry.name,$entry.value,[Microsoft.Win32.RegistryValueKind]$entry.kind)}
     } finally {$key.Dispose()}
 }
-function Publish-MoonShellPlan($Plan,$State,[Microsoft.Win32.RegistryKey]$RegistryRoot=[Microsoft.Win32.Registry]::CurrentUser) {
+function Publish-MoonShellPlan($Plan,$State,[Microsoft.Win32.RegistryKey]$RegistryRoot=[Microsoft.Win32.Registry]::CurrentUser,[ref]$Started) {
     $current=Read-MoonShellRegistry $RegistryRoot $Plan.paths.registry
     if (($current | ConvertTo-Json -Depth 10 -Compress) -cne ($Plan.before_registry | ConvertTo-Json -Depth 10 -Compress)) {throw 'The installed-apps entry changed during setup; the newer entry was preserved.'}
     Assert-MoonNoReparse $Plan.paths.shortcut
@@ -590,6 +705,7 @@ function Publish-MoonShellPlan($Plan,$State,[Microsoft.Win32.RegistryKey]$Regist
         if ($null -eq $Plan.before_shortcut -or (Get-FileHash -LiteralPath $Plan.paths.shortcut -Algorithm SHA256).Hash -ne (Get-MoonBytesHash $Plan.before_shortcut)) {throw 'The Start menu shortcut changed during setup; the newer shortcut was preserved.'}
     } elseif ($null -ne $Plan.before_shortcut) {throw 'The Start menu shortcut was removed during setup; it was not recreated.'}
     # All callers persist Plan.ownership in protected metadata before publication.
+    if ($Started) {$Started.Value=$true}
     Set-MoonShellRegistry $RegistryRoot $Plan.paths.registry $Plan.registry
     [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($Plan.paths.shortcut))
     [IO.File]::WriteAllBytes($Plan.paths.shortcut,$Plan.shortcut)
