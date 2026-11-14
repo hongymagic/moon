@@ -11,12 +11,14 @@ pub struct Startup {
 pub enum Page {
     #[default]
     General,
+    Overview,
     Shortcuts,
 }
 impl Page {
     pub fn name(&self) -> &'static str {
         match self {
             Self::General => "General",
+            Self::Overview => "Overview",
             Self::Shortcuts => "Shortcuts",
         }
     }
@@ -38,14 +40,15 @@ impl Startup {
                 Some("--page") if !page_seen => {
                     startup.page = match args.next().as_deref().and_then(|value| value.to_str()) {
                         Some("general") => Page::General,
+                        Some("overview") => Page::Overview,
                         Some("shortcuts") => Page::Shortcuts,
-                        _ => return Err("--page must be general or shortcuts.".into()),
+                        _ => return Err("--page must be general, overview or shortcuts.".into()),
                     };
                     page_seen = true;
                 }
                 _ => {
                     return Err(
-                        "Use each option once: --config <file> and --page general|shortcuts."
+                        "Use each option once: --config <file> and --page general|overview|shortcuts."
                             .into(),
                     );
                 }
@@ -75,6 +78,7 @@ mod tests {
             assert_eq!(startup.page.name(), "Shortcuts");
         }
         assert_eq!(parse(&["--page", "general"]).unwrap().page.name(), "General");
+        assert_eq!(parse(&["--page", "overview"]).unwrap().page.name(), "Overview");
     }
 
     #[test]

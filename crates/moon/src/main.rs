@@ -55,6 +55,8 @@ fn run() -> Result<()> {
         #[cfg(windows)]
         "settings" => open_settings(&options)?,
         #[cfg(windows)]
+        "overview" | "window-search" => open_settings_page(&options, Some("overview"))?,
+        #[cfg(windows)]
         "doctor" => daemon::doctor(&options, &words[1..])?,
         #[cfg(windows)]
         "restore" => {
@@ -184,10 +186,10 @@ pub fn open_settings_page(options: &Options, page: Option<&str>) -> Result<()> {
     }
     let mut arguments = format!("--config \"{}\"", config_path(options).display());
     if let Some(page) = page {
-        if page != "shortcuts" {
+        if !matches!(page, "shortcuts" | "overview") {
             bail!("Unknown Moon Settings page {page:?}");
         }
-        arguments.push_str(" --page shortcuts");
+        arguments.push_str(&format!(" --page {page}"));
     }
     moon_win::runtime::shell_execute(&companion.to_string_lossy(), &arguments)?;
     Ok(())
@@ -229,13 +231,68 @@ fn config_command(options: &Options, words: &[String]) -> Result<()> {
     Ok(())
 }
 
+#[cfg(any(windows, test))]
+fn window_request(words: &[String], catalog: &serde_json::Value) -> Result<serde_json::Value> {
+    use moon_core::{
+        command::WindowAction,
+        protocol::{Request, RequestAction, WindowTarget},
+    };
+    let (id, action) = words
+        .split_first()
+        .context("Use moon window ID focus|float|tile|move-to-workspace NAME [--follow]")?;
+    let action = match action {
+        [action] if action == "focus" => WindowAction::Focus,
+        [action] if action == "float" => WindowAction::Float,
+        [action] if action == "tile" => WindowAction::Tile,
+        [action, names @ ..] if action == "move-to-workspace" && !names.is_empty() => {
+            let follow = names.last().is_some_and(|name| name == "--follow");
+            let names = if follow { &names[..names.len() - 1] } else { names };
+            if names.is_empty() {
+                bail!("Provide a workspace name");
+            }
+            WindowAction::MoveToWorkspace { workspace: names.join(" "), follow }
+        }
+        _ => bail!("Window action must be focus, float, tile or move-to-workspace NAME [--follow]"),
+    };
+    let target = catalog["windows"]
+        .as_array()
+        .and_then(|windows| windows.iter().find(|window| window["id"].as_str() == Some(id)))
+        .context("Window is absent from the current desktop catalog")?;
+    let field = |object: &serde_json::Value, key: &str| -> Result<String> {
+        Ok(object[key]
+            .as_str()
+            .with_context(|| format!("Desktop catalog is missing {key}"))?
+            .into())
+    };
+    let request = Request {
+        version: 1,
+        id: serde_json::json!(1),
+        action: RequestAction::Window {
+            generation: field(catalog, "generation")?,
+            revision: field(catalog, "revision")?,
+            target: WindowTarget {
+                id: field(target, "id")?,
+                process_id: field(target, "process_id")?,
+                process_birth: field(target, "process_birth")?,
+            },
+            action,
+        },
+    };
+    let value = serde_json::to_value(request)?;
+    Request::parse(&value.to_string()).map_err(anyhow::Error::msg)?;
+    Ok(value)
+}
+
 fn print_help() {
     println!(
         "moon {} — Windows 11 window manager\n\n\
 moon [start] [--background] [--only PROCESS] [--no-hook] [--no-surfaces] [--takeover]\n\
 moon doctor                  Check capabilities and competing managers\n\
 moon settings                Open Moon Settings\n\
-moon query [world|stats|windows|monitors|transactions|config|restart-config|shortcuts|overview]\n\
+moon overview                Search and arrange managed windows\n\
+moon undo                    Undo the last deliberate layout change\n\
+moon window ID focus|float|tile|move-to-workspace NAME [--follow]\n\
+moon query [world|stats|windows|monitors|transactions|config|restart-config|shortcuts|overview|desktop|undo]\n\
 moon subscribe               Stream committed state changes\n\
 moon config default|show|validate|schema|reference|migrate|path\n\
 moon focus|move left|right|up|down\n\
@@ -257,6 +314,23 @@ Emergency recovery: Ctrl+Alt+Shift+F12.",
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn window_cli_uses_exact_catalog_tokens_and_only_typed_actions() {
+        let catalog = serde_json::json!({"generation":"20:134391580679147114","revision":"9007199254740993","windows":[{"id":"42","process_id":"11","process_birth":"134391580679147115"}]});
+        let request = window_request(
+            &["42", "move-to-workspace", "Web Browsing", "--follow"].map(str::to_owned),
+            &catalog,
+        )
+        .unwrap();
+        assert_eq!(request["revision"], "9007199254740993");
+        assert_eq!(request["target"]["process_birth"], "134391580679147115");
+        assert_eq!(
+            request["action"],
+            serde_json::json!({"type":"move-to-workspace","workspace":"Web Browsing","follow":true})
+        );
+        assert!(window_request(&["43", "focus"].map(str::to_owned), &catalog).is_err());
+        assert!(window_request(&["42", "exec", "example"].map(str::to_owned), &catalog).is_err());
+    }
     #[test]
     fn restart_preflight_reads_disk_without_applying_or_rewriting_settings() {
         let directory = std::env::temp_dir().join(format!(

@@ -50,6 +50,15 @@ Bindings merge by chord, rules append, and other lists replace. Invalid reloads 
 
 Open **Moon** from Start, choose **Settings** in the tray menu, or run `moon settings`. The settings pages cover window behavior, themes, border colors and gradients, workspaces, shortcuts, app rules, and advanced configuration. General shows where your windows are assigned. Changes remain a draft until saved; **Undo** restores the last draft change, and invalid changes or conflicting external edits leave the existing file intact. **Reload** reads the latest saved file after confirmation. Save feedback distinguishes stored settings from settings loaded by Moon. Settings respects Windows contrast and reduced-motion preferences.
 
+**Ctrl+Alt+Space** opens Overview to find a window across workspaces, see its app
+icon and an available live preview, move it by dragging its handle or choosing
+**Move**, and create an app rule from its current details. Focusing a window on
+another workspace uses the workspace carousel. **Ctrl+Alt+Z** undoes the last
+eligible layout change; this is separate from undoing a Settings draft.
+Appearance includes a theme gallery, while Workspaces includes named saved
+setups. Both stage changes before saving and support sharing through Windows
+file dialogs. See [themes and saved setups](docs/desktop-library.md).
+
 The settings frontend uses pinned Bun 1.4.4 and TypeScript 7.0.2. `just settings` checks and rebuilds its bundled assets; `just settings-test` runs its browser interaction tests. Generated assets are checked in so a native Windows build does not require a web toolchain. See [settings persistence](docs/settings-editing.md) for exact merge and save behavior.
 
 ## IPC and recovery

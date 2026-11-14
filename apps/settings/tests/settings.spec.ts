@@ -5,9 +5,20 @@ import defaults from "./fixtures/defaults.json" with { type: "json" };
 type Message = {
   id: number;
   method: string;
-  params: { expected_source?: string | null; edits?: unknown[] };
+  params: {
+    expected_source?: string | null;
+    edits?: unknown[];
+    [key: string]: unknown;
+  };
 };
 type Host = {
+  desktop: ReturnType<typeof desktopFixture>;
+  library: ReturnType<typeof libraryFixture>;
+  methodErrors: Record<string, { code: string; message: string; help: string }>;
+  libraryEdits?: unknown[];
+  importDocument?: string | null;
+  fileGate?: Promise<void>;
+  desktopGate?: Promise<void>;
   calls: Message[];
   error?: { code: string; message: string; help: string };
   loadError?: { code: string; message: string; help: string };
@@ -29,6 +40,112 @@ type Host = {
   };
   application?: { state: string; message: string };
 };
+function desktopFixture() {
+  const bounds = { x: 0, y: 0, width: 1920, height: 1080 };
+  const window = (
+    id: string,
+    process: string,
+    title: string,
+    workspace: string,
+    x: number,
+  ) => ({
+    id,
+    process_id: "4000",
+    process_birth: "134391583249052813",
+    title,
+    process,
+    class: "FixtureWindow",
+    workspace,
+    monitor_id: "3229624234",
+    rect: { x, y: 0, width: 960, height: 1080 },
+    state: {
+      focused: id === "9007199254740993",
+      visible: workspace === "1",
+      floating: false,
+      fullscreen: false,
+      suspended: false,
+    },
+    rules: [
+      {
+        index: 2,
+        commands: ["move-to-workspace 1"],
+        matches: [
+          {
+            index: 0,
+            matched: true,
+            conditions: [
+              {
+                field: "process",
+                operator: "equals",
+                value: process,
+                matched: true,
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+  return {
+    generation: "4000:134391583249052813",
+    revision: "12345678901234567890",
+    paused: false,
+    session_suspended: false,
+    total_windows: 3,
+    truncated: false,
+    rule_evaluation: "current-metadata",
+    active_workspace: "1",
+    undo: {
+      available: true,
+      label: "Undo resize",
+      reason: null as string | null,
+    },
+    workspaces: [
+      { name: "1", monitor_id: "3229624234", active: true, windows: 2, bounds },
+      {
+        name: "2",
+        monitor_id: "3229624234",
+        active: false,
+        windows: 1,
+        bounds,
+      },
+      {
+        name: "3",
+        monitor_id: "3229624234",
+        active: false,
+        windows: 0,
+        bounds,
+      },
+    ],
+    windows: [
+      window("9007199254740993", "Code", "Project notes", "1", 0),
+      window("9007199254740994", "Arc", "Research browser", "1", 960),
+      window("9007199254740995", "Code", "Second project", "2", 0),
+    ],
+  };
+}
+function libraryFixture() {
+  return {
+    source: "library-v1" as string | null,
+    entries: ["Linen", "Slate", "Forest"].map((name) => ({
+      kind: "theme",
+      name,
+      builtin: true,
+      values: {
+        theme: "system",
+        palette: {
+          terracotta: "#4d7056",
+          base: "#202020",
+          surface0: "#303030",
+          text: "#ffffff",
+        },
+        "light-palette": { terracotta: "#4d7056" },
+        bar: { background: "base" },
+      } as Record<string, unknown>,
+    })),
+  };
+}
+
 const original = "# fixture preferences\ntheme='dark'\n";
 const personalRule = {
   commands: ["set-floating"],
@@ -41,9 +158,15 @@ async function open(
   initial: Pick<
     Host,
     "loadGate" | "loadError" | "shortcuts" | "shortcutsError"
-  > & { waitForUi?: boolean; startPage?: "General" | "Shortcuts" } = {},
+  > & {
+    waitForUi?: boolean;
+    startPage?: "General" | "Shortcuts" | "Overview";
+  } = {},
 ): Promise<Host> {
   const host: Host = {
+    desktop: desktopFixture(),
+    library: libraryFixture(),
+    methodErrors: {},
     calls: [],
     loadGate: initial.loadGate,
     loadError: initial.loadError,
@@ -121,6 +244,115 @@ async function open(
         },
       };
     }
+    if (host.methodErrors[message.method])
+      return {
+        id: message.id,
+        ok: false,
+        error: host.methodErrors[message.method],
+      };
+    if (message.method === "library-import-file") {
+      await host.fileGate;
+      return {
+        id: message.id,
+        ok: true,
+        result: host.importDocument ? { document: host.importDocument } : null,
+      };
+    }
+    if (message.method === "library-export-file") {
+      await host.fileGate;
+      return { id: message.id, ok: true, result: { saved: true } };
+    }
+    if (message.method === "desktop") {
+      await host.desktopGate;
+      return { id: message.id, ok: true, result: host.desktop };
+    }
+    if (message.method === "previews")
+      return {
+        id: message.id,
+        ok: true,
+        result: { shown: [], unavailable: [] },
+      };
+    if (message.method === "library-list")
+      return { id: message.id, ok: true, result: host.library };
+    if (message.method === "library-apply")
+      return {
+        id: message.id,
+        ok: true,
+        result: {
+          edits: host.libraryEdits ?? [
+            { op: "set", path: ["theme"], value: "light" },
+            { op: "set", path: ["borders", "focused"], value: "#4d7056" },
+          ],
+        },
+      };
+    if (message.method === "library-export")
+      return {
+        id: message.id,
+        ok: true,
+        result: {
+          document: JSON.stringify({
+            version: 1,
+            kind: message.params.kind,
+            name: message.params.name,
+            values: { theme: "system" },
+          }),
+        },
+      };
+    if (
+      [
+        "library-save",
+        "library-rename",
+        "library-delete",
+        "library-import",
+      ].includes(message.method)
+    ) {
+      if (message.params.expected_source !== host.library.source)
+        return {
+          id: message.id,
+          ok: false,
+          error: {
+            code: "conflict",
+            message: "The library changed. Refresh it before saving again.",
+            help: "Your desktop configuration was not changed.",
+          },
+        };
+      const imported =
+        message.method === "library-import"
+          ? (JSON.parse(String(message.params.document)) as {
+              kind: string;
+              name: string;
+              values: Record<string, unknown>;
+            })
+          : undefined;
+      const kind = imported?.kind ?? String(message.params.kind);
+      const name = imported?.name ?? String(message.params.name);
+      if (message.method === "library-delete")
+        host.library.entries = host.library.entries.filter(
+          (entry) => entry.kind !== kind || entry.name !== name,
+        );
+      else if (message.method === "library-rename")
+        host.library.entries = host.library.entries.map((entry) =>
+          entry.kind === kind && entry.name === name
+            ? { ...entry, name: String(message.params.new_name) }
+            : entry,
+        );
+      else {
+        host.library.entries = host.library.entries.filter(
+          (entry) => entry.kind !== kind || entry.name !== name,
+        );
+        host.library.entries.push({
+          kind,
+          name,
+          builtin: false,
+          values: imported?.values ?? {
+            theme: "dark",
+            workspaces: defaults.workspaces,
+          },
+        });
+      }
+      host.library.source = `library-v${host.calls.length}`;
+      return { id: message.id, ok: true, result: host.library };
+    }
     if (message.method === "shortcuts" && host.shortcutsError)
       return { id: message.id, ok: false, error: host.shortcutsError };
     return {
@@ -151,7 +383,7 @@ async function open(
   });
   await page.addInitScript((startPage) => {
     const target = window as unknown as {
-      moonStartPage: "General" | "Shortcuts";
+      moonStartPage: "General" | "Shortcuts" | "Overview";
       ipc: { postMessage(raw: string): void };
       __moonTestRequest(raw: string): Promise<unknown>;
       moonReceive(reply: unknown): void;
@@ -1464,4 +1696,990 @@ test("merged draft undo retains a parent reset after undoing its later child edi
   expect(saveCalls(host)[0]?.params.edits).toEqual([
     { op: "reset", path: ["bar"] },
   ]);
+});
+
+test("Overview search uses exact guarded string identities and Escape clears the filter", async ({
+  page,
+}) => {
+  const host = await open(page, {}, { startPage: "Overview" });
+  const search = page.getByRole("searchbox", { name: "Find an app or window" });
+  await search.fill("project notes");
+  await expect(
+    page.getByRole("button", {
+      name: "Activate Research browser",
+      exact: true,
+    }),
+  ).toHaveCount(0);
+  await search.press("Enter");
+  await expect
+    .poll(() => host.calls.filter((c) => c.method === "window-action").length)
+    .toBe(1);
+  expect(host.calls.find((c) => c.method === "window-action")!.params).toEqual({
+    generation: host.desktop.generation,
+    revision: host.desktop.revision,
+    target: {
+      id: "9007199254740993",
+      process_id: "4000",
+      process_birth: "134391583249052813",
+    },
+    action: { type: "focus" },
+  });
+  await search.press("Escape");
+  await expect(search).toHaveValue("");
+  await expect(
+    page.getByRole("button", {
+      name: "Activate Research browser",
+      exact: true,
+    }),
+  ).toBeVisible();
+  expect(host.calls.filter((c) => c.method === "save")).toHaveLength(0);
+});
+
+test("Window options and internal drag use the same guarded workspace move", async ({
+  page,
+}) => {
+  const host = await open(page, {}, { startPage: "Overview" });
+  await page
+    .getByRole("button", { name: "Options for Project notes", exact: true })
+    .click();
+  await page
+    .getByRole("combobox", { name: "Move Code to workspace" })
+    .selectOption("3");
+  await page.getByRole("button", { name: "Move window", exact: true }).click();
+  await expect
+    .poll(() => host.calls.filter((c) => c.method === "window-action").length)
+    .toBe(1);
+  await expect(
+    page.getByRole("button", {
+      name: "Options for Project notes",
+      exact: true,
+    }),
+  ).toBeFocused();
+  expect(
+    host.calls.find((c) => c.method === "window-action")!.params.action,
+  ).toEqual({ type: "move-to-workspace", workspace: "3", follow: false });
+  await page
+    .getByRole("button", { name: "Move Research browser", exact: true })
+    .dragTo(page.locator('.workspace-card[data-workspace="2"]'));
+  await expect
+    .poll(() => host.calls.filter((c) => c.method === "window-action").length)
+    .toBe(2);
+  expect(
+    host.calls.filter((c) => c.method === "window-action")[1]!.params.action,
+  ).toEqual({ type: "move-to-workspace", workspace: "2", follow: false });
+  const external = await page.evaluateHandle(() => new DataTransfer());
+  await external.evaluate((t) =>
+    t.setData("application/x-moon-window", "9007199254740993"),
+  );
+  await page
+    .locator('.workspace-card[data-workspace="3"]')
+    .dispatchEvent("drop", { dataTransfer: external });
+  expect(host.calls.filter((c) => c.method === "window-action")).toHaveLength(
+    2,
+  );
+});
+
+test("A stale desktop action reports the failure and refreshes without replay", async ({
+  page,
+}) => {
+  const host = await open(page, {}, { startPage: "Overview" });
+  host.methodErrors["window-action"] = {
+    code: "stale",
+    message: "The desktop changed. Refresh and try again.",
+    help: "No window was changed.",
+  };
+  await page
+    .getByRole("button", { name: "Activate Project notes", exact: true })
+    .click();
+  await expect(page.getByRole("alert")).toContainText("The desktop changed");
+  await expect
+    .poll(() => host.calls.filter((c) => c.method === "desktop").length)
+    .toBeGreaterThan(1);
+  expect(host.calls.filter((c) => c.method === "window-action")).toHaveLength(
+    1,
+  );
+});
+
+test("Layout Undo preserves the independent Settings draft", async ({
+  page,
+}) => {
+  const host = await open(page);
+  await page
+    .getByRole("spinbutton", { name: "Inner gap", exact: true })
+    .fill("29");
+  await page.getByRole("button", { name: "Overview", exact: true }).click();
+  await page.getByRole("button", { name: "Undo layout", exact: true }).click();
+  await expect
+    .poll(() => host.calls.filter((c) => c.method === "layout-undo").length)
+    .toBe(1);
+  await expect(
+    page.getByRole("button", { name: "Undo layout", exact: true }),
+  ).toBeFocused();
+  expect(host.calls.find((c) => c.method === "layout-undo")!.params).toEqual({
+    generation: host.desktop.generation,
+    revision: host.desktop.revision,
+  });
+  await page.getByRole("button", { name: "General", exact: true }).click();
+  await expect(
+    page.getByRole("spinbutton", { name: "Inner gap", exact: true }),
+  ).toHaveValue("29");
+  await expect(
+    page.getByRole("button", { name: "Save changes" }),
+  ).toBeEnabled();
+  expect(host.calls.filter((c) => c.method === "save")).toHaveLength(0);
+});
+
+test("Rule creation previews current matches and stages one undoable personal rule", async ({
+  page,
+}) => {
+  const host = await open(
+    page,
+    { rules: [personalRule] },
+    { startPage: "Overview" },
+  );
+  await page
+    .getByRole("button", { name: "Options for Project notes", exact: true })
+    .click();
+  await page
+    .getByText("Rules matching this window now", { exact: true })
+    .click();
+  await expect(page.getByRole("dialog")).toContainText("not the history");
+  await page
+    .getByRole("button", { name: "Create app rule", exact: true })
+    .click();
+  await expect(
+    page
+      .getByRole("status")
+      .filter({ hasText: "2 managed windows currently match" }),
+  ).toBeVisible();
+  await page
+    .getByRole("combobox", { name: "Rule workspace" })
+    .selectOption("2");
+  await page.getByRole("button", { name: "Add rule to draft" }).click();
+  await expect(
+    page.getByText("2 personal rules", { exact: true }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Undo last change" }).click();
+  await expect(
+    page.getByText("1 personal rules", { exact: true }),
+  ).toBeVisible();
+  expect(
+    host.calls.filter((c) => ["save", "window-action"].includes(c.method)),
+  ).toHaveLength(0);
+});
+
+test("Profiles use source tokens, apply to draft, rename and confirm removal", async ({
+  page,
+}) => {
+  const host = await open(page);
+  await page.getByRole("button", { name: "Workspaces", exact: true }).click();
+  await page.getByRole("button", { name: "Save this setup" }).click();
+  await page.getByRole("textbox", { name: "Saved item name" }).fill("Desk");
+  await page.getByRole("button", { name: "Save to library" }).click();
+  await expect(page.getByRole("button", { name: "Apply Desk" })).toBeEnabled();
+  expect(
+    host.calls.find((c) => c.method === "library-save")!.params,
+  ).toMatchObject({
+    expected_source: "library-v1",
+    kind: "profile",
+    name: "Desk",
+    replace: false,
+    config: { theme: "dark" },
+  });
+  await expect(
+    page.getByRole("button", { name: "Save changes" }),
+  ).toBeDisabled();
+  await page.getByRole("button", { name: "Apply Desk" }).click();
+  await expect(
+    page.getByRole("button", { name: "Save changes" }),
+  ).toBeEnabled();
+  await page.getByRole("button", { name: "Undo last change" }).click();
+  await expect(
+    page.getByRole("button", { name: "Save changes" }),
+  ).toBeDisabled();
+  await page
+    .locator(".library-card")
+    .filter({ hasText: "Desk" })
+    .getByRole("button", { name: "Rename", exact: true })
+    .click();
+  await page.getByRole("textbox", { name: "Saved item name" }).fill("Laptop");
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Rename", exact: true })
+    .click();
+  await expect(
+    page.getByRole("button", { name: "Apply Laptop" }),
+  ).toBeVisible();
+  await page
+    .locator(".library-card")
+    .filter({ hasText: "Laptop" })
+    .getByRole("button", { name: "Remove", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  expect(host.calls.filter((c) => c.method === "library-delete")).toHaveLength(
+    0,
+  );
+  await page
+    .locator(".library-card")
+    .filter({ hasText: "Laptop" })
+    .getByRole("button", { name: "Remove", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Remove saved item" }).click();
+  await expect(page.getByRole("button", { name: "Apply Laptop" })).toHaveCount(
+    0,
+  );
+  expect(host.calls.filter((c) => c.method === "save")).toHaveLength(0);
+});
+
+test("Curated themes keep preview and change only an undoable draft", async ({
+  page,
+}) => {
+  const host = await open(page);
+  await page.getByRole("button", { name: "Appearance", exact: true }).click();
+  for (const name of ["Linen", "Slate", "Forest"])
+    await expect(
+      page.getByRole("button", { name: `Apply ${name}`, exact: true }),
+    ).toBeVisible();
+  await expect(
+    page
+      .locator(".library-card")
+      .getByRole("button", { name: "Remove", exact: true }),
+  ).toHaveCount(0);
+  await page.getByRole("button", { name: "Apply Forest" }).click();
+  await expect(
+    page.getByRole("button", { name: "Light", exact: true }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(".preview")).toBeVisible();
+  await page.getByRole("button", { name: "Undo last change" }).click();
+  await expect(
+    page.getByRole("button", { name: "Dark", exact: true }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await expect(
+    page.getByRole("button", { name: "Save changes" }),
+  ).toBeDisabled();
+  expect(host.calls.filter((c) => c.method === "save")).toHaveLength(0);
+});
+
+test("Theme import and clipboard export stay local and require overwrite confirmation", async ({
+  page,
+}) => {
+  const host = await open(page);
+  await page.getByRole("button", { name: "Appearance", exact: true }).click();
+  await page
+    .locator(".library-card")
+    .filter({ has: page.getByRole("heading", { name: "Linen", exact: true }) })
+    .getByRole("button", { name: "Copy data", exact: true })
+    .click();
+  const exported = await page
+    .getByRole("textbox", { name: "Exported Moon data" })
+    .inputValue();
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Copy data" })
+    .click();
+  await expect
+    .poll(() =>
+      host.calls.some(
+        (c) => c.method === "clipboard-copy" && c.params.text === exported,
+      ),
+    )
+    .toBe(true);
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Close", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Paste theme data", exact: true })
+    .click();
+  await page
+    .getByRole("textbox", { name: "Moon import data" })
+    .fill("not json");
+  await expect(
+    page.getByRole("button", { name: "Import to library" }),
+  ).toBeDisabled();
+  const document = {
+    version: 1,
+    kind: "theme",
+    name: "Evening",
+    values: { theme: "dark" },
+  };
+  await page
+    .getByRole("textbox", { name: "Moon import data" })
+    .fill(JSON.stringify(document));
+  await page.getByRole("button", { name: "Import to library" }).click();
+  await expect(
+    page.getByRole("button", { name: "Apply Evening" }),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Paste theme data", exact: true })
+    .click();
+  await page
+    .getByRole("textbox", { name: "Moon import data" })
+    .fill(JSON.stringify(document));
+  await expect(
+    page.getByRole("button", { name: "Import to library" }),
+  ).toBeDisabled();
+  await page
+    .getByRole("checkbox", { name: "Replace the saved item with this name" })
+    .check();
+  await page.getByRole("button", { name: "Import to library" }).click();
+  expect(
+    host.calls.filter((c) => c.method === "library-import").at(-1)!.params
+      .replace,
+  ).toBe(true);
+  expect(host.calls.filter((c) => c.method === "save")).toHaveLength(0);
+});
+
+test("Library conflicts retain input and never claim a profile was saved", async ({
+  page,
+}) => {
+  const host = await open(page);
+  host.methodErrors["library-save"] = {
+    code: "conflict",
+    message: "The library changed. Refresh it before saving again.",
+    help: "Your settings have not changed.",
+  };
+  await page.getByRole("button", { name: "Workspaces", exact: true }).click();
+  await page.getByRole("button", { name: "Save this setup" }).click();
+  await page.getByRole("textbox", { name: "Saved item name" }).fill("Desk");
+  await page.getByRole("button", { name: "Save to library" }).click();
+  await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
+    "library changed",
+  );
+  await expect(
+    page.getByRole("textbox", { name: "Saved item name" }),
+  ).toHaveValue("Desk");
+  await expect(
+    page.getByRole("button", { name: "Save to library" }),
+  ).toBeEnabled();
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Apply Desk" })).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Save changes" }),
+  ).toBeDisabled();
+});
+
+test("Recovery uses typed guarded actions with an explicit stop confirmation", async ({
+  page,
+}) => {
+  const host = await open(page);
+  await page.getByRole("button", { name: "About", exact: true }).click();
+  await page.getByRole("button", { name: "Pause Moon", exact: true }).click();
+  await expect
+    .poll(() => host.calls.filter((c) => c.method === "desktop-action").length)
+    .toBe(1);
+  expect(host.calls.find((c) => c.method === "desktop-action")!.params).toEqual(
+    {
+      generation: host.desktop.generation,
+      revision: host.desktop.revision,
+      action: "pause",
+    },
+  );
+  await page
+    .getByRole("button", { name: "Restore windows and stop", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  expect(host.calls.filter((c) => c.method === "desktop-action")).toHaveLength(
+    1,
+  );
+  await page
+    .getByRole("button", { name: "Restore windows and stop", exact: true })
+    .click();
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Restore windows and stop", exact: true })
+    .click();
+  await expect
+    .poll(() => host.calls.filter((c) => c.method === "desktop-action").length)
+    .toBe(2);
+  expect(
+    host.calls.filter((c) => c.method === "desktop-action").at(-1)!.params
+      .action,
+  ).toBe("restore");
+});
+
+test("Native preview rectangles are bounded and clear on dialogs and navigation", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1100, height: 900 });
+  const host = await open(page, {}, { startPage: "Overview" });
+  await expect
+    .poll(() =>
+      host.calls.some(
+        (c) =>
+          c.method === "previews" &&
+          Array.isArray(c.params.items) &&
+          c.params.items.length > 0,
+      ),
+    )
+    .toBe(true);
+  for (const call of host.calls.filter((c) => c.method === "previews")) {
+    const items = call.params.items as {
+      rect: { x: number; y: number; width: number; height: number };
+    }[];
+    expect(items.length).toBeLessThanOrEqual(32);
+    for (const { rect } of items) {
+      expect(rect.x).toBeGreaterThanOrEqual(0);
+      expect(rect.y).toBeGreaterThanOrEqual(0);
+      expect(rect.x + rect.width).toBeLessThanOrEqual(1100);
+      expect(rect.y + rect.height).toBeLessThanOrEqual(900);
+    }
+  }
+  await page
+    .getByRole("button", { name: "Options for Project notes", exact: true })
+    .click();
+  await expect
+    .poll(
+      () =>
+        host.calls.filter((c) => c.method === "previews").at(-1)!.params.items,
+    )
+    .toEqual([]);
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Close", exact: true })
+    .click();
+  await page.getByRole("button", { name: "General", exact: true }).click();
+  await expect
+    .poll(
+      () =>
+        host.calls.filter((c) => c.method === "previews").at(-1)!.params.items,
+    )
+    .toEqual([]);
+});
+
+test("Native import waits for the file picker and previews before storing; cancel is harmless", async ({
+  page,
+}) => {
+  const host = await open(page);
+  await page.getByRole("button", { name: "Appearance", exact: true }).click();
+  await page.getByRole("button", { name: "Import theme", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "Import theme", exact: true }),
+  ).toBeEnabled();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  let finish!: () => void;
+  host.fileGate = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  host.importDocument = JSON.stringify({
+    version: 1,
+    kind: "theme",
+    name: "Evening",
+    values: { theme: "dark" },
+  });
+  await page.clock.install();
+  await page.getByRole("button", { name: "Import theme", exact: true }).click();
+  await page.clock.fastForward(21000);
+  await expect(
+    page.getByRole("button", { name: "Import theme", exact: true }),
+  ).toBeDisabled();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  finish();
+  await expect(
+    page.getByRole("textbox", { name: "Moon import data" }),
+  ).toHaveValue(host.importDocument);
+  expect(host.calls.filter((c) => c.method === "library-import")).toHaveLength(
+    0,
+  );
+  await page.getByRole("button", { name: "Import to library" }).click();
+  await expect(
+    page.getByRole("button", { name: "Apply Evening" }),
+  ).toBeVisible();
+  await page
+    .locator(".library-card")
+    .filter({ hasText: "Evening" })
+    .getByRole("button", { name: "Export", exact: true })
+    .click();
+  await expect
+    .poll(() => host.calls.some((c) => c.method === "library-export-file"))
+    .toBe(true);
+  expect(
+    host.calls.find((c) => c.method === "library-export-file")!.params,
+  ).toMatchObject({ suggested_name: "Evening.moon-theme.json" });
+  expect(host.calls.filter((c) => c.method === "save")).toHaveLength(0);
+});
+
+test("Standalone Overview closes after clean activation; dirty Settings stays open", async ({
+  page,
+}) => {
+  const host = await open(page, {}, { startPage: "Overview" });
+  await expect(page.locator(".savebar")).toBeHidden();
+  await expect(
+    page.getByRole("searchbox", { name: "Find an app or window" }),
+  ).toBeFocused();
+  await page
+    .getByRole("button", { name: "Activate Project notes", exact: true })
+    .click();
+  await expect
+    .poll(() => host.calls.filter((c) => c.method === "close").length)
+    .toBe(1);
+  await page.getByRole("button", { name: "General", exact: true }).click();
+  await page
+    .getByRole("spinbutton", { name: "Inner gap", exact: true })
+    .fill("27");
+  await page.getByRole("button", { name: "Overview", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Activate Research browser", exact: true })
+    .click();
+  await expect
+    .poll(() => host.calls.filter((c) => c.method === "window-action").length)
+    .toBe(2);
+  expect(host.calls.filter((c) => c.method === "close")).toHaveLength(1);
+  await page
+    .getByRole("searchbox", { name: "Find an app or window" })
+    .press("Escape");
+  await expect(page.getByRole("dialog")).toContainText("Leave without saving?");
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "Save changes" }),
+  ).toBeEnabled();
+});
+
+for (const visual of [
+  {
+    name: "overview-desktop-dark",
+    width: 1100,
+    height: 850,
+    page: "Overview",
+    scheme: "dark",
+    contrast: "none",
+  },
+  {
+    name: "overview-narrow-light",
+    width: 370,
+    height: 750,
+    page: "Overview",
+    scheme: "light",
+    contrast: "none",
+  },
+  {
+    name: "overview-high-contrast",
+    width: 740,
+    height: 650,
+    page: "Overview",
+    scheme: "dark",
+    contrast: "active",
+  },
+  {
+    name: "appearance-desktop-light",
+    width: 1100,
+    height: 850,
+    page: "Appearance",
+    scheme: "light",
+    contrast: "none",
+  },
+  {
+    name: "profiles-narrow-dark",
+    width: 370,
+    height: 750,
+    page: "Workspaces",
+    scheme: "dark",
+    contrast: "none",
+  },
+] as const) {
+  test(`new surfaces reflow and capture: ${visual.name}`, async ({ page }) => {
+    await page.setViewportSize({ width: visual.width, height: visual.height });
+    await page.emulateMedia({
+      colorScheme: visual.scheme,
+      forcedColors: visual.contrast,
+      reducedMotion: "reduce",
+    });
+    await open(page);
+    await page
+      .getByRole("navigation")
+      .getByRole("button", { name: visual.page, exact: true })
+      .click();
+    if (visual.page === "Overview")
+      await expect(
+        page.getByRole("button", {
+          name: "Activate Project notes",
+          exact: true,
+        }),
+      ).toBeVisible();
+    if (visual.page === "Appearance")
+      await expect(
+        page.getByRole("button", { name: "Apply Forest", exact: true }),
+      ).toBeVisible();
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+    await page.screenshot({
+      path: `../../target/settings-six-polish/${visual.name}.png`,
+      fullPage: true,
+      animations: "disabled",
+    });
+    if (visual.page === "Overview") {
+      await page
+        .getByRole("button", { name: "Options for Project notes", exact: true })
+        .click();
+      await page
+        .getByRole("button", { name: "Create app rule", exact: true })
+        .click();
+      await expect(
+        page.getByRole("button", { name: "Add rule to draft" }),
+      ).toBeInViewport();
+      const rect = await page.getByRole("dialog").boundingBox();
+      expect(rect!.x).toBeGreaterThanOrEqual(0);
+      expect(rect!.x + rect!.width).toBeLessThanOrEqual(visual.width);
+      await page.screenshot({
+        path: `../../target/settings-six-polish/${visual.name}-rule.png`,
+        animations: "disabled",
+      });
+    }
+  });
+}
+
+test("Pointer move cancels on Escape, restores previews, and ignores suspended windows", async ({
+  page,
+}) => {
+  const host = await open(page, {}, { startPage: "Overview" });
+  const handle = page.getByRole("button", {
+    name: "Move Research browser",
+    exact: true,
+  });
+  const source = (await handle.boundingBox())!;
+  const destination = (await page
+    .locator('.workspace-card[data-workspace="2"]')
+    .boundingBox())!;
+  await page.mouse.move(
+    source.x + source.width / 2,
+    source.y + source.height / 2,
+  );
+  await page.mouse.down();
+  await page.mouse.move(destination.x + 50, destination.y + 60, { steps: 4 });
+  await expect(page.locator('.workspace-card[data-workspace="2"]')).toHaveClass(
+    /drop-target/,
+  );
+  await expect
+    .poll(
+      () =>
+        host.calls.filter((c) => c.method === "previews").at(-1)?.params.items,
+    )
+    .toEqual([]);
+  await page.keyboard.press("Escape");
+  await page.mouse.up();
+  await expect(page.locator(".window-drag-ghost")).toHaveCount(0);
+  await expect(page.locator(".drop-target")).toHaveCount(0);
+  expect(host.calls.filter((c) => c.method === "window-action")).toHaveLength(
+    0,
+  );
+  await expect
+    .poll(
+      () =>
+        (
+          host.calls.filter((c) => c.method === "previews").at(-1)?.params
+            .items as unknown[]
+        )?.length,
+    )
+    .toBeGreaterThan(0);
+  host.desktop.windows[1]!.state.suspended = true;
+  await page.getByRole("button", { name: "Refresh windows" }).click();
+  await expect(handle).toBeDisabled();
+});
+
+test("Touch pointer capture moves a window without HTML drag APIs", async ({
+  page,
+}) => {
+  const host = await open(page, {}, { startPage: "Overview" });
+  const from = (await page
+    .getByRole("button", { name: "Move Project notes", exact: true })
+    .boundingBox())!;
+  const to = (await page
+    .locator('.workspace-card[data-workspace="2"]')
+    .boundingBox())!;
+  const client = await page.context().newCDPSession(page);
+  await client.send("Input.dispatchTouchEvent", {
+    type: "touchStart",
+    touchPoints: [{ x: from.x + from.width / 2, y: from.y + from.height / 2 }],
+  });
+  await client.send("Input.dispatchTouchEvent", {
+    type: "touchMove",
+    touchPoints: [{ x: to.x + 40, y: to.y + 80 }],
+  });
+  await expect(page.locator('.workspace-card[data-workspace="2"]')).toHaveClass(
+    /drop-target/,
+  );
+  await client.send("Input.dispatchTouchEvent", {
+    type: "touchEnd",
+    touchPoints: [],
+  });
+  await expect
+    .poll(() => host.calls.filter((c) => c.method === "window-action").length)
+    .toBe(1);
+  expect(
+    host.calls.find((c) => c.method === "window-action")!.params.action,
+  ).toEqual({ type: "move-to-workspace", workspace: "2", follow: false });
+  await client.detach();
+});
+
+test("Ten workspaces prioritize active and occupied cards while empty targets stay compact and usable", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1100, height: 1000 });
+  const host = await open(page, {}, { startPage: "Overview" });
+  const original = structuredClone(host.desktop.windows[0]!);
+  host.desktop.windows[0]!.workspace = "10";
+  host.desktop.windows[1]!.state.visible = false;
+  host.desktop.windows.push({
+    ...original,
+    id: "9007199254740996",
+    process: "Claude",
+    title: "Current conversation",
+    workspace: "10",
+    state: { ...original.state, focused: false },
+  });
+  host.desktop.total_windows = 4;
+  host.desktop.active_workspace = "10";
+  const bounds = host.desktop.workspaces[0]!.bounds;
+  host.desktop.workspaces = Array.from({ length: 10 }, (_, index) => ({
+    name: String(index + 1),
+    monitor_id: "3229624234",
+    active: index === 9,
+    windows: index === 9 ? 2 : index < 2 ? 1 : 0,
+    bounds,
+  }));
+  await page.getByRole("button", { name: "Refresh windows" }).click();
+  const cards = page.locator(".workspace-card");
+  const configured = Array.from({ length: 10 }, (_, i) => String(i + 1));
+  const ordered = ["10", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
+  await expect
+    .poll(() =>
+      cards.evaluateAll((nodes) =>
+        nodes.map((node) => (node as HTMLElement).dataset.workspace),
+      ),
+    )
+    .toEqual(ordered);
+  await expect(
+    page.getByRole("button", { name: "Activate Current conversation" }),
+  ).toBeInViewport();
+  await expect(page.locator(".workspace-empty .workspace-canvas")).toHaveCount(
+    0,
+  );
+  await expect(page.locator(".workspace-empty")).toHaveCount(7);
+  for (const card of await page.locator(".workspace-empty").all())
+    expect((await card.boundingBox())!.height).toBeLessThan(120);
+  await expect(
+    page.locator('.workspace-card[data-workspace="10"] .workspace-canvas'),
+  ).toHaveCount(1);
+
+  // The reordered display must not reorder the explicit keyboard Move choices.
+  const handle = page.getByRole("button", {
+    name: "Move Research browser",
+    exact: true,
+  });
+  await handle.focus();
+  await handle.press("Enter");
+  await expect
+    .poll(() =>
+      page
+        .getByRole("combobox", { name: "Move Arc to workspace" })
+        .locator("option")
+        .evaluateAll((nodes) =>
+          nodes.map((node) => (node as HTMLOptionElement).value),
+        ),
+    )
+    .toEqual(configured);
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Close", exact: true })
+    .click();
+
+  const source = (await handle.boundingBox())!;
+  const target = (await page
+    .locator('.workspace-card[data-workspace="3"]')
+    .boundingBox())!;
+  await page.mouse.move(
+    source.x + source.width / 2,
+    source.y + source.height / 2,
+  );
+  await page.mouse.down();
+  await page.mouse.move(
+    target.x + target.width / 2,
+    target.y + target.height / 2,
+    { steps: 6 },
+  );
+  await expect(page.locator('.workspace-card[data-workspace="3"]')).toHaveClass(
+    /drop-target/,
+  );
+  await page.mouse.up();
+  await expect
+    .poll(
+      () => host.calls.filter((call) => call.method === "window-action").length,
+    )
+    .toBe(1);
+  expect(
+    host.calls.find((call) => call.method === "window-action")!.params,
+  ).toMatchObject({
+    generation: host.desktop.generation,
+    revision: host.desktop.revision,
+    target: { id: "9007199254740994" },
+    action: { type: "move-to-workspace", workspace: "3", follow: false },
+  });
+
+  const search = page.getByRole("searchbox", { name: "Find an app or window" });
+  await search.fill("Second project");
+  await expect(cards).toHaveCount(1);
+  await expect(cards.first()).toHaveAttribute("data-workspace", "2");
+  await search.press("ArrowDown");
+  await expect(
+    page.getByRole("button", { name: "Activate Second project", exact: true }),
+  ).toBeFocused();
+  await page.getByRole("button", { name: "Clear search", exact: true }).click();
+  await expect
+    .poll(() =>
+      cards.evaluateAll((nodes) =>
+        nodes.map((node) => (node as HTMLElement).dataset.workspace),
+      ),
+    )
+    .toEqual(ordered);
+  expect(host.calls.filter((call) => call.method === "save")).toHaveLength(0);
+});
+
+test("Recovery claims its guard before an asynchronous desktop query", async ({
+  page,
+}) => {
+  const host = await open(page);
+  await page.getByRole("button", { name: "About", exact: true }).click();
+  let release!: () => void;
+  host.desktopGate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.getByRole("button", { name: "Pause Moon", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "Pause Moon", exact: true }),
+  ).toBeDisabled();
+  await page
+    .getByRole("button", { name: "Pause Moon", exact: true })
+    .dispatchEvent("click");
+  await expect
+    .poll(() => host.calls.filter((c) => c.method === "desktop").length)
+    .toBe(1);
+  expect(host.calls.filter((c) => c.method === "desktop-action")).toHaveLength(
+    0,
+  );
+  release();
+  await expect
+    .poll(() => host.calls.filter((c) => c.method === "desktop-action").length)
+    .toBe(1);
+});
+
+test("Live Overview survives invalid saved settings without enabling draft editing", async ({
+  page,
+}) => {
+  const host = await open(
+    page,
+    {},
+    {
+      startPage: "Overview",
+      loadError: {
+        code: "invalid",
+        message: "Saved TOML has an invalid value.",
+        help: "Fix the saved file.",
+      },
+    },
+  );
+  await expect(
+    page.getByText("Saved settings could not be opened.", { exact: false }),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Options for Project notes", exact: true })
+    .click();
+  await expect(
+    page.getByRole("button", { name: "Create app rule", exact: true }),
+  ).toBeDisabled();
+  await expect(
+    page.getByRole("button", { name: "Float window", exact: true }),
+  ).toBeEnabled();
+  await page.getByRole("button", { name: "Float window", exact: true }).click();
+  await expect
+    .poll(() => host.calls.filter((c) => c.method === "window-action").length)
+    .toBe(1);
+  await page
+    .getByRole("searchbox", { name: "Find an app or window" })
+    .fill("research");
+  await page
+    .getByRole("searchbox", { name: "Find an app or window" })
+    .press("Enter");
+  await expect
+    .poll(() => host.calls.filter((c) => c.method === "close").length)
+    .toBe(1);
+  expect(host.calls.filter((c) => c.method === "save")).toHaveLength(0);
+});
+
+test("Library names validate Unicode length and palette swatches use actual tokens", async ({
+  page,
+}) => {
+  const host = await open(page);
+  await navigate(page, "Appearance");
+  await expect(page.getByRole("button", { name: "Apply Linen" })).toBeVisible();
+  await expect(
+    page.locator(".library-card").first().locator(".swatches i").last(),
+  ).toHaveCSS("background-color", "rgb(77, 112, 86)");
+  await page.getByRole("button", { name: "Save your theme" }).click();
+  const name = page.getByRole("textbox", { name: "Saved item name" });
+  await name.fill("x".repeat(65));
+  await expect(
+    page.getByRole("button", { name: "Save to library" }),
+  ).toBeDisabled();
+  await name.fill("Desk/Work");
+  await expect(
+    page.getByRole("button", { name: "Save to library" }),
+  ).toBeDisabled();
+  await name.fill("🌙".repeat(64));
+  await expect(
+    page.getByRole("button", { name: "Save to library" }),
+  ).toBeEnabled();
+  await page.getByRole("button", { name: "Save to library" }).click();
+  await expect
+    .poll(() => host.calls.filter((c) => c.method === "library-save").length)
+    .toBe(1);
+  expect(host.calls.find((c) => c.method === "library-save")!.params.name).toBe(
+    "🌙".repeat(64),
+  );
+});
+
+test("Rule match preview uses the daemon's ASCII-only case folding", async ({
+  page,
+}) => {
+  const host = await open(page);
+  host.desktop.windows[0]!.process = "Äpp";
+  host.desktop.windows[1]!.process = "äpp";
+  await page.getByRole("button", { name: "Overview", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Options for Project notes", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Create app rule", exact: true })
+    .click();
+  await expect(page.getByRole("dialog")).toContainText(
+    "1 managed window currently matches",
+  );
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  expect(host.calls.filter((c) => c.method === "save")).toHaveLength(0);
+});
+
+test("A clean standalone Overview reserves the full client height for its canvas", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1100, height: 850 });
+  await open(page, {}, { startPage: "Overview" });
+  await expect(page.locator(".savebar")).toBeHidden();
+  expect(
+    await page
+      .locator(".scroll")
+      .evaluate((node) => node.getBoundingClientRect().bottom),
+  ).toBe(850);
+  await page.screenshot({
+    path: "../../target/settings-six-polish/overview-standalone-dark.png",
+    animations: "disabled",
+  });
+  await page.getByRole("button", { name: "General", exact: true }).click();
+  await expect(page.locator(".savebar")).toBeVisible();
+  await page
+    .getByRole("spinbutton", { name: "Inner gap", exact: true })
+    .fill("27");
+  await page.getByRole("button", { name: "Overview", exact: true }).click();
+  await expect(page.locator(".savebar")).toBeVisible();
 });

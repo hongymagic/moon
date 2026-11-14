@@ -30,6 +30,8 @@ pub enum Command {
     Restore,
     CheatSheet,
     Settings,
+    Overview,
+    Undo,
     Mode(String),
     Exec(String),
     Ignore,
@@ -122,10 +124,47 @@ impl FromStr for Command {
             ["restore"] => Ok(Self::Restore),
             ["cheatsheet" | "help-bindings"] => Ok(Self::CheatSheet),
             ["settings"] => Ok(Self::Settings),
+            ["overview" | "window-search"] => Ok(Self::Overview),
+            ["undo" | "layout-undo"] => Ok(Self::Undo),
             ["mode", name] => Ok(Self::Mode((*name).into())),
             ["ignore"] => Ok(Self::Ignore),
             ["exec" | "shell-exec", ..] if words.len() > 1 => Ok(Self::Exec(args.into())),
             _ => Err(format!("unknown command {input:?}; see moon help")),
+        }
+    }
+}
+
+/// Deliberate layout edits eligible for the single in-memory undo checkpoint.
+impl Command {
+    pub fn layout_label(&self) -> Option<&'static str> {
+        Some(match self {
+            Self::Move(_) => "Move window",
+            Self::Resize { .. } => "Resize window",
+            Self::ToggleDirection | Self::Direction(_) => "Change split direction",
+            Self::ToggleFloating | Self::SetFloating | Self::SetTiling => "Change floating state",
+            Self::ToggleFullscreen => "Change fullscreen state",
+            Self::MoveToWorkspace { .. } => "Move window to workspace",
+            Self::MoveToMonitor(_) => "Move window to monitor",
+            Self::MoveWorkspace(_) => "Move workspace to monitor",
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum WindowAction {
+    Focus,
+    MoveToWorkspace { workspace: String, follow: bool },
+    Float,
+    Tile,
+}
+impl WindowAction {
+    pub fn layout_label(&self) -> Option<&'static str> {
+        match self {
+            Self::Focus => None,
+            Self::MoveToWorkspace { .. } => Some("Move window to workspace"),
+            Self::Float | Self::Tile => Some("Change floating state"),
         }
     }
 }

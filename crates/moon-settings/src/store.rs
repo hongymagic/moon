@@ -30,52 +30,65 @@ impl Store {
         edits: &[Edit],
         validate: impl FnOnce(&Config) -> Result<(), SettingsError>,
     ) -> Result<Snapshot, SettingsError> {
-        let parent = self
-            .path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        fs::create_dir_all(parent).map_err(|e| io_error("create the configuration folder", e))?;
-        // Resolve aliases before selecting a lock so two settings windows opening
-        // the same file through different paths still cooperate.
-        let path = if self.path.exists() {
-            fs::canonicalize(&self.path)
-                .map_err(|e| io_error("resolve the configuration path", e))?
-        } else {
-            fs::canonicalize(parent)
-                .map_err(|e| io_error("resolve the configuration folder", e))?
-                .join(self.path.file_name().ok_or_else(|| {
-                    io_error(
-                        "open the configuration",
-                        std::io::Error::new(
-                            std::io::ErrorKind::InvalidInput,
-                            "a file name is required",
-                        ),
-                    )
-                })?)
-        };
-        let mut lock_name = path.as_os_str().to_owned();
-        lock_name.push(".moon-settings.lock");
-        let lock = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(PathBuf::from(lock_name))
-            .map_err(|e| io_error("open the settings save lock", e))?;
-        lock_for_save(&lock, Duration::from_secs(1))?;
-        let current = read_source(&path)?;
-        let prepared = settings::prepare_update(current.as_deref(), expected_source, edits)?;
-        if prepared.changed {
-            validate(&prepared.config)?;
-            let snapshot = Snapshot::load(Some(&prepared.source))?;
-            write_atomically(&path, current.as_deref(), &prepared.source)?;
-            Ok(snapshot)
-        } else {
-            Snapshot::load(current.as_deref())
-        }
-        // Closing the sidecar handle releases its OS lock, including on errors.
+        with_locked_path(&self.path, |path| {
+            let current = read_source(path)?;
+            let prepared = settings::prepare_update(current.as_deref(), expected_source, edits)?;
+            if prepared.changed {
+                validate(&prepared.config)?;
+                let snapshot = Snapshot::load(Some(&prepared.source))?;
+                write_atomically(path, current.as_deref(), &prepared.source)?;
+                Ok(snapshot)
+            } else {
+                Snapshot::load(current.as_deref())
+            }
+        })
     }
+}
+
+/// Reuse the same bounded advisory lock and path resolution for Settings sidecars.
+pub(crate) fn with_locked_path<T>(
+    path: &Path,
+    operation: impl FnOnce(&Path) -> Result<T, SettingsError>,
+) -> Result<T, SettingsError> {
+    let parent =
+        path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).map_err(|e| io_error("create the configuration folder", e))?;
+    let path = resolve_path(path)?;
+    let mut lock_name = path.as_os_str().to_owned();
+    lock_name.push(".moon-settings.lock");
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(PathBuf::from(lock_name))
+        .map_err(|e| io_error("open the settings save lock", e))?;
+    lock_for_save(&lock, Duration::from_secs(1))?;
+    operation(&path)
+    // Closing the sidecar handle releases its OS lock, including on errors.
+}
+
+/// Resolve existing aliases without creating files or directories during reads.
+pub(crate) fn resolve_path(path: &Path) -> Result<PathBuf, SettingsError> {
+    if path.exists() {
+        return fs::canonicalize(path).map_err(|e| io_error("resolve the configuration path", e));
+    }
+    let parent =
+        path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+    let parent = if parent.exists() {
+        fs::canonicalize(parent).map_err(|e| io_error("resolve the configuration folder", e))?
+    } else if parent.is_absolute() {
+        parent.to_owned()
+    } else {
+        std::env::current_dir().map_err(|e| io_error("resolve the current folder", e))?.join(parent)
+    };
+    let name = path.file_name().ok_or_else(|| {
+        io_error(
+            "open the configuration",
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "a file name is required"),
+        )
+    })?;
+    Ok(parent.join(name))
 }
 
 fn lock_for_save(lock: &File, timeout: Duration) -> Result<(), SettingsError> {
@@ -106,7 +119,7 @@ fn io_error(action: &str, error: std::io::Error) -> SettingsError {
         "Check the file permissions and try again. Reload settings if another editor changed the file.",
     )
 }
-fn read_source(path: &Path) -> Result<Option<String>, SettingsError> {
+pub(crate) fn read_source(path: &Path) -> Result<Option<String>, SettingsError> {
     let file = match File::open(path) {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -148,7 +161,7 @@ impl Drop for Temporary {
         let _ = fs::remove_file(&self.0);
     }
 }
-fn write_atomically(
+pub(crate) fn write_atomically(
     path: &Path,
     expected: Option<&str>,
     source: &str,

@@ -20,7 +20,7 @@ Each UTF-8 JSON frame ends in a newline. Requests are at most 64 KiB; responses 
 {"version":1,"id":3,"method":"subscribe"}
 ```
 
-Replies contain `version`, the same `id`, `ok`, `result`, `error`, and the committed `revision`. Queries accept `world`, `windows` (desired placements), `monitors`, `config`, `transactions`, `stats`, `restart-config`, `shortcuts`, and `overview`. Command arrays execute in order and stop on an error; earlier successful commands remain committed. The grammar is shared with bindings, rules, aliases and widget clicks.
+Replies contain `version`, the same `id`, `ok`, `result`, `error`, and the committed `revision`. Queries accept `world`, `windows` (desired placements), `monitors`, `config`, `transactions`, `stats`, `restart-config`, `shortcuts`, `overview`, `desktop`, and `undo`. Command arrays execute in order and stop on an error; earlier successful commands remain committed. The grammar is shared with bindings, rules, aliases and widget clicks.
 
 `restart-config` is a read-only setup preflight. It parses the current file with the daemon’s original explicit/default selection and returns the same Config JSON shape as `world.config`; it does not apply the file. Invalid or missing explicitly selected files return an error. Sessions started with `--only`, `--no-hook` or `--no-surfaces` are refused because setup does not preserve those diagnostic options. Setup compares this result with its captured committed config and separately rechecks file identity before shutdown.
 
@@ -49,3 +49,51 @@ Automation can include `expected_focus` on a command request, for example
 The daemon rejects the entire request unless both its committed focused window
 and the current native foreground window match when the request executes. This prevents an inspection followed by `close` from acting
 on a different window after focus changes. Omit the field for ordinary commands.
+
+## Desktop overview and layout Undo
+
+`moon overview` (also `window-search`, default Alt+Ctrl+Space) opens the searchable
+Overview page in Moon Settings. `query desktop` returns committed managed windows,
+workspace monitor bounds, planned window rectangles, state flags, and current rule
+matches. Hidden-workspace rectangles describe their intended layout, rather than
+the off-screen location used to hide a native window. Rule matches use current
+process/class/title metadata; they are not a historical assignment log. Ignored
+and unmanaged windows are not included.
+
+The catalog contains `generation`, `revision`, `paused`, `session_suspended`,
+`active_workspace`, `undo`, `total_windows`, `truncated`, `workspaces`, and `windows`.
+Each window has `id`, `process_id`, `process_birth`, `title`, `process`, `class`,
+`workspace`, `monitor_id`, `rect`, `state`, and `rules`. Identity fields and the
+catalog revision are decimal strings to preserve their exact values in JavaScript.
+The catalog is bounded to 1 MiB; `truncated` reports omitted windows or shortened
+display text/rule explanations. Workspace names retain their exact spelling.
+
+Copy the catalog's generation, revision, and selected window identity into a typed
+request. These capabilities do not accept arbitrary commands:
+
+```json
+{"version":1,"id":4,"method":"window","generation":"100:134391580679147114","revision":"42","target":{"id":"12345","process_id":"200","process_birth":"134391580679147115"},"action":{"type":"focus"}}
+{"version":1,"id":5,"method":"window","generation":"100:134391580679147114","revision":"42","target":{"id":"12345","process_id":"200","process_birth":"134391580679147115"},"action":{"type":"move-to-workspace","workspace":"2","follow":false}}
+{"version":1,"id":6,"method":"undo","generation":"100:134391580679147114","revision":"43"}
+{"version":1,"id":7,"method":"control","generation":"100:134391580679147114","revision":"44","action":"pause"}
+```
+
+Window actions are `focus`, `float`, `tile`, and `move-to-workspace` with an explicit
+`follow` boolean. Focus activates the window's containing workspace. The CLI also
+supports `moon window ID focus|float|tile` and
+`moon window ID move-to-workspace NAME [--follow]`; it obtains the current guard
+tokens before sending the typed request. Controls are `pause` (toggle), `reload`,
+and `restore` (restore original windows and stop Moon). Successful typed requests
+return `null`; refresh the catalog afterwards. Stale generation/revision or native
+window/process lifetime changes reject the request. Paused, minimized, off-desktop,
+and suspended-session windows cannot be changed through these actions. Controls
+remain available while paused but require an interactive Windows session.
+
+`query undo` returns `{available, label, reason}`. `moon undo` (default Alt+Ctrl+Z)
+restores the immediately preceding deliberate move, resize, split, float/tile,
+fullscreen, or monitor/workspace-assignment change. It restores layout and focus,
+not application contents, and retains no persistent history. Managed-window
+availability, configuration, monitor, or native-fullscreen changes invalidate the
+checkpoint; closing or launching an application also clears it. Opening an ignored
+Settings window does not. Every affected native process lifetime is checked again
+before applying Undo, and the checkpoint is consumed after one successful commit.

@@ -89,13 +89,36 @@ Help still opens when the saved configuration is invalid. A standalone `moon.exe
 without the companion retains its text help; a broken companion produces an
 actionable error rather than silently switching applications.
 
-The native launcher accepts only the named `general` and `shortcuts` pages.
+The native launcher accepts only the named `general`, `overview` and `shortcuts` pages.
 It passes a typed page value to the local interface without changing navigation
 or origin rules. Live help and the General workspace overview refresh when their
 page opens or Settings regains focus, with an explicit Refresh action as well.
 Neither requires an idle polling loop. The overview reports current workspace
 counts without transmitting window titles or claiming to reconstruct past
 first-launch assignments.
+
+The dedicated **Overview** page uses a separate committed desktop catalog with
+window titles, application identities and planned workspace geometry. It searches
+across workspaces and supports focus, moves, float/tile, layout Undo and rules
+created from a selected window. Rule explanations describe matches against
+current metadata, not the reason for a historical placement. Actions validate
+the daemon generation, revision and window process birth before applying.
+The compact General overview continues to transmit counts only.
+
+Live thumbnails are DWM resources owned by the Settings window. Up to 32 fully
+visible slots are registered on demand, released when leaving Overview or losing
+foreground, and refreshed after geometry changes. Protected or unavailable
+content retains its app label and geometry. App icons use bounded native icon
+requests; the host releases its copied icons and bitmaps after conversion.
+The daemon retains no thumbnail or WebView resources. Internal pointer dragging
+works alongside the host's external-file drop restrictions; every move also has
+a keyboard-accessible action.
+
+Theme and profile persistence and native file sharing are described in
+[the desktop library](desktop-library.md). Health controls on About expose pause,
+reload and confirmed restoration, with unavailable actions disabled while the
+Windows session is suspended. Preset application and rule creation remain draft
+changes until saved; window actions act on the desktop immediately.
 
 **Undo** restores one draft checkpoint, including invalid input, and never writes
 the saved file. Native text-field undo remains available. Saving, discarding or
@@ -163,3 +186,8 @@ behavior.
 - [Frame extension and composition changes](https://learn.microsoft.com/en-us/windows/win32/api/dwmapi/nf-dwmapi-dwmextendframeintoclientarea)
 - [Same-thread subclass ownership](https://learn.microsoft.com/en-us/windows/win32/api/commctrl/nf-commctrl-setwindowsubclass)
 - [Mica fallbacks and content layering](https://learn.microsoft.com/en-us/windows/apps/design/style/mica)
+
+Native theme-library checks can be run with `scripts/validate-settings-library.ps1`
+using an explicit Settings binary, its SHA-256 and a fresh output directory.
+The harness changes only its owned configuration/library fixture and export files.
+See [desktop polish validation](desktop-polish-validation.md) for measured scope.

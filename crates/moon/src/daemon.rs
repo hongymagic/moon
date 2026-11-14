@@ -61,6 +61,8 @@ struct Daemon {
     dispatch_latencies: VecDeque<u64>,
     ready_us: u128,
     session_suspended: bool,
+    undo: moon_core::desktop::LayoutUndo,
+    undo_births: BTreeMap<WindowId, u64>,
 }
 
 /// Covers errors and unwinds before the main loop's recovery path exists.
@@ -348,6 +350,8 @@ pub fn run(options: Options) -> Result<()> {
         dispatch_latencies: VecDeque::new(),
         ready_us: 0,
         session_suspended: !platform::session_interactive().unwrap_or(false),
+        undo: moon_core::desktop::LayoutUndo::default(),
+        undo_births: BTreeMap::new(),
     };
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
         daemon.adopt_existing()?;
@@ -560,8 +564,47 @@ impl Daemon {
     }
     fn commit(&mut self, event: Event, kind: &str) -> Result<()> {
         let started = Instant::now();
+        let invalidates_undo = moon_core::desktop::LayoutUndo::invalidates(&event);
+        let label = match &event {
+            Event::Command(command) => command.layout_label(),
+            Event::WindowAction { action, .. } => action.layout_label(),
+            _ => None,
+        };
         let transition = world::reduce(&self.world, event).map_err(anyhow::Error::msg)?;
-        self.commit_transition(transition, kind, started)
+        let revision = transition.world.revision;
+        let result = self.commit_edit(transition, kind, started, label);
+        if invalidates_undo && self.world.revision == revision {
+            self.undo.clear();
+            self.undo_births.clear();
+        }
+        result
+    }
+    fn commit_edit(
+        &mut self,
+        transition: world::Transition,
+        kind: &str,
+        started: Instant,
+        label: Option<&str>,
+    ) -> Result<()> {
+        let before = label.map(|_| self.world.clone());
+        let revision = transition.world.revision;
+        let result = self.commit_transition(transition, kind, started);
+        // A failed native effect can follow a successful durable state commit.
+        // Keep the inverse for that committed edit, never for a failed journal write.
+        if self.world.revision == revision
+            && let (Some(before), Some(label)) = (before, label)
+            && self.undo.record(&before, &self.world, label)
+        {
+            self.undo_births = self
+                .world
+                .windows
+                .keys()
+                .filter_map(|id| {
+                    self.journal.windows.get(id).map(|original| (*id, original.process_birth))
+                })
+                .collect();
+        }
+        result
     }
     fn commit_transition(
         &mut self,
@@ -642,6 +685,24 @@ impl Daemon {
                 }
             }
         };
+        if matches!(kind, "config" | "display" | "adopt")
+            || !transition.plan.close.is_empty()
+            || !transition.plan.launch.is_empty()
+            || (kind == "window"
+                && self.world.windows.iter().any(|(id, old)| {
+                    transition
+                        .world
+                        .windows
+                        .get(id)
+                        .is_some_and(|new| old.floating_rect != new.floating_rect)
+                }))
+        {
+            self.undo.clear();
+        }
+        self.undo.reconcile(&transition.world);
+        if self.undo.status(&transition.world, false).label.is_none() {
+            self.undo_births.clear();
+        }
         self.world = transition.world;
         let apply_started = Instant::now();
         if let Err(error) = self.apply(transition.plan, kind == "command") {
@@ -858,13 +919,15 @@ impl Daemon {
                 Control::Reload => self.reload()?,
                 Control::CheatSheet => self.cheatsheet()?,
                 Control::Settings => crate::open_settings(&self.options)?,
+                Control::Overview => crate::open_settings_page(&self.options, Some("overview"))?,
+                Control::Undo => self.undo_layout()?,
             }
         }
         Ok(())
     }
     fn flush_resizes(&mut self, pending: &mut Option<(world::Transition, Instant)>) -> Result<()> {
         if let Some((transition, started)) = pending.take() {
-            self.commit_transition(transition, "command", started)?;
+            self.commit_edit(transition, "command", started, Some("Resize window"))?;
         }
         Ok(())
     }
@@ -902,6 +965,11 @@ impl Daemon {
                 }
             };
             for command in commands {
+                if command == Command::Undo {
+                    self.flush_resizes(&mut pending)?;
+                    self.undo_layout()?;
+                    continue;
+                }
                 let needs_foreground = command == Command::Close
                     || (from_keyboard && keyboard_targets_window(&command));
                 if needs_foreground
@@ -1276,6 +1344,35 @@ impl Daemon {
                     self.commit(Event::Command(command), "command")?;
                     Ok(json!({"revision":self.world.revision}))
                 }
+                moon_core::protocol::RequestAction::Window {
+                    generation,
+                    revision,
+                    target,
+                    action,
+                } => {
+                    self.check_desktop_guard(&generation, &revision)?;
+                    self.check_interactive_action()?;
+                    let id = self.check_target(&target)?;
+                    self.commit(Event::WindowAction { id, action }, "command")?;
+                    Ok(Value::Null)
+                }
+                moon_core::protocol::RequestAction::Undo { generation, revision } => {
+                    self.check_desktop_guard(&generation, &revision)?;
+                    self.undo_layout()?;
+                    Ok(Value::Null)
+                }
+                moon_core::protocol::RequestAction::Control { generation, revision, action } => {
+                    use moon_core::{command::Command, protocol::DesktopControl};
+                    self.check_desktop_guard(&generation, &revision)?;
+                    self.check_session_action()?;
+                    let command = match action {
+                        DesktopControl::Pause => Command::Pause,
+                        DesktopControl::Reload => Command::Reload,
+                        DesktopControl::Restore => Command::Restore,
+                    };
+                    self.commit(Event::Command(command), "command")?;
+                    Ok(Value::Null)
+                }
             }
         })();
         let _ = request.reply.try_send(response(id, result, self.world.revision));
@@ -1292,12 +1389,111 @@ impl Daemon {
                 self.options.hook_enabled(),
             ))?,
             "overview" => serde_json::to_value(moon_core::help::overview(&self.world))?,
+            "desktop" => serde_json::to_value(moon_core::desktop::catalog(
+                &self.world,
+                &self
+                    .journal
+                    .windows
+                    .iter()
+                    .map(|(&id, original)| (id, original.process_birth))
+                    .collect(),
+                self.generation(),
+                self.session_suspended,
+                self.undo.status(&self.world, self.session_suspended),
+            ))?,
+            "undo" => serde_json::to_value(self.undo.status(&self.world, self.session_suspended))?,
             "transactions" => serde_json::to_value(&self.transactions)?,
             "stats" => {
                 json!({"process_id":process::id(),"executable":std::env::current_exe()?,"config_path":config_path(&self.options),"config_explicit":self.options.config.is_some(),"carousel_active":self.carousel.is_active(),"session_suspended":self.session_suspended,"paused":self.world.paused,"token":platform::token_capabilities(process::id())?,"uptime_seconds":self.started.elapsed().as_secs_f64(),"ready_us":self.ready_us,"revision":self.world.revision,"managed_windows":self.world.windows.len(),"resources":runtime::resource_stats()?,"surface_pixel_bytes":self.surfaces.as_ref().map_or(0, Surfaces::surface_pixel_bytes),"renderer":self.surfaces.as_ref().map(Surfaces::diagnostics),"hooks":hooks::stats(),"key_to_placed_us":self.key_latencies,"key_to_dispatch_us":self.dispatch_latencies,"recent_transactions":self.transactions,"last_error":self.error})
             }
             _ => bail!("unknown query {query:?}"),
         })
+    }
+    fn generation(&self) -> String {
+        format!("{}:{}", self.journal.owner, self.journal.owner_birth)
+    }
+    fn check_desktop_guard(&self, generation: &str, revision: &str) -> Result<()> {
+        moon_core::protocol::check_generation(
+            generation,
+            revision,
+            &self.generation(),
+            self.world.revision,
+        )
+        .map_err(anyhow::Error::msg)
+    }
+    fn check_interactive_action(&self) -> Result<()> {
+        if self.world.paused {
+            bail!("Resume Moon before changing windows");
+        }
+        self.check_session_action()
+    }
+    fn check_session_action(&self) -> Result<()> {
+        if self.session_suspended || !platform::session_interactive().unwrap_or(false) {
+            bail!("Windows session is suspended; try again after unlocking");
+        }
+        Ok(())
+    }
+    fn check_target(&self, target: &moon_core::protocol::WindowTarget) -> Result<WindowId> {
+        let (id, process, birth) = target.numbers().map_err(anyhow::Error::msg)?;
+        let original = self
+            .journal
+            .windows
+            .get(&id)
+            .context("Window is no longer managed; refresh the overview")?;
+        let native_process = platform::process_id(id);
+        if !runtime::process_matches(process, birth).unwrap_or(false) {
+            bail!("Window process changed; refresh the overview and try again");
+        }
+        target
+            .check(
+                &self.world,
+                original.process_birth,
+                native_process,
+                runtime::process_birth(process)?,
+            )
+            .map_err(anyhow::Error::msg)?;
+        if platform::process_id(id) != process || original.process_id != process {
+            bail!("Window identity changed; refresh the overview and try again");
+        }
+        if self.world.windows[&id].suspended
+            || platform::is_minimized(id)
+            || !platform::window_on_current_virtual_desktop(id).unwrap_or(false)
+        {
+            bail!(
+                "This window is minimized or on another Windows desktop; restore it before changing its layout"
+            );
+        }
+        Ok(id)
+    }
+    fn undo_layout(&mut self) -> Result<()> {
+        self.check_interactive_action()?;
+        let transition = self.undo.transition(&self.world).map_err(anyhow::Error::msg)?;
+        // Recheck every affected native lifetime before restoring a saved layout.
+        let checked = self.world.windows.iter().try_for_each(|(&id, window)| -> Result<()> {
+            let original =
+                self.journal.windows.get(&id).context("Original window identity is unavailable")?;
+            if self.undo_births.get(&id) != Some(&original.process_birth) {
+                bail!("Window lifetime changed; the layout cannot be undone");
+            }
+            self.check_target(&moon_core::protocol::WindowTarget {
+                id: id.0.to_string(),
+                process_id: window.info.process_id.to_string(),
+                process_birth: original.process_birth.to_string(),
+            })?;
+            Ok(())
+        });
+        if let Err(error) = checked {
+            self.undo.clear();
+            self.undo_births.clear();
+            return Err(error);
+        }
+        let revision = transition.world.revision;
+        let result = self.commit_transition(transition, "command", Instant::now());
+        if self.world.revision == revision {
+            self.undo.clear();
+            self.undo_births.clear();
+        }
+        result
     }
 }
 
@@ -1333,7 +1529,7 @@ fn response(id: Value, result: Result<Value>, revision: u64) -> Value {
 
 pub fn client(words: &[String]) -> Result<()> {
     let first = words.first().map(String::as_str).unwrap_or("query");
-    let request = match first {
+    let mut request = match first {
         "query" => {
             json!({"version":1,"id":1,"method":"query","query":words.get(1).map(String::as_str).unwrap_or("world")})
         }
@@ -1345,6 +1541,20 @@ pub fn client(words: &[String]) -> Result<()> {
         .file_name()
         .filter(|name| !name.eq_ignore_ascii_case("moon.exe"))
         .map(|_| executable.as_path());
+    if first == "window" {
+        let catalog = ipc::request_to(
+            &json!({"version":1,"id":1,"method":"query","query":"desktop"}),
+            None,
+            own_path,
+        )?;
+        if catalog.get("ok").and_then(Value::as_bool) != Some(true) {
+            bail!(
+                "{}",
+                catalog.get("error").and_then(Value::as_str).unwrap_or("Desktop query failed")
+            );
+        }
+        request = crate::window_request(&words[1..], &catalog["result"])?;
+    }
     if first == "subscribe" {
         ipc::subscribe_to(&request, own_path, |reply| {
             println!("{reply}");

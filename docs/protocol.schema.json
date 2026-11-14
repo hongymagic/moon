@@ -1,6 +1,14 @@
 {
   "request": {
     "$defs": {
+      "DesktopControl": {
+        "enum": [
+          "pause",
+          "reload",
+          "restore"
+        ],
+        "type": "string"
+      },
       "LifecycleAction": {
         "enum": [
           "restart",
@@ -8,11 +16,95 @@
         ],
         "type": "string"
       },
+      "WindowAction": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "focus",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "follow": {
+                "type": "boolean"
+              },
+              "type": {
+                "const": "move-to-workspace",
+                "type": "string"
+              },
+              "workspace": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "workspace",
+              "follow"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "float",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "tile",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "WindowId": {
         "description": "A top-level window. On Windows this is the numeric value of the `HWND`.",
         "format": "uint64",
         "minimum": 0,
         "type": "integer"
+      },
+      "WindowTarget": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "process_birth": {
+            "type": "string"
+          },
+          "process_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "process_id",
+          "process_birth"
+        ],
+        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -87,6 +179,78 @@
         },
         "required": [
           "method",
+          "action"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "action": {
+            "$ref": "#/$defs/WindowAction"
+          },
+          "generation": {
+            "type": "string"
+          },
+          "method": {
+            "const": "window",
+            "type": "string"
+          },
+          "revision": {
+            "type": "string"
+          },
+          "target": {
+            "$ref": "#/$defs/WindowTarget"
+          }
+        },
+        "required": [
+          "method",
+          "generation",
+          "revision",
+          "target",
+          "action"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "generation": {
+            "type": "string"
+          },
+          "method": {
+            "const": "undo",
+            "type": "string"
+          },
+          "revision": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "method",
+          "generation",
+          "revision"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "action": {
+            "$ref": "#/$defs/DesktopControl"
+          },
+          "generation": {
+            "type": "string"
+          },
+          "method": {
+            "const": "control",
+            "type": "string"
+          },
+          "revision": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "method",
+          "generation",
+          "revision",
           "action"
         ],
         "type": "object"

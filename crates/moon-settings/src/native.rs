@@ -47,7 +47,7 @@ struct Call {
 #[derive(Debug)]
 enum UserEvent {
     Call(Call),
-    Reply(Value),
+    Reply { method: String, body: Value },
     MaterialChanged,
 }
 
@@ -161,9 +161,28 @@ fn handle(call: &Call, path: &std::path::Path) -> Result<Value, Value> {
     let store = Store::new(path.to_owned());
     match call.method.as_str() {
         "load" => Ok(data(store.load().map_err(|e| json!(e))?, path, runtime())),
+        "library-list" | "library-save" | "library-rename" | "library-delete"
+        | "library-import" | "library-export" | "library-apply" => {
+            crate::library_bridge::handle(&call.method, &call.params, path)
+        }
         "status" => Ok(runtime()),
         "shortcuts" | "overview" => {
             ipc_request("query", json!({"query":call.method})).map_err(failure)
+        }
+        "desktop" => {
+            let mut desktop = ipc_request("query", json!({"query":"desktop"})).map_err(failure)?;
+            crate::previews::add_icons(&mut desktop);
+            Ok(desktop)
+        }
+        "window-action" | "layout-undo" | "desktop-action" => {
+            let request = crate::actions::request(&call.method, &call.params).map_err(failure)?;
+            let reply = moon_win::ipc::request(&request).map_err(failure)?;
+            if reply["ok"] != true {
+                return Err(failure(
+                    reply["error"].as_str().unwrap_or("Moon could not complete this action."),
+                ));
+            }
+            Ok(reply["result"].clone())
         }
         "application-status" => {
             #[derive(Deserialize)]
@@ -375,7 +394,10 @@ pub fn run() -> Result<(), String> {
                     Ok(value) => json!({"id":call.id,"ok":true,"result":value}),
                     Err(error) => json!({"id":call.id,"ok":false,"error":error}),
                 };
-                if reply_proxy.send_event(UserEvent::Reply(reply)).is_err() {
+                if reply_proxy
+                    .send_event(UserEvent::Reply { method: call.method, body: reply })
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -412,6 +434,7 @@ pub fn run() -> Result<(), String> {
         .with_url("moon://localhost/")
         .build(&window).map_err(|e|format!("Moon Settings could not open its interface. Check that Microsoft Edge WebView2 Runtime is installed.\n\n{e}\n\nRuntime help: https://developer.microsoft.com/microsoft-edge/webview2/"))?;
     let mut initialized = false;
+    let mut previews = crate::previews::Previews::default();
     let mut shown = false;
     let startup_deadline = Instant::now() + Duration::from_secs(30);
     loop_.run(move |event, _, flow| {
@@ -425,14 +448,16 @@ pub fn run() -> Result<(), String> {
         *flow = if shown { ControlFlow::Wait } else { ControlFlow::WaitUntil(startup_deadline) };
         match event {
             Event::UserEvent(UserEvent::MaterialChanged) => {
+                previews.clear();
                 material_observer.pending.set(false);
                 let mica = apply_material(&window);
-                let _ = webview.evaluate_script(&format!("document.documentElement.classList.toggle('mica',{mica})"));
+                let _ = webview.evaluate_script(&format!("document.documentElement.classList.toggle('mica',{mica});window.moonPreviewChanged?.()"));
             }
             Event::WindowEvent { event: WindowEvent::Focused(true), .. } => {
                 let mica = apply_material(&window);
                 let _ = webview.evaluate_script(&format!("document.documentElement.classList.toggle('mica',{mica});window.moonActivated?.()"));
             }
+            Event::WindowEvent { event: WindowEvent::Focused(false), .. } => { previews.clear(); }
             Event::WindowEvent { event: WindowEvent::ThemeChanged(_), .. } => {
                 let mica = apply_material(&window);
                 let _ = webview.evaluate_script(&format!("document.documentElement.classList.toggle('mica',{mica})"));
@@ -452,13 +477,73 @@ pub fn run() -> Result<(), String> {
                     }
                 }
                 else if call.method == "close" { *flow = ControlFlow::Exit; }
+                else if call.method == "library-import-file" || call.method == "library-export-file" {
+                    previews.clear();
+                    let hwnd = HWND(window.hwnd() as *mut _);
+                    let result = if call.method == "library-import-file" {
+                        #[derive(Deserialize)]
+                        #[serde(deny_unknown_fields)]
+                        struct Import {}
+                        serde_json::from_value::<Import>(call.params).map_err(|e| e.to_string()).and_then(|_| {
+                            crate::library_files::import_file(hwnd)
+                                .map(|document| document.map_or(Value::Null, |document| json!({"document":document})))
+                        })
+                    } else {
+                        #[derive(Deserialize)]
+                        #[serde(deny_unknown_fields)]
+                        struct Export { suggested_name: String, document: String }
+                        serde_json::from_value::<Export>(call.params).map_err(|e| e.to_string()).and_then(|export| {
+                            crate::library_files::export_file(hwnd, &export.suggested_name, &export.document)
+                                .map(|saved| json!({"saved":saved}))
+                        })
+                    };
+                    let reply = match result {
+                        Ok(result) => json!({"id":call.id,"ok":true,"result":result}),
+                        Err(error) => json!({"id":call.id,"ok":false,"error":failure(error)}),
+                    };
+                    let _ = webview.evaluate_script(&format!("window.moonReceive({reply});window.moonPreviewChanged?.()"));
+                }
+                else if call.method == "previews" {
+                    let result = serde_json::from_value::<crate::preview_layout::Request>(call.params)
+                        .map_err(|e| e.to_string())
+                        .and_then(|request| {
+                            let size = window.inner_size();
+                            let hwnd = HWND(window.hwnd() as *mut _);
+                            let active = unsafe { GetForegroundWindow() } == hwnd
+                                && moon_win::platform::input_desktop_available().unwrap_or(false);
+                            previews.update(request, hwnd, window.scale_factor(), (size.width, size.height), active)
+                        });
+                    let reply = match result {
+                        Ok(result) => json!({"id":call.id,"ok":true,"result":result}),
+                        Err(error) => { previews.clear(); json!({"id":call.id,"ok":false,"error":failure(error)}) },
+                    };
+                    let _ = webview.evaluate_script(&format!("window.moonReceive({reply})"));
+                }
+                else if call.method == "clipboard-copy" {
+                    #[derive(Deserialize)]
+                    #[serde(deny_unknown_fields)]
+                    struct Copy { text: String }
+                    let result = serde_json::from_value::<Copy>(call.params).map_err(|e| e.to_string())
+                        .and_then(|copy| crate::clipboard::copy(HWND(window.hwnd() as *mut _), &copy.text));
+                    let reply = match result {
+                        Ok(()) => json!({"id":call.id,"ok":true,"result":null}),
+                        Err(error) => json!({"id":call.id,"ok":false,"error":failure(error)}),
+                    };
+                    let _ = webview.evaluate_script(&format!("window.moonReceive({reply})"));
+                }
                 else if let Err(error) = sender.try_send(call) {
                     let (mpsc::TrySendError::Full(call) | mpsc::TrySendError::Disconnected(call)) = error;
                     let reply = json!({"id":call.id,"ok":false,"error":{"message":"Moon is busy. Wait a moment and try again."}});
                     let _ = webview.evaluate_script(&format!("window.moonReceive({reply})"));
                 }
             }
-            Event::UserEvent(UserEvent::Reply(reply)) => { let _ = webview.evaluate_script(&format!("window.moonReceive({reply})")); }
+            Event::UserEvent(UserEvent::Reply { method, body }) => {
+                if method == "desktop" {
+                    if body["ok"] == true { previews.accept_catalog(&body["result"]); }
+                    else { previews.clear(); }
+                }
+                let _ = webview.evaluate_script(&format!("window.moonReceive({body})"));
+            }
             _ => {}
         }
     });

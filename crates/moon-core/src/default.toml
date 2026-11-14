@@ -64,6 +64,8 @@ outer = 32
 "alt+shift+q" = ["close"]
 "alt+shift+p" = ["pause"]
 "alt+shift+oem_question" = ["cheatsheet"]
+"alt+ctrl+space" = ["overview"]
+"alt+ctrl+z" = ["undo"]
 
 [bar]
 enabled = true

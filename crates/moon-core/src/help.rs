@@ -49,7 +49,13 @@ pub fn shortcuts(world: &World, hook_enabled: bool) -> Shortcuts {
                         commands.iter().any(|command| {
                             matches!(
                                 command,
-                                Command::Pause | Command::Reload | Command::Exit | Command::Restore
+                                Command::Pause
+                                    | Command::Reload
+                                    | Command::Exit
+                                    | Command::Restore
+                                    | Command::Overview
+                                    | Command::Settings
+                                    | Command::CheatSheet
                             )
                         })
                     } else {

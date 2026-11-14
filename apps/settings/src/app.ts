@@ -50,10 +50,11 @@ type Reply = {
 declare global {
   interface Window {
     ipc?: { postMessage(message: string): void };
-    moonStartPage?: "General" | "Shortcuts";
+    moonStartPage?: "General" | "Shortcuts" | "Overview";
     moonReceive: (reply: Reply) => void;
     moonCloseRequested: () => void;
     moonActivated: () => void;
+    moonPreviewChanged: () => void;
   }
 }
 let sequence = 0;
@@ -98,15 +99,16 @@ async function request<T>(method: string, params: unknown = {}): Promise<T> {
     }
     // A save may have reached disk before its reply. Keep the draft locked
     // until the native host confirms the outcome.
-    const timer =
-      method === "save"
-        ? undefined
-        : setTimeout(() => {
-            pending.delete(id);
-            reject(
-              new Error("Moon is taking longer than expected. Try again."),
-            );
-          }, 20000);
+    const timer = [
+      "save",
+      "library-import-file",
+      "library-export-file",
+    ].includes(method)
+      ? undefined
+      : setTimeout(() => {
+          pending.delete(id);
+          reject(new Error("Moon is taking longer than expected. Try again."));
+        }, 20000);
     pending.set(id, { resolve: (value) => resolve(value as T), reject, timer });
     try {
       window.ipc!.postMessage(message);
@@ -159,6 +161,7 @@ function button(
   return node;
 }
 const icons: Record<string, string> = {
+  Overview: "M3 4h18v13H3zM8 20h8M12 17v3M6 7h7v7H6zM15 7h3v7h-3z",
   General: "M5 6h14M5 12h14M5 18h14M9 3v6M15 9v6M10 15v6",
   Appearance:
     "M12 3a9 9 0 1 0 9 9c0-2-2-2-4-2h-2a2 2 0 0 1-2-2V5c0-1-1-2-1-2ZM7 9h.01M7 14h.01M11 17h.01",
@@ -192,6 +195,8 @@ function mark(): HTMLImageElement {
 
 const pages = Object.keys(icons);
 const descriptions: Record<string, string> = {
+  Overview:
+    "Find a window, move between workspaces, and keep your desktop in order.",
   General:
     "Make room for the way you work. Set how windows move, focus, and fit together.",
   Appearance:
@@ -207,9 +212,14 @@ const descriptions: Record<string, string> = {
   About: "A little more space to focus.",
 };
 let loaded: Loaded;
+let settingsAvailable = false;
 let draft: Obj;
 let edits: Edit[] = [];
-let active = window.moonStartPage === "Shortcuts" ? "Shortcuts" : "General";
+const standaloneOverview = window.moonStartPage === "Overview";
+let active =
+  window.moonStartPage === "Shortcuts" || window.moonStartPage === "Overview"
+    ? window.moonStartPage
+    : "General";
 let busy = false;
 let busyLabel = "Saving your changes…";
 const invalidFields = new Map<string, string>();
@@ -249,7 +259,18 @@ function toast(message: string): void {
 function showError(error: unknown): void {
   const message = error instanceof Error ? error.message : String(error);
   errorMessage = message;
-  if (errorBox) {
+  const modal = document.querySelector<HTMLDialogElement>("dialog[open]");
+  if (modal) {
+    let notice = modal.querySelector<HTMLDivElement>(".dialog-error");
+    if (!notice) {
+      notice = el("div", "notice error dialog-error");
+      notice.setAttribute("role", "alert");
+      notice.tabIndex = -1;
+      modal.prepend(notice);
+    }
+    notice.textContent = message;
+    notice.focus();
+  } else if (errorBox) {
     errorBox.textContent = message;
     errorBox.hidden = false;
     errorBox.focus();
@@ -260,7 +281,18 @@ function showError(error: unknown): void {
     );
   }
 }
+function updateFooterVisibility(): void {
+  if (footer)
+    footer.hidden =
+      standaloneOverview &&
+      active === "Overview" &&
+      !search &&
+      !edits.length &&
+      !invalidFields.size &&
+      !busy;
+}
 function updateFooter(): void {
+  updateFooterVisibility();
   footer.replaceChildren();
   const label = el("p");
   label.append(
@@ -397,6 +429,8 @@ async function confirmAction(
   destructive = false,
 ): Promise<boolean> {
   if (confirmationOpen) return false;
+  finishWindowDrag();
+  clearPreviews();
   confirmationOpen = true;
   return new Promise((resolve) => {
     const dialog = el("dialog");
@@ -411,6 +445,7 @@ async function confirmAction(
       confirmationOpen = false;
       dialog.close();
       dialog.remove();
+      schedulePreviews();
       resolve(value);
     };
     const cancel = button("Cancel", () => finish(false));
@@ -606,6 +641,10 @@ function renderShell(): void {
   main.append(scroll, footer);
   shell.append(side, main);
   root.append(shell);
+  scroll.addEventListener("scroll", schedulePreviews, { passive: true });
+  previewObserver?.disconnect();
+  previewObserver = new ResizeObserver(schedulePreviews);
+  previewObserver.observe(scroll);
   renderPage();
   updateFooter();
   updateStatus();
@@ -962,6 +1001,45 @@ function renderHelpOnly(error: unknown): void {
   );
   page.append(actions);
 }
+function renderDesktopOnly(error: unknown): void {
+  root.replaceChildren();
+  const main = el("main", "main desktop-only");
+  const scroll = el("div", "scroll");
+  content = el("div", "page");
+  scroll.append(content);
+  main.append(scroll);
+  root.append(main);
+  content.append(
+    mark(),
+    el("h1", "", "Overview"),
+    el("p", "lead", "Find your windows across workspaces."),
+  );
+  const notice = el(
+    "div",
+    "notice error",
+    "Saved settings could not be opened. Your live desktop remains available; draft editing is unavailable until settings are repaired.",
+  );
+  notice.append(
+    el("p", "note", error instanceof Error ? error.message : String(error)),
+  );
+  const actions = el("div", "actions");
+  actions.append(
+    button("Try settings again", boot),
+    button("Open configuration", () => request("open-config")),
+  );
+  notice.append(actions);
+  errorBox = el("div", "notice error");
+  errorBox.hidden = true;
+  errorBox.setAttribute("role", "alert");
+  errorBox.tabIndex = -1;
+  content.append(notice, errorBox);
+  scroll.addEventListener("scroll", schedulePreviews, { passive: true });
+  previewObserver?.disconnect();
+  previewObserver = new ResizeObserver(schedulePreviews);
+  previewObserver.observe(scroll);
+  renderDesktop();
+  content.querySelector<HTMLInputElement>("#window-search")?.focus();
+}
 function paintOverview(): void {
   if (!overviewPanel?.isConnected) return;
   overviewPanel.replaceChildren();
@@ -1092,6 +1170,1556 @@ async function checkApplication(): Promise<void> {
     renderApplicationState();
   }
 }
+type DesktopWindow = {
+  id: string;
+  process_id: string;
+  process_birth: string;
+  title: string;
+  process: string;
+  class: string;
+  workspace: string;
+  monitor_id: string;
+  rect: { x: number; y: number; width: number; height: number };
+  icon?: string;
+  state: {
+    focused: boolean;
+    visible: boolean;
+    floating: boolean;
+    fullscreen: boolean;
+    suspended: boolean;
+  };
+  rules: {
+    index: number;
+    commands: string[];
+    matches: {
+      index: number;
+      matched: boolean;
+      conditions: {
+        field: string;
+        operator: string;
+        value: string;
+        matched: boolean;
+      }[];
+    }[];
+  }[];
+};
+type Desktop = {
+  generation: string;
+  revision: string;
+  paused: boolean;
+  session_suspended: boolean;
+  undo: { available: boolean; label: string | null; reason: string | null };
+  active_workspace: string | null;
+  total_windows: number;
+  truncated: boolean;
+  rule_evaluation: "current-metadata";
+  workspaces: {
+    name: string;
+    monitor_id: string;
+    active: boolean;
+    windows: number;
+    bounds: DesktopWindow["rect"];
+  }[];
+  windows: DesktopWindow[];
+};
+type WindowAction =
+  | { type: "focus" | "float" | "tile" }
+  | { type: "move-to-workspace"; workspace: string; follow: boolean };
+const windowTarget = (window: DesktopWindow) => ({
+  id: window.id,
+  process_id: window.process_id,
+  process_birth: window.process_birth,
+});
+let desktop: Desktop | undefined;
+let desktopError: string | undefined;
+let desktopLoading = false;
+let desktopBusy = false;
+let desktopFilter = "";
+let desktopPanel: HTMLElement | undefined;
+let previewFrame = 0;
+let previewObserver: ResizeObserver | undefined;
+let previewEpoch = 0;
+let previewsRequested = false;
+type WindowDrag = {
+  snapshot: Desktop;
+  window: DesktopWindow;
+  handle: HTMLButtonElement;
+  pointer: number;
+  startX: number;
+  startY: number;
+  x: number;
+  y: number;
+  active: boolean;
+  workspace?: string;
+  ghost?: HTMLElement;
+};
+let dragWindow: WindowDrag | undefined;
+let dragFrame = 0;
+function finishWindowDrag(commit = false): void {
+  const drag = dragWindow;
+  if (!drag) return;
+  dragWindow = undefined;
+  cancelAnimationFrame(dragFrame);
+  drag.ghost?.remove();
+  document
+    .querySelectorAll(".drop-target")
+    .forEach((card) => card.classList.remove("drop-target"));
+  document.body.classList.remove("moving-window");
+  if (drag.handle.hasPointerCapture(drag.pointer))
+    drag.handle.releasePointerCapture(drag.pointer);
+  if (drag.active) drag.handle.dataset.suppressClick = "true";
+  if (commit && drag.active && drag.workspace) {
+    void actOnWindow(drag.snapshot, drag.window, {
+      type: "move-to-workspace",
+      workspace: drag.workspace,
+      follow: false,
+    });
+  } else schedulePreviews();
+}
+function updateWindowDrag(): void {
+  const drag = dragWindow;
+  if (!drag?.active) return;
+  const scroll = document.querySelector<HTMLElement>(".scroll")!;
+  const view = scroll.getBoundingClientRect();
+  // Scroll only while an active gesture is held at the canvas edge.
+  const edge = 42;
+  if (drag.x >= view.left && drag.x <= view.right) {
+    if (drag.y < view.top + edge)
+      scroll.scrollTop -= Math.min(14, (view.top + edge - drag.y) / 3);
+    else if (drag.y > view.bottom - edge)
+      scroll.scrollTop += Math.min(14, (drag.y - view.bottom + edge) / 3);
+  }
+  const hit = document
+    .elementFromPoint(drag.x, drag.y)
+    ?.closest<HTMLElement>(".workspace-card");
+  drag.workspace =
+    hit &&
+    desktopPanel?.contains(hit) &&
+    hit.dataset.workspace !== drag.window.workspace
+      ? hit.dataset.workspace
+      : undefined;
+  document.querySelectorAll<HTMLElement>(".workspace-card").forEach((card) => {
+    card.classList.toggle("drop-target", card === hit && !!drag.workspace);
+  });
+  drag.ghost!.textContent = drag.workspace
+    ? `Move ${drag.window.process} to workspace ${drag.workspace}`
+    : `Move ${drag.window.process} · Esc to cancel`;
+  drag.ghost!.style.left = `${Math.min(Math.max(8, drag.x + 14), Math.max(8, innerWidth - drag.ghost!.offsetWidth - 8))}px`;
+  drag.ghost!.style.top = `${Math.min(Math.max(8, drag.y + 18), Math.max(8, innerHeight - drag.ghost!.offsetHeight - 8))}px`;
+  dragFrame = requestAnimationFrame(updateWindowDrag);
+}
+function windowDragHandle(
+  snapshot: Desktop,
+  source: DesktopWindow,
+  disabled: boolean,
+): HTMLButtonElement {
+  const handle = el("button", "window-drag", "⠿");
+  handle.type = "button";
+  handle.disabled = disabled || source.state.suspended;
+  handle.setAttribute("aria-label", `Move ${source.title || source.process}`);
+  handle.title = "Drag to another workspace, or select to choose where to move";
+  handle.addEventListener("click", (event) => {
+    if (event.detail && handle.dataset.suppressClick) {
+      delete handle.dataset.suppressClick;
+      return;
+    }
+    windowDetails(source);
+  });
+  handle.addEventListener("pointerdown", (event) => {
+    if (
+      !event.isPrimary ||
+      event.button !== 0 ||
+      handle.disabled ||
+      desktopBusy ||
+      busy ||
+      confirmationOpen
+    )
+      return;
+    finishWindowDrag();
+    delete handle.dataset.suppressClick;
+    handle.focus();
+    handle.setPointerCapture(event.pointerId);
+    dragWindow = {
+      snapshot,
+      window: source,
+      handle,
+      pointer: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      x: event.clientX,
+      y: event.clientY,
+      active: false,
+    };
+    clearPreviews();
+  });
+  handle.addEventListener("lostpointercapture", () => finishWindowDrag());
+  return handle;
+}
+document.addEventListener("pointermove", (event) => {
+  const drag = dragWindow;
+  if (!drag || event.pointerId !== drag.pointer) return;
+  drag.x = event.clientX;
+  drag.y = event.clientY;
+  if (
+    !drag.active &&
+    Math.hypot(drag.x - drag.startX, drag.y - drag.startY) >= 6
+  ) {
+    drag.active = true;
+    drag.ghost = el("div", "window-drag-ghost");
+    drag.ghost.setAttribute("aria-hidden", "true");
+    document.body.append(drag.ghost);
+    document.body.classList.add("moving-window");
+    updateWindowDrag();
+  }
+});
+document.addEventListener("pointerup", (event) => {
+  if (event.pointerId !== dragWindow?.pointer) return;
+  dragWindow.x = event.clientX;
+  dragWindow.y = event.clientY;
+  // Resolve the target at release even if the next animation frame has not run.
+  cancelAnimationFrame(dragFrame);
+  updateWindowDrag();
+  finishWindowDrag(true);
+});
+document.addEventListener("pointercancel", (event) => {
+  if (event.pointerId === dragWindow?.pointer) finishWindowDrag();
+});
+document.addEventListener(
+  "keydown",
+  (event) => {
+    if (event.key === "Escape" && dragWindow) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      finishWindowDrag();
+    }
+  },
+  true,
+);
+window.addEventListener("blur", () => finishWindowDrag());
+function clearPreviews(): void {
+  previewEpoch++;
+  cancelAnimationFrame(previewFrame);
+  document
+    .querySelectorAll(".native-preview-shown")
+    .forEach((slot) => slot.classList.remove("native-preview-shown"));
+  if (window.ipc && previewsRequested) {
+    previewsRequested = false;
+    void request("previews", { items: [] }).catch(() => {});
+  }
+}
+function schedulePreviews(): void {
+  cancelAnimationFrame(previewFrame);
+  previewFrame = requestAnimationFrame(() => {
+    void updatePreviews();
+  });
+}
+async function updatePreviews(): Promise<void> {
+  if (
+    active !== "Overview" ||
+    search ||
+    confirmationOpen ||
+    document.hidden ||
+    dragWindow ||
+    !desktop ||
+    !desktopPanel?.isConnected
+  ) {
+    clearPreviews();
+    return;
+  }
+  const snapshot = desktop;
+  const epoch = ++previewEpoch;
+  const viewport = document.querySelector(".scroll")!.getBoundingClientRect();
+  const slots = Array.from(
+    desktopPanel.querySelectorAll<HTMLElement>(".window-preview"),
+  );
+  const items = slots
+    .flatMap((slot) => {
+      const window = snapshot.windows.find(
+        (item) => item.id === slot.dataset.windowId,
+      );
+      const rect = slot.getBoundingClientRect();
+      const canvas = slot.closest(".workspace-canvas")!.getBoundingClientRect();
+      if (
+        !window ||
+        rect.width < 16 ||
+        rect.height < 16 ||
+        rect.top < Math.max(0, viewport.top, canvas.top) ||
+        rect.left < Math.max(0, viewport.left, canvas.left) ||
+        rect.bottom > Math.min(innerHeight, viewport.bottom, canvas.bottom) ||
+        rect.right > Math.min(innerWidth, viewport.right, canvas.right)
+      )
+        return [];
+      return [
+        {
+          target: windowTarget(window),
+          rect: {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+          },
+        },
+      ];
+    })
+    .slice(0, 32);
+  try {
+    previewsRequested = true;
+    const result = await request<{ shown: string[]; unavailable: string[] }>(
+      "previews",
+      { generation: snapshot.generation, revision: snapshot.revision, items },
+    );
+    if (
+      epoch !== previewEpoch ||
+      desktop !== snapshot ||
+      !desktopPanel.isConnected
+    )
+      return;
+    for (const slot of slots)
+      slot.classList.toggle(
+        "native-preview-shown",
+        result.shown.includes(slot.dataset.windowId!),
+      );
+  } catch {
+    /* Geometry and app names remain available when native previews cannot be shown. */
+  }
+}
+async function refreshDesktop(): Promise<void> {
+  if (desktopLoading) return;
+  desktopLoading = true;
+  paintDesktop();
+  try {
+    desktop = await request<Desktop>("desktop");
+    desktopError = undefined;
+  } catch (error) {
+    desktopError = error instanceof Error ? error.message : String(error);
+  } finally {
+    desktopLoading = false;
+    paintDesktop();
+  }
+}
+async function actOnWindow(
+  snapshot: Desktop,
+  window: DesktopWindow,
+  action: WindowAction,
+): Promise<void> {
+  if (desktopBusy || busy || confirmationOpen) return;
+  let dismissed = false;
+  let succeeded = false;
+  desktopBusy = true;
+  clearPreviews();
+  paintDesktop();
+  try {
+    await request("window-action", {
+      generation: snapshot.generation,
+      revision: snapshot.revision,
+      target: windowTarget(window),
+      action,
+    });
+    succeeded = true;
+    if (
+      action.type === "focus" &&
+      standaloneOverview &&
+      !edits.length &&
+      !invalidFields.size
+    ) {
+      await request("close");
+      dismissed = true;
+    }
+    toast(
+      action.type === "move-to-workspace"
+        ? `Moved ${window.process} to workspace ${action.workspace}.`
+        : action.type === "focus"
+          ? `Opened ${window.title || window.process}.`
+          : `${window.process} is now ${action.type === "float" ? "floating" : "tiled"}.`,
+    );
+  } catch (error) {
+    showError(error);
+  } finally {
+    desktopBusy = false;
+    if (!dismissed) {
+      await refreshDesktop();
+      if (succeeded && action.type !== "focus") focusDesktopWindow(window.id);
+    }
+  }
+}
+function focusDesktopWindow(id: string): void {
+  const row = Array.from(
+    desktopPanel?.querySelectorAll<HTMLElement>(".desktop-window") ?? [],
+  ).find((node) => node.dataset.windowId === id);
+  (
+    row?.querySelector<HTMLButtonElement>(".window-options") ??
+    document.querySelector<HTMLInputElement>("#window-search")
+  )?.focus();
+}
+async function undoLayout(): Promise<void> {
+  if (
+    !desktop?.undo.available ||
+    desktopBusy ||
+    busy ||
+    desktop.paused ||
+    desktop.session_suspended ||
+    desktopError
+  )
+    return;
+  const snapshot = desktop;
+  let succeeded = false;
+  desktopBusy = true;
+  clearPreviews();
+  paintDesktop();
+  try {
+    await request("layout-undo", {
+      generation: snapshot.generation,
+      revision: snapshot.revision,
+    });
+    succeeded = true;
+    toast("Undid the last desktop layout change.");
+  } catch (error) {
+    showError(error);
+  } finally {
+    desktopBusy = false;
+    await refreshDesktop();
+    if (succeeded)
+      (
+        desktopPanel?.querySelector<HTMLButtonElement>(
+          ".layout-undo:not(:disabled)",
+        ) ?? document.querySelector<HTMLInputElement>("#window-search")
+      )?.focus();
+  }
+}
+function appIcon(window: DesktopWindow): HTMLElement {
+  if (window.icon?.startsWith("data:image/bmp;base64,")) {
+    const image = el("img", "app-icon");
+    image.alt = "";
+    image.src = window.icon;
+    image.addEventListener(
+      "error",
+      () =>
+        image.replaceWith(
+          el(
+            "span",
+            "app-icon app-initial",
+            window.process.slice(0, 1).toUpperCase(),
+          ),
+        ),
+      { once: true },
+    );
+    return image;
+  }
+  const fallback = el(
+    "span",
+    "app-icon app-initial",
+    window.process.slice(0, 1).toUpperCase() || "?",
+  );
+  fallback.setAttribute("aria-hidden", "true");
+  return fallback;
+}
+function paintDesktop(): void {
+  if (!desktopPanel?.isConnected) return;
+  finishWindowDrag();
+  clearPreviews();
+  desktopPanel.replaceChildren();
+  if (desktopError)
+    desktopPanel.append(
+      el(
+        "div",
+        "notice error",
+        `${desktopError} Refresh the overview before trying another desktop action.`,
+      ),
+    );
+  const toolbar = el("div", "toolbar");
+  toolbar.append(
+    el(
+      "p",
+      "note",
+      desktop
+        ? `${desktop.total_windows} managed ${desktop.total_windows === 1 ? "window" : "windows"} · Actions here change your desktop immediately.`
+        : "Find your windows across workspaces.",
+    ),
+  );
+  const actions = el("div", "actions");
+  const refresh = button(
+    desktopLoading ? "Refreshing…" : "Refresh windows",
+    refreshDesktop,
+    "quiet",
+  );
+  refresh.disabled = desktopLoading || desktopBusy;
+  const undo = button("Undo layout", undoLayout, "layout-undo");
+  undo.disabled =
+    !desktop?.undo.available ||
+    desktopBusy ||
+    desktopLoading ||
+    !!desktopError ||
+    !!desktop?.paused ||
+    !!desktop?.session_suspended;
+  undo.title =
+    desktop?.undo.label ?? desktop?.undo.reason ?? "No layout change to undo";
+  actions.append(undo, refresh);
+  toolbar.append(actions);
+  desktopPanel.append(toolbar);
+  if (!desktop) {
+    desktopPanel.append(
+      el(
+        "div",
+        "empty",
+        desktopLoading
+          ? "Reading your desktop…"
+          : "Start Moon, then refresh to see your windows.",
+      ),
+    );
+    return;
+  }
+  const snapshot = desktop;
+  if (snapshot.paused || snapshot.session_suspended)
+    desktopPanel.append(
+      el(
+        "div",
+        "notice",
+        snapshot.session_suspended
+          ? "Your Windows session is suspended. Desktop actions are unavailable."
+          : "Moon is paused. Your workspace assignments are shown; tiling is not active.",
+      ),
+    );
+  if (snapshot.truncated)
+    desktopPanel.append(
+      el(
+        "p",
+        "note",
+        "This overview reached its display limit. Some windows or rule details are not shown.",
+      ),
+    );
+  if (snapshot.undo.reason && !snapshot.undo.available)
+    desktopPanel.append(el("p", "note", snapshot.undo.reason));
+  const terms = desktopFilter.toLocaleLowerCase().trim().split(/\s+/);
+  const matches = snapshot.windows.filter((window) =>
+    terms.every((term) =>
+      `${window.process} ${window.title} ${window.workspace}`
+        .toLocaleLowerCase()
+        .includes(term),
+    ),
+  );
+  if (desktopFilter.trim() && !matches.length)
+    desktopPanel.append(
+      el(
+        "div",
+        "empty",
+        "No windows match. Try an app name, window title, or workspace.",
+      ),
+    );
+  const grid = el("div", "workspace-grid");
+  const disabled =
+    desktopBusy ||
+    desktopLoading ||
+    !!desktopError ||
+    snapshot.paused ||
+    snapshot.session_suspended;
+  // Keep configured order within each group without changing the catalog or
+  // the workspace choices used by keyboard-accessible Move controls.
+  const workspaces = [
+    ...snapshot.workspaces.filter((workspace) => workspace.active),
+    ...snapshot.workspaces.filter(
+      (workspace) => !workspace.active && workspace.windows > 0,
+    ),
+    ...snapshot.workspaces.filter(
+      (workspace) => !workspace.active && workspace.windows === 0,
+    ),
+  ];
+  for (const workspace of workspaces) {
+    const members = matches.filter(
+      (window) => window.workspace === workspace.name,
+    );
+    if (desktopFilter.trim() && !members.length) continue;
+    const card = el("section", "workspace-card");
+    const empty = workspace.windows === 0;
+    card.classList.toggle("workspace-empty", empty);
+    card.dataset.workspace = workspace.name;
+    if (workspace.active) card.classList.add("workspace-active");
+    const heading = el("div", "workspace-card-heading");
+    heading.append(
+      el("h2", "", `Workspace ${workspace.name}`),
+      el(
+        "span",
+        "workspace-state",
+        workspace.active
+          ? "Active"
+          : `${workspace.windows} ${workspace.windows === 1 ? "window" : "windows"}`,
+      ),
+    );
+    card.append(heading);
+    if (!empty) {
+      const canvas = el("div", "workspace-canvas");
+      canvas.setAttribute(
+        "aria-label",
+        `Layout of workspace ${workspace.name}`,
+      );
+      const bounds = workspace.bounds;
+      canvas.style.aspectRatio = `${Math.max(1, bounds.width)} / ${Math.max(1, bounds.height)}`;
+      for (const window of members) {
+        const slot = el("div", "window-preview");
+        slot.dataset.windowId = window.id;
+        slot.setAttribute("aria-hidden", "true");
+        slot.style.left = `${Math.max(0, ((window.rect.x - bounds.x) / Math.max(1, bounds.width)) * 100)}%`;
+        slot.style.top = `${Math.max(0, ((window.rect.y - bounds.y) / Math.max(1, bounds.height)) * 100)}%`;
+        slot.style.width = `${Math.min(100, (window.rect.width / Math.max(1, bounds.width)) * 100)}%`;
+        slot.style.height = `${Math.min(100, (window.rect.height / Math.max(1, bounds.height)) * 100)}%`;
+        slot.classList.toggle("preview-focused", window.state.focused);
+        slot.append(appIcon(window), el("span", "preview-app", window.process));
+        canvas.append(slot);
+      }
+      card.append(canvas);
+    }
+    const list = el("ul", "workspace-windows");
+    for (const window of members) {
+      const row = el("li", "desktop-window");
+      row.dataset.windowId = window.id;
+      const activate = button(
+        "",
+        () => actOnWindow(snapshot, window, { type: "focus" }),
+        "window-activate",
+      );
+      activate.disabled = disabled || window.state.suspended;
+      activate.setAttribute(
+        "aria-label",
+        `Activate ${window.title || window.process}`,
+      );
+      activate.append(appIcon(window));
+      const copy = el("span", "window-copy");
+      copy.append(
+        el("strong", "", window.title || window.process),
+        el(
+          "span",
+          "note",
+          `${window.process}${window.state.floating ? " · Floating" : ""}${window.state.fullscreen ? " · Fullscreen" : ""}${window.state.suspended ? " · Unavailable" : ""}`,
+        ),
+      );
+      activate.append(copy);
+      const details = button(
+        "Options",
+        () => windowDetails(window),
+        "quiet window-options",
+      );
+      details.setAttribute(
+        "aria-label",
+        `Options for ${window.title || window.process}`,
+      );
+      details.disabled = desktopBusy;
+      row.append(
+        windowDragHandle(snapshot, window, disabled),
+        activate,
+        details,
+      );
+      list.append(row);
+    }
+    if (!members.length)
+      list.append(el("li", "empty", "Drop a window here to move it."));
+    card.append(list);
+    grid.append(card);
+  }
+  desktopPanel.append(grid);
+  schedulePreviews();
+}
+function renderDesktop(): void {
+  const toolbar = el("div", "toolbar desktop-search");
+  const search = el("input", "search");
+  search.id = "window-search";
+  search.type = "search";
+  search.placeholder = "Find an app or window";
+  search.setAttribute("aria-label", "Find an app or window");
+  search.value = desktopFilter;
+  search.addEventListener("input", () => {
+    desktopFilter = search.value;
+    paintDesktop();
+  });
+  search.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      desktopPanel
+        ?.querySelector<HTMLButtonElement>(".window-activate:not(:disabled)")
+        ?.click();
+    }
+    if (event.key === "Escape" && !search.value && standaloneOverview) {
+      event.preventDefault();
+      window.moonCloseRequested();
+    }
+    if (event.key === "Escape" && search.value) {
+      event.preventDefault();
+      search.value = "";
+      desktopFilter = "";
+      paintDesktop();
+    }
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      desktopPanel
+        ?.querySelector<HTMLButtonElement>(".window-activate:not(:disabled)")
+        ?.focus();
+    }
+  });
+  const clear = button(
+    "Clear search",
+    () => {
+      desktopFilter = "";
+      search.value = "";
+      paintDesktop();
+      search.focus();
+    },
+    "quiet",
+  );
+  toolbar.append(search, clear);
+  content.append(toolbar);
+  desktopPanel = el("div", "desktop-panel");
+  content.append(desktopPanel);
+  paintDesktop();
+  if (!desktop && !desktopLoading && !desktopError) void refreshDesktop();
+}
+function editorDialog(
+  title: string,
+  build: (dialog: HTMLDialogElement, close: () => void) => void,
+): void {
+  if (confirmationOpen || busy) return;
+  finishWindowDrag();
+  clearPreviews();
+  confirmationOpen = true;
+  const previous = document.activeElement as HTMLElement | null;
+  const dialog = el("dialog", "editor-dialog");
+  const heading = el("h2", "", title);
+  heading.id = "editor-title";
+  dialog.setAttribute("aria-labelledby", heading.id);
+  const close = () => {
+    if (libraryBusy) return;
+    dialog.close();
+    dialog.remove();
+    confirmationOpen = false;
+    if (previous?.isConnected) previous.focus();
+    schedulePreviews();
+  };
+  dialog.append(heading);
+  build(dialog, close);
+  dialog.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    close();
+  });
+  document.body.append(dialog);
+  dialog.showModal();
+  dialog.querySelector<HTMLElement>("input,select,button")?.focus();
+}
+function windowDetails(window: DesktopWindow): void {
+  const snapshot = desktop;
+  if (!snapshot) return;
+  editorDialog(window.title || window.process, (dialog, close) => {
+    dialog.append(
+      el(
+        "p",
+        "note",
+        `${window.process} · Workspace ${window.workspace}${window.state.floating ? " · Floating" : " · Tiled"}`,
+      ),
+    );
+    const choices = el("select");
+    choices.setAttribute("aria-label", `Move ${window.process} to workspace`);
+    for (const workspace of snapshot.workspaces) {
+      const option = el("option", "", `Workspace ${workspace.name}`);
+      option.value = workspace.name;
+      choices.append(option);
+    }
+    choices.value = window.workspace;
+    const move = button("Move window", () => {
+      const name = choices.value;
+      close();
+      return actOnWindow(snapshot, window, {
+        type: "move-to-workspace",
+        workspace: name,
+        follow: false,
+      });
+    });
+    const toggle = button(
+      window.state.floating ? "Tile window" : "Float window",
+      () => {
+        close();
+        return actOnWindow(snapshot, window, {
+          type: window.state.floating ? "tile" : "float",
+        });
+      },
+    );
+    move.disabled = toggle.disabled =
+      snapshot.paused ||
+      snapshot.session_suspended ||
+      window.state.suspended ||
+      !!desktopError;
+    const controls = el("div", "actions");
+    controls.append(choices, move, toggle);
+    dialog.append(controls);
+    const rules = el("details");
+    rules.append(
+      el("summary", "", "Rules matching this window now"),
+      el(
+        "p",
+        "note",
+        "Matches use current app and title information. They explain current matches, not the history of this window’s placement.",
+      ),
+    );
+    if (!window.rules.length)
+      rules.append(
+        el(
+          "p",
+          "note",
+          "No app rule currently matches. New windows normally join their monitor’s active workspace.",
+        ),
+      );
+    for (const rule of window.rules) {
+      rules.append(
+        el("p", "", `Rule ${rule.index + 1}: ${rule.commands.join("; ")}`),
+      );
+      for (const match of rule.matches)
+        rules.append(
+          el(
+            "p",
+            "note",
+            `${match.matched ? "Matches" : "Does not match"}: ${match.conditions.map((condition) => `${condition.field} ${condition.operator} “${condition.value}” (${condition.matched ? "yes" : "no"})`).join(" and ")}`,
+          ),
+        );
+    }
+    dialog.append(rules);
+    const actions = el("div", "actions");
+    const createRule = button(
+      "Create app rule",
+      () => {
+        close();
+        createWindowRule(window);
+      },
+      "primary",
+    );
+    createRule.disabled = !settingsAvailable;
+    if (!settingsAvailable)
+      dialog.append(
+        el(
+          "p",
+          "note",
+          "Fix the saved settings before creating a rule. Live window controls remain available.",
+        ),
+      );
+    actions.append(button("Close", close), createRule);
+    dialog.append(actions);
+  });
+}
+const asciiFold = (text: string) =>
+  text.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
+function createWindowRule(selected: DesktopWindow): void {
+  if (!desktop || !settingsAvailable) return;
+  const windows = desktop.windows;
+  editorDialog("Always place this app", (dialog, close) => {
+    dialog.append(
+      el(
+        "p",
+        "note",
+        "Create a personal rule in your draft. Review it, then save when you’re ready.",
+      ),
+    );
+    const app = el("select");
+    app.setAttribute("aria-label", "App for the rule");
+    for (const process of [
+      ...new Set(windows.map((window) => window.process)),
+    ].sort()) {
+      const option = el("option", "", process);
+      option.value = process;
+      app.append(option);
+    }
+    app.value = selected.process;
+    const action = el("select");
+    action.setAttribute("aria-label", "Rule behavior");
+    for (const [value, title] of [
+      ["workspace", "Place in a workspace"],
+      ["float", "Keep floating"],
+      ["ignore", "Leave unmanaged"],
+    ]) {
+      const option = el("option", "", title);
+      option.value = value!;
+      action.append(option);
+    }
+    const workspace = el("select");
+    workspace.setAttribute("aria-label", "Rule workspace");
+    for (const value of array(draft.workspaces)) {
+      const name = String(object(value).name);
+      const option = el("option", "", name);
+      option.value = name;
+      workspace.append(option);
+    }
+    workspace.value = selected.workspace;
+    const preview = el("div", "notice");
+    preview.setAttribute("role", "status");
+    const update = () => {
+      workspace.hidden = action.value !== "workspace";
+      const matched = windows.filter(
+        (window) => asciiFold(window.process) === asciiFold(app.value),
+      );
+      preview.replaceChildren(
+        el(
+          "strong",
+          "",
+          `${matched.length} managed ${matched.length === 1 ? "window currently matches" : "windows currently match"}`,
+        ),
+        el(
+          "p",
+          "note",
+          matched
+            .map(
+              (window) =>
+                `${window.title || window.process} — workspace ${window.workspace}`,
+            )
+            .join("; "),
+        ),
+      );
+    };
+    app.addEventListener("change", update);
+    action.addEventListener("change", update);
+    update();
+    dialog.append(app, action, workspace, preview);
+    const actions = el("div", "actions");
+    actions.append(
+      button("Cancel", close),
+      button(
+        "Add rule to draft",
+        () => {
+          const command =
+            action.value === "workspace"
+              ? `move-to-workspace ${JSON.stringify(workspace.value)}`
+              : action.value === "float"
+                ? "set-floating"
+                : "ignore";
+          const rule = {
+            commands: [command],
+            matches: [{ process: { equals: app.value } }],
+          };
+          const rules = personalRules();
+          if (
+            rules.some(
+              (existing) => JSON.stringify(existing) === JSON.stringify(rule),
+            )
+          ) {
+            toast("This personal rule is already in your draft.");
+            close();
+            return;
+          }
+          stage(["rules"], [...rules, rule]);
+          close();
+          switchPage("Rules");
+          toast("Added the app rule to your draft. Save changes to use it.");
+        },
+        "primary",
+      ),
+    );
+    dialog.append(actions);
+  });
+}
+
+type LibraryKind = "profile" | "theme";
+type LibraryEntry = {
+  kind: LibraryKind;
+  name: string;
+  builtin: boolean;
+  values: Obj;
+};
+type LibraryCatalog = { source: string | null; entries: LibraryEntry[] };
+let library: LibraryCatalog | undefined;
+let libraryLoading = false;
+let libraryError: string | undefined;
+let libraryBusy = false;
+const libraryPanels: Partial<Record<LibraryKind, HTMLElement>> = {};
+async function refreshLibrary(): Promise<void> {
+  if (libraryLoading) return;
+  libraryLoading = true;
+  try {
+    library = await request<LibraryCatalog>("library-list");
+    libraryError = undefined;
+  } catch (error) {
+    libraryError = error instanceof Error ? error.message : String(error);
+  } finally {
+    libraryLoading = false;
+    if (!confirmationOpen) {
+      paintLibrary("theme");
+      paintLibrary("profile");
+    }
+  }
+}
+function stageLibraryEdits(changes: Edit[]): void {
+  rememberDraft();
+  for (const change of changes) {
+    if (change.op === "set") applyDraft(change.path, change.value);
+    else {
+      edits = edits.filter(
+        (existing) =>
+          !change.path.every((part, index) => part === existing.path[index]),
+      );
+      edits.push(change);
+      put(draft, change.path, get(loaded.snapshot.defaults, change.path));
+      clearInvalidFields(change.path);
+    }
+  }
+  renderPage();
+  updateFooter();
+}
+async function applyLibrary(entry: LibraryEntry): Promise<void> {
+  if (libraryBusy || busy || invalidFields.size) return;
+  libraryBusy = true;
+  busy = true;
+  busyLabel = "Preparing your draft…";
+  content.inert = true;
+  updateFooter();
+  try {
+    const result = await request<{ edits: Edit[] }>("library-apply", {
+      kind: entry.kind,
+      name: entry.name,
+      config: draft,
+    });
+    stageLibraryEdits(result.edits);
+    toast(
+      `${entry.name} is in your draft. Save changes to apply it to your desktop.`,
+    );
+  } finally {
+    libraryBusy = false;
+    busy = false;
+    content.inert = false;
+    updateFooter();
+    if (!confirmationOpen) renderPage();
+  }
+}
+function libraryNameDialog(kind: LibraryKind, entry?: LibraryEntry): void {
+  if (!library || libraryBusy || busy) return;
+  const snapshot = library;
+  editorDialog(
+    entry
+      ? `Rename ${entry.name}`
+      : kind === "profile"
+        ? "Save this setup"
+        : "Save your theme",
+    (dialog, close) => {
+      dialog.append(
+        el(
+          "p",
+          "note",
+          entry
+            ? "Rename this saved item without changing your desktop or draft."
+            : kind === "profile"
+              ? "Save workspace and monitor assignments, spacing, appearance and movement preferences from your current draft. Apps, commands, rules and private file paths are not included."
+              : "Save the current draft’s colors, borders and bar style. Widgets, shortcuts and commands are not included.",
+        ),
+      );
+      const label = el("label", "", "Name");
+      const name = el("input", "search");
+      name.setAttribute("aria-label", "Saved item name");
+      name.maxLength = 128; // At most 64 Unicode characters, including surrogate pairs.
+      name.value = entry?.name ?? "";
+      name.placeholder =
+        kind === "profile" ? "Desk, Laptop, Presentation…" : "My theme";
+      label.append(name);
+      dialog.append(label);
+      const replaceLabel = el("label", "replace-label");
+      const replace = el("input");
+      replace.type = "checkbox";
+      replaceLabel.append(
+        replace,
+        document.createTextNode(" Replace the saved item with this name"),
+      );
+      replaceLabel.hidden = true;
+      dialog.append(replaceLabel);
+      const note = el("p", "note");
+      dialog.append(note);
+      const save = button(
+        entry ? "Rename" : "Save to library",
+        async () => {
+          const text = name.value.trim();
+          if (!text || !name.checkValidity()) {
+            name.reportValidity();
+            return;
+          }
+          libraryBusy = true;
+          save.disabled = true;
+          try {
+            library = await request<LibraryCatalog>(
+              entry ? "library-rename" : "library-save",
+              entry
+                ? {
+                    expected_source: snapshot.source,
+                    kind,
+                    name: entry.name,
+                    new_name: text,
+                  }
+                : {
+                    expected_source: snapshot.source,
+                    kind,
+                    name: text,
+                    config: draft,
+                    replace: replace.checked,
+                  },
+            );
+            libraryError = undefined;
+            libraryBusy = false;
+            close();
+            renderPage();
+            toast(
+              entry
+                ? "Renamed the saved item."
+                : "Saved to your local library. Your desktop configuration is unchanged.",
+            );
+          } finally {
+            libraryBusy = false;
+            if (dialog.isConnected) save.disabled = false;
+          }
+        },
+        "primary",
+      );
+      name.required = true;
+      const update = () => {
+        const text = name.value.trim();
+        const invalidName =
+          Array.from(text).length > 64 ||
+          /[\x00-\x1f\x7f-\x9f/\\:]/u.test(text);
+        name.setCustomValidity(
+          invalidName
+            ? "Use up to 64 characters without control characters, slashes or colons."
+            : "",
+        );
+        const match = snapshot.entries.find(
+          (item) =>
+            item.kind === kind &&
+            item.name.toLowerCase() === name.value.trim().toLowerCase(),
+        );
+        replaceLabel.hidden = !!entry || !match || match.builtin;
+        note.textContent = invalidName
+          ? name.validationMessage
+          : match?.builtin
+            ? "This name belongs to a built-in theme. Choose another name."
+            : !entry && match
+              ? "Saving will replace this library item only after you confirm above."
+              : "";
+        save.disabled =
+          !name.value.trim() ||
+          invalidName ||
+          !!match?.builtin ||
+          (!entry && !!match && !replace.checked);
+      };
+      name.addEventListener("input", () => {
+        replace.checked = false;
+        update();
+      });
+      replace.addEventListener("change", update);
+      update();
+      const actions = el("div", "actions");
+      actions.append(button("Cancel", close), save);
+      dialog.append(actions);
+    },
+  );
+}
+async function deleteLibrary(entry: LibraryEntry): Promise<void> {
+  if (
+    !library ||
+    entry.builtin ||
+    libraryBusy ||
+    !(await confirmAction(
+      `Remove ${entry.name}?`,
+      "This removes the saved library item. Your current draft and desktop settings stay unchanged.",
+      "Remove saved item",
+      true,
+    ))
+  )
+    return;
+  libraryBusy = true;
+  try {
+    library = await request<LibraryCatalog>("library-delete", {
+      expected_source: library.source,
+      kind: entry.kind,
+      name: entry.name,
+    });
+    renderPage();
+    toast("Removed the saved item from your library.");
+  } finally {
+    libraryBusy = false;
+    if (!confirmationOpen) renderPage();
+  }
+}
+function importLibrary(kind: LibraryKind, initialDocument = ""): void {
+  if (!library || libraryBusy) return;
+  const snapshot = library;
+  editorDialog(`Import a ${kind}`, (dialog, close) => {
+    dialog.append(
+      el(
+        "p",
+        "note",
+        "Paste exported Moon data. Only the declared theme or profile settings are accepted; executable commands and private paths are not imported.",
+      ),
+    );
+    const input = el("textarea", "library-document");
+    input.setAttribute("aria-label", "Moon import data");
+    input.spellcheck = false;
+    input.maxLength = 65536;
+    input.value = initialDocument;
+    const preview = el(
+      "p",
+      "note",
+      "Paste a document to review its name and type.",
+    );
+    preview.setAttribute("role", "status");
+    const replaceLabel = el("label", "replace-label");
+    const replace = el("input");
+    replace.type = "checkbox";
+    replaceLabel.append(
+      replace,
+      document.createTextNode(" Replace the saved item with this name"),
+    );
+    replaceLabel.hidden = true;
+    const apply = button(
+      "Import to library",
+      async () => {
+        libraryBusy = true;
+        apply.disabled = true;
+        try {
+          library = await request<LibraryCatalog>("library-import", {
+            expected_source: snapshot.source,
+            document: input.value,
+            replace: replace.checked,
+          });
+          libraryError = undefined;
+          libraryBusy = false;
+          close();
+          renderPage();
+          toast(
+            "Imported to your library. Choose Apply to add it to your draft.",
+          );
+        } finally {
+          libraryBusy = false;
+          if (dialog.isConnected) update();
+        }
+      },
+      "primary",
+    );
+    const update = () => {
+      try {
+        if (new TextEncoder().encode(input.value).length > 65536)
+          throw new Error("Import data must be no larger than 64 KiB.");
+        const document = JSON.parse(input.value) as {
+          version?: number;
+          kind?: string;
+          name?: string;
+        };
+        if (
+          document.version !== 1 ||
+          document.kind !== kind ||
+          typeof document.name !== "string" ||
+          !document.name.trim()
+        )
+          throw new Error(`Paste a version 1 Moon ${kind} document.`);
+        const match = snapshot.entries.find(
+          (entry) =>
+            entry.kind === kind &&
+            entry.name.toLowerCase() === document.name!.toLowerCase(),
+        );
+        replaceLabel.hidden = !match || match.builtin;
+        if (match?.builtin)
+          throw new Error("Built-in names cannot be replaced.");
+        preview.textContent = `${document.name} · ${kind}${match ? " · already in your library" : " · new library item"}. Imported values are validated before anything is stored.`;
+        apply.disabled = libraryBusy || (!!match && !replace.checked);
+      } catch (error) {
+        preview.textContent = input.value
+          ? error instanceof Error
+            ? error.message
+            : String(error)
+          : "Paste a document to review its name and type.";
+        apply.disabled = true;
+        replaceLabel.hidden = true;
+      }
+    };
+    input.addEventListener("input", () => {
+      replace.checked = false;
+      update();
+    });
+    replace.addEventListener("change", update);
+    update();
+    dialog.append(input, preview, replaceLabel);
+    const actions = el("div", "actions");
+    actions.append(button("Cancel", close), apply);
+    dialog.append(actions);
+  });
+}
+async function importLibraryFile(kind: LibraryKind): Promise<void> {
+  if (libraryBusy || !library) return;
+  libraryBusy = true;
+  paintLibrary(kind);
+  let result: { document: string } | null;
+  try {
+    result = await request<{ document: string } | null>("library-import-file");
+  } finally {
+    libraryBusy = false;
+    paintLibrary(kind);
+  }
+  if (result) importLibrary(kind, result.document);
+}
+async function exportLibraryFile(entry: LibraryEntry): Promise<void> {
+  if (libraryBusy) return;
+  libraryBusy = true;
+  paintLibrary(entry.kind);
+  try {
+    const result = await request<{ document: string }>("library-export", {
+      kind: entry.kind,
+      name: entry.name,
+    });
+    const saved = await request<{ saved: boolean }>("library-export-file", {
+      suggested_name: `${entry.name}.moon-${entry.kind}.json`,
+      document: result.document,
+    });
+    if (saved.saved) toast(`Exported ${entry.name}.`);
+  } finally {
+    libraryBusy = false;
+    paintLibrary(entry.kind);
+  }
+}
+async function exportLibrary(entry: LibraryEntry): Promise<void> {
+  const result = await request<{ document: string }>("library-export", {
+    kind: entry.kind,
+    name: entry.name,
+  });
+  editorDialog(`Share ${entry.name}`, (dialog, close) => {
+    dialog.append(
+      el(
+        "p",
+        "note",
+        "This document contains only the saved theme or profile settings. It does not include app titles, commands or private file paths.",
+      ),
+    );
+    const text = el("textarea", "library-document");
+    text.readOnly = true;
+    text.value = result.document;
+    text.setAttribute("aria-label", "Exported Moon data");
+    dialog.append(text);
+    const actions = el("div", "actions");
+    actions.append(
+      button("Close", close),
+      button(
+        "Copy data",
+        async () => {
+          await request("clipboard-copy", { text: result.document });
+          toast("Copied Moon data to the clipboard.");
+        },
+        "primary",
+      ),
+    );
+    dialog.append(actions);
+  });
+}
+function renderLibrary(kind: LibraryKind): void {
+  const panel = el("div", "library-panel");
+  libraryPanels[kind] = panel;
+  content.append(panel);
+  paintLibrary(kind);
+}
+function paintLibrary(kind: LibraryKind): void {
+  const panel = libraryPanels[kind];
+  if (!panel?.isConnected) return;
+  panel.replaceChildren();
+  const sectionTitle = kind === "theme" ? "Theme gallery" : "Saved setups";
+  const heading = el("h2", "", sectionTitle);
+  panel.append(heading);
+  panel.append(
+    el(
+      "p",
+      "note",
+      kind === "theme"
+        ? "Try a coordinated palette, or keep your own. Applying a theme changes only your draft until you save."
+        : "Keep named Desk, Laptop or Presentation setups. Applying one changes your draft; it does not open apps or move windows until you save.",
+    ),
+  );
+  const toolbar = el("div", "toolbar");
+  const actions = el("div", "actions");
+  const save = button(
+    kind === "theme" ? "Save your theme" : "Save this setup",
+    () => libraryNameDialog(kind),
+  );
+  save.disabled = !library || libraryBusy || busy || invalidFields.size > 0;
+  const importButton = button(
+    `Import ${kind}`,
+    () => importLibraryFile(kind),
+    "quiet",
+  );
+  importButton.disabled = !library || libraryBusy;
+  const refresh = button("Refresh library", refreshLibrary, "quiet");
+  refresh.disabled = libraryLoading || libraryBusy;
+  const paste = button(
+    `Paste ${kind} data`,
+    () => importLibrary(kind),
+    "quiet",
+  );
+  paste.disabled = !library || libraryBusy;
+  actions.append(save, importButton, paste, refresh);
+  toolbar.append(actions);
+  panel.append(toolbar);
+  if (libraryError) panel.append(el("div", "notice error", libraryError));
+  if (invalidFields.size)
+    panel.append(
+      el(
+        "p",
+        "note",
+        "Fix the invalid draft fields before saving or applying library items.",
+      ),
+    );
+  const entries = library?.entries.filter((entry) => entry.kind === kind) ?? [];
+  const grid = el("div", "library-grid");
+  for (const entry of entries) {
+    const card = el("article", "library-card");
+    const appearance =
+      kind === "profile" ? object(entry.values.appearance) : entry.values;
+    const palette = object(appearance.palette);
+    const swatches = el("div", "swatches");
+    swatches.setAttribute("aria-hidden", "true");
+    for (const name of ["base", "surface0", "text", "terracotta"]) {
+      const swatch = el("i");
+      const color = palette[name];
+      if (typeof color === "string" && /^#[0-9a-f]{6}$/i.test(color))
+        swatch.style.background = color;
+      else swatch.style.background = "var(--accent)";
+      swatches.append(swatch);
+    }
+    card.append(
+      swatches,
+      el("h3", "", entry.name),
+      el(
+        "p",
+        "note",
+        entry.builtin
+          ? "Built-in theme · light and dark palettes"
+          : kind === "profile"
+            ? `${array(entry.values.workspaces).length} workspaces · saved locally`
+            : "Your saved theme",
+      ),
+    );
+    const apply = button(
+      `Apply ${entry.name}`,
+      () => applyLibrary(entry),
+      "primary",
+    );
+    apply.disabled = libraryBusy || busy || invalidFields.size > 0;
+    const controls = el("div", "actions");
+    const exportFile = button(
+      "Export",
+      () => exportLibraryFile(entry),
+      "quiet",
+    );
+    const share = button("Copy data", () => exportLibrary(entry), "quiet");
+    exportFile.disabled = share.disabled = libraryBusy;
+    controls.append(apply, exportFile, share);
+    if (!entry.builtin)
+      controls.append(
+        button("Rename", () => libraryNameDialog(kind, entry), "quiet"),
+        button("Remove", () => deleteLibrary(entry), "quiet danger"),
+      );
+    card.append(controls);
+    grid.append(card);
+  }
+  if (!entries.length)
+    grid.append(
+      el(
+        "div",
+        "empty",
+        libraryLoading
+          ? "Reading your local library…"
+          : kind === "profile"
+            ? "No saved setups yet. Save your current draft to make switching between desk arrangements easier."
+            : "No themes are available. Refresh your library to try again.",
+      ),
+    );
+  panel.append(grid);
+  if (!library && !libraryLoading && !libraryError) void refreshLibrary();
+}
+async function desktopControl(
+  action: "pause" | "reload" | "restore",
+): Promise<void> {
+  if (desktopBusy || busy) return;
+  desktopBusy = true;
+  if (active === "About") renderPage();
+  let requested = false;
+  try {
+    if (
+      action === "restore" &&
+      !(await confirmAction(
+        "Restore your windows and stop Moon?",
+        "Moon will stop arranging your desktop and restore the original window positions it retained. Your saved settings and unsaved Settings draft will remain.",
+        "Restore windows and stop",
+        true,
+      ))
+    )
+      return;
+    const snapshot = await request<Desktop>("desktop");
+    desktop = snapshot;
+    requested = true;
+    await request("desktop-action", {
+      generation: snapshot.generation,
+      revision: snapshot.revision,
+      action,
+    });
+    toast(
+      action === "restore"
+        ? "Moon has been asked to restore your windows and stop."
+        : action === "reload"
+          ? "Moon has been asked to read your saved settings."
+          : snapshot.paused
+            ? "Moon has resumed."
+            : "Moon is paused.",
+    );
+    await refreshStatus();
+  } finally {
+    desktopBusy = false;
+    if (requested && action !== "restore") await refreshDesktop();
+    if (active === "About") renderPage();
+  }
+}
+function renderHealth(): void {
+  const card = section("Desktop health & recovery");
+  const stats = loaded.runtime.stats;
+  const paused = stats?.paused === true;
+  const suspended = stats?.session_suspended === true;
+  card.append(
+    el(
+      "p",
+      "",
+      !loaded.runtime.running
+        ? "Moon is not managing this desktop."
+        : suspended
+          ? "Windows has suspended this desktop session. Moon will resume when the session is available."
+          : paused
+            ? "Moon is paused. Your windows keep their current positions until you resume."
+            : "Moon is running and arranging managed windows.",
+    ),
+  );
+  if (stats?.last_error)
+    card.append(el("div", "notice error", String(stats.last_error)));
+  if (object(stats?.token).ui_access === false)
+    card.append(
+      el(
+        "p",
+        "note",
+        "This copy has ordinary permissions. Windows from administrator apps may remain outside its control.",
+      ),
+    );
+  card.append(
+    el(
+      "p",
+      "note",
+      "Only managed windows appear in Overview. Apps excluded by your rules, special system windows and inaccessible apps can remain outside Moon. Check your Rules page before changing an app’s behavior.",
+    ),
+  );
+  const actions = el("div", "actions");
+  for (const [label, action] of [
+    [paused ? "Resume Moon" : "Pause Moon", "pause"],
+    ["Reload saved settings", "reload"],
+    ["Restore windows and stop", "restore"],
+  ] as const) {
+    const control = button(
+      label,
+      () => desktopControl(action),
+      action === "restore" ? "danger" : "",
+    );
+    control.disabled = !loaded.runtime.running || suspended || desktopBusy;
+    actions.append(control);
+  }
+  actions.append(button("Check status", refreshStatus, "quiet"));
+  card.append(actions);
+}
+
 function renderGeneral(): void {
   renderOverview();
   const layout = section("Workspace motion");
@@ -1266,6 +2894,7 @@ function renderAppearance(): void {
     choices.append(b);
   }
   content.append(choices);
+  renderLibrary("theme");
   const barCard = section("Desktop bar");
   field(
     barCard,
@@ -1345,6 +2974,7 @@ function renderAppearance(): void {
   updatePreview();
 }
 function renderWorkspaces(): void {
+  renderLibrary("profile");
   const values = array(draft.workspaces);
   const toolbar = el("div", "toolbar");
   toolbar.append(
@@ -1898,6 +3528,7 @@ async function refreshStatus(): Promise<void> {
   if (active === "About" || active === "General") renderPage();
 }
 function renderAbout(): void {
+  renderHealth();
   const brand = el("div", "about-brand");
   const copy = el("div");
   copy.append(
@@ -1958,6 +3589,21 @@ function renderAbout(): void {
 }
 const searchIndex: [string, string, string][] = [
   [
+    "Overview",
+    "Find and arrange windows",
+    "apps titles search window move floating undo layout",
+  ],
+  [
+    "Workspaces",
+    "Saved setups",
+    "profiles desk laptop presentation import export",
+  ],
+  [
+    "Appearance",
+    "Theme gallery",
+    "presets linen slate forest import export palettes",
+  ],
+  [
     "General",
     "Workspace motion",
     "workspace carousel canvas animation sliding motion",
@@ -1994,6 +3640,9 @@ const searchIndex: [string, string, string][] = [
 ];
 function renderPage(): void {
   if (!content) return;
+  finishWindowDrag();
+  clearPreviews();
+  updateFooterVisibility();
   content.replaceChildren();
   nextField = 0;
   nav.querySelectorAll("button").forEach((b) => {
@@ -2001,7 +3650,6 @@ function renderPage(): void {
       b.setAttribute("aria-current", "page");
     else b.removeAttribute("aria-current");
   });
-  content.append(el("div", "eyebrow", "Your desktop, considered"));
   const heading = el("h1", "", search ? "Search settings" : active);
   heading.tabIndex = -1;
   content.append(
@@ -2037,6 +3685,7 @@ function renderPage(): void {
     return;
   }
   ({
+    Overview: renderDesktop,
     General: renderGeneral,
     Appearance: renderAppearance,
     Workspaces: renderWorkspaces,
@@ -2048,17 +3697,28 @@ function renderPage(): void {
 }
 let readySent = false;
 async function boot(): Promise<void> {
-  const help = active === "Shortcuts" ? refreshShortcuts() : Promise.resolve();
+  const help =
+    active === "Shortcuts"
+      ? refreshShortcuts()
+      : active === "Overview"
+        ? refreshDesktop()
+        : Promise.resolve();
   try {
     loaded = await request<Loaded>("load");
     await help;
+    settingsAvailable = true;
     draft = clone(loaded.snapshot.config);
     edits = [];
     undoDraft = undefined;
     renderShell();
+    if (standaloneOverview && active === "Overview")
+      document.querySelector<HTMLInputElement>("#window-search")?.focus();
   } catch (e) {
+    settingsAvailable = false;
     await help;
-    if (active === "Shortcuts") {
+    if (active === "Overview") {
+      renderDesktopOnly(e);
+    } else if (active === "Shortcuts") {
       renderHelpOnly(e);
     } else {
       root.replaceChildren();
@@ -2088,12 +3748,14 @@ async function boot(): Promise<void> {
 }
 function refreshVisibleHelp(): void {
   if (!readySent || search) return;
+  if (active === "Overview" && desktopPanel?.isConnected) void refreshDesktop();
   if (active === "Shortcuts" && shortcutPanel?.isConnected)
     void refreshShortcuts();
   if (active === "General" && overviewPanel?.isConnected)
     void refreshOverview();
 }
 window.moonActivated = refreshVisibleHelp;
+window.moonPreviewChanged = schedulePreviews;
 window.addEventListener("focus", refreshVisibleHelp);
 document.addEventListener("keydown", (event) => {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
@@ -2106,9 +3768,20 @@ document.addEventListener("keydown", (event) => {
     if (confirmationOpen) return;
     document
       .querySelector<HTMLInputElement>(
-        active === "Shortcuts" && !search ? "#shortcut-search" : "#search",
+        !search && active === "Overview"
+          ? "#window-search"
+          : active === "Shortcuts" && !search
+            ? "#shortcut-search"
+            : "#search",
       )
       ?.focus();
   }
+});
+window.addEventListener("resize", schedulePreviews);
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    finishWindowDrag();
+    clearPreviews();
+  } else schedulePreviews();
 });
 void boot();
