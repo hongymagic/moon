@@ -193,8 +193,15 @@ try {
         }
     }
     & {
-        $fixture=@{calls=0;target='';arguments=@();fail=$false}
-        function Invoke-MoonNative {param($Path,$Arguments,$TimeoutSeconds) $fixture.calls++;$fixture.target=$Path;$fixture.arguments=$Arguments;if($fixture.fail){throw 'injected candidate parser incompatibility'}}
+        $fixture=@{calls=0;target='';arguments=@();exitCode=0;failure=$null;edit=$null;timeout=0;elevate=$false}
+        function Invoke-MoonNative {throw 'Candidate validation must use the shell broker, not direct process creation.'}
+        function Invoke-MoonShellProcess {
+            param($Path,$Arguments,$TimeoutSeconds,[switch]$Elevate)
+            $fixture.calls++;$fixture.target=$Path;$fixture.arguments=$Arguments;$fixture.timeout=$TimeoutSeconds;$fixture.elevate=[bool]$Elevate
+            if($fixture.failure){throw $fixture.failure}
+            if($fixture.edit){[IO.File]::WriteAllText($fixture.edit,'concurrent settings edit')}
+            return $fixture.exitCode
+        }
         foreach($explicit in @($false,$true)) {
             $configuration=Join-Path $directory ('target-'+$explicit+'.toml')
             if($explicit){[IO.File]::WriteAllText($configuration,'owned parser fixture')}
@@ -202,11 +209,25 @@ try {
             $state=[pscustomobject]@{config_path=$(if($explicit){$configuration}else{$null})}
             Test-MoonCandidateConfig 'C:\Program Files\moon\moon.exe' $state $identity
             $expected=@('config','validate');if($explicit){$expected+=@('--config',$configuration)}
-            if($fixture.target -ne 'C:\Program Files\moon\moon.exe' -or ($fixture.arguments -join '|') -cne ($expected -join '|')){throw 'Candidate validation executed a portable image or changed config selection.'}
+            if($fixture.target -ne 'C:\Program Files\moon\moon.exe' -or ($fixture.arguments -join '|') -cne ($expected -join '|') -or $fixture.timeout -ne 20 -or $fixture.elevate){throw 'Candidate validation changed its protected target, shell route, config selection or bounded wait.'}
         }
-        $fixture.fail=$true
-        Assert-Refused {Test-MoonCandidateConfig 'C:\Program Files\moon\moon.exe' $state $identity} 'injected candidate parser incompatibility'
-        $checks.Add('Actual candidate-parser preflight uses only the protected target, preserves explicit/implicit selection, and propagates incompatibility before shutdown')
+        $checks.Add('Actual candidate preflight uses the shell broker for the protected image, preserves explicit/implicit config selection, and bounds only its validator wait')
+        $fixture.exitCode=2
+        Assert-Refused {Test-MoonCandidateConfig 'C:\Program Files\moon\moon.exe' $state $identity} 'exit code 2'
+        $fixture.exitCode=0;$fixture.failure='injected shell launch failure'
+        Assert-Refused {Test-MoonCandidateConfig 'C:\Program Files\moon\moon.exe' $state $identity} 'injected shell launch failure'
+        $fixture.failure='Process timed out: owned candidate'
+        Assert-Refused {Test-MoonCandidateConfig 'C:\Program Files\moon\moon.exe' $state $identity} 'Process timed out'
+        $fixture.failure=$null
+        $checks.Add('Actual candidate preflight refuses nonzero parser exit and propagates shell launch or timeout errors before shutdown')
+        [IO.File]::WriteAllText($configuration,'edit before validation');$beforeCalls=$fixture.calls
+        Assert-Refused {Test-MoonCandidateConfig 'C:\Program Files\moon\moon.exe' $state $identity} 'configuration changed'
+        if($fixture.calls -ne $beforeCalls){throw 'A changed config reached the candidate parser.'}
+        [IO.File]::WriteAllText($configuration,'owned parser fixture');$fixture.edit=$configuration
+        Assert-Refused {Test-MoonCandidateConfig 'C:\Program Files\moon\moon.exe' $state $identity} 'configuration changed'
+        if($fixture.calls -ne $beforeCalls+1){throw 'The post-validation config guard was not exercised.'}
+        $fixture.edit=$null
+        $checks.Add('Actual candidate preflight checks config identity before shell launch and after successful validation without accepting concurrent edits')
         $left='{"nested":{"b":2,"a":1},"order":[1,2]}'|ConvertFrom-Json
         $right='{"order":[1,2],"nested":{"a":1,"b":2}}'|ConvertFrom-Json
         if((Get-MoonConfigFingerprint $left) -cne (Get-MoonConfigFingerprint $right)){throw 'Equivalent config object ordering was treated as a change.'}

@@ -339,7 +339,7 @@ function Invoke-MoonNative {
     } finally { $process.Dispose() }
 }
 function Invoke-MoonShellProcess {
-    param([string]$Path,[string[]]$Arguments=@(),[switch]$Elevate)
+    param([string]$Path,[string[]]$Arguments=@(),[switch]$Elevate,[ValidateRange(0,2147483)][int]$TimeoutSeconds=0)
     $start=[Diagnostics.ProcessStartInfo]::new()
     $start.FileName=$Path
     $start.Arguments=(@($Arguments | ForEach-Object {ConvertTo-MoonArgument $_}) -join ' ')
@@ -351,9 +351,16 @@ function Invoke-MoonShellProcess {
         # Start-Process discards the native exception when ShellExecute fails.
         # Keep it intact so a declined Windows prompt retains error 1223.
         if (!$process.Start()) {throw 'Windows did not return a setup process.'}
-        # Wait for the installer/remover itself, including its recovery work.
-        # Approval has no deadline and is never canceled by terminating a process.
-        $process.WaitForExit()
+        # Installer/remover approval and recovery waits remain unlimited by
+        # default. Only the short, already-approved config validator opts in.
+        if ($TimeoutSeconds -eq 0) {$process.WaitForExit()}
+        elseif (!$process.WaitForExit($TimeoutSeconds * 1000)) {
+            if (!$process.HasExited) {
+                try {$process.Kill()} catch {if (!$process.HasExited) {throw}}
+            }
+            if (!$process.WaitForExit(5000)) {throw "Process did not exit after its timeout: $Path"}
+            throw "Process timed out: $Path"
+        }
         return $process.ExitCode
     } finally {$process.Dispose()}
 }
@@ -505,8 +512,11 @@ function Test-MoonCandidateConfig {
     if ($ConfigIdentity) {Assert-MoonConfigIdentity $ConfigIdentity ([pscustomobject]@{config_path=$ConfigIdentity.config_path})}
     # Target is the signed executable already published in protected Program
     # Files. Never execute the user-writable portable image from this process.
-    Invoke-MoonNative $Target $arguments -TimeoutSeconds 20 | Out-Null
+    # A signed UIAccess image requires the shell's AppInfo launch broker;
+    # direct CreateProcess can fail with ERROR_ELEVATION_REQUIRED (740).
+    $exitCode=Invoke-MoonShellProcess $Target $arguments -TimeoutSeconds 20
     if ($ConfigIdentity) {Assert-MoonConfigIdentity $ConfigIdentity ([pscustomobject]@{config_path=$ConfigIdentity.config_path})}
+    if ($exitCode -ne 0) {throw "The selected settings failed validation with the installed Moon candidate (exit code $exitCode)."}
 }
 function Save-MoonPortableHandoff {
     param([MoonInstallNative+ProcessIdentityInfo]$Peer,[string]$Sha256,$ConfigIdentity,[string]$JournalPath,[string]$Directory)
