@@ -334,7 +334,102 @@ function Read-MoonInstallState([string]$Directory) {
     $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     if ($state.version -ne 1 -or $state.owner_sid -ne $sid -or $state.install_id -notmatch '^[a-f0-9]{32}$') { throw 'Installation ownership or metadata version does not match this user.' }
     if ($state.task_name -ne ('moon-' + $sid)) { throw 'Unexpected startup task identity in installation metadata.' }
+    [void](Get-MoonConfiguredPath $state)
     return $state
+}
+function Get-MoonConfiguredPath($State) {
+    if (!$State -or !$State.PSObject.Properties['config_path'] -or $null -eq $State.config_path) {return $null}
+    if ($State.config_path -isnot [string] -or [string]::IsNullOrWhiteSpace($State.config_path) -or $State.config_path -notmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+(?:[\\/]|$))') {throw 'Moon configuration path must be an absolute path.'}
+    [IO.Path]::GetFullPath($State.config_path)
+}
+function Get-MoonSelectedConfigPath($Daemon) {
+    # The resolved path is also reported for built-in defaults, even when no
+    # file exists. Only an explicit selection may become a --config argument.
+    # Do not infer this from file existence or from a default-looking path.
+    if (!$Daemon -or !$Daemon.PSObject.Properties['config_explicit'] -or $Daemon.config_explicit -isnot [bool]) {
+        throw 'Cannot preserve how this Moon instance selected its settings. Update or stop it before setup.'
+    }
+    $path=Get-MoonConfiguredPath $Daemon
+    if (!$path) {throw 'The running Moon instance did not identify its configuration path.'}
+    if ($Daemon.config_explicit) {return $path}
+    return $null
+}
+function Get-MoonLaunchArguments {
+    param($State,[switch]$Resume,[switch]$Settings)
+    $arguments=if($Settings){@()}else{@('start','--background')}
+    if ($Resume) {if($Settings){throw 'Settings cannot resume a desktop checkpoint.'};$arguments+='--resume'}
+    $config=Get-MoonConfiguredPath $State
+    if ($config) {$arguments+=@('--config',$config)}
+    (@($arguments | ForEach-Object {ConvertTo-MoonArgument $_}) -join ' ')
+}
+function Get-MoonConfigIdentity($State) {
+    $path=Get-MoonConfiguredPath $State
+    if (!$path) {throw 'The running Moon instance did not identify its configuration path.'}
+    $exists=Test-Path -LiteralPath $path -PathType Leaf
+    if (!$exists -and (Test-Path -LiteralPath $path)) {throw 'The Moon configuration path is not a file.'}
+    [pscustomobject]@{config_path=$path;config_exists=$exists;config_sha256=$(if($exists){(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash}else{$null})}
+}
+function Assert-MoonConfigIdentity($Expected,$State) {
+    $actual=Get-MoonConfigIdentity $State
+    if (![string]::Equals($actual.config_path,$Expected.config_path,[StringComparison]::OrdinalIgnoreCase) -or $actual.config_exists -ne $Expected.config_exists -or $actual.config_sha256 -ne $Expected.config_sha256) {
+        throw 'Your Moon configuration changed during setup. It was left unchanged; retry with the current settings.'
+    }
+}
+function Get-MoonDesktopIdentity($Daemon) {
+    $native=[MoonInstallNative]::ProcessIdentity([uint32]$Daemon.process_id)
+    if (![string]::Equals($native.Path,$Daemon.executable,[StringComparison]::OrdinalIgnoreCase)) {throw 'Moon changed executable identity during setup.'}
+    $selected=Get-MoonSelectedConfigPath $Daemon
+    $config=Get-MoonConfigIdentity $Daemon
+    [pscustomobject]@{process_id=[uint32]$Daemon.process_id;process_birth=$native.Birth;path=$native.Path;sha256=(Get-FileHash -LiteralPath $native.Path -Algorithm SHA256).Hash;launch_config_path=$selected;config_path=$config.config_path;config_exists=$config.config_exists;config_sha256=$config.config_sha256}
+}
+function Assert-MoonDesktopIdentity($Expected,$Daemon) {
+    if (!$Daemon -or $Daemon.process_id -ne $Expected.process_id) {throw 'The captured Moon process is no longer running; no replacement was stopped.'}
+    $actual=Get-MoonDesktopIdentity $Daemon
+    if ($actual.process_birth -ne $Expected.process_birth -or ![string]::Equals($actual.path,$Expected.path,[StringComparison]::OrdinalIgnoreCase) -or $actual.sha256 -ne $Expected.sha256 -or $actual.launch_config_path -ne $Expected.launch_config_path) {throw 'The captured Moon executable or launch settings changed; it was not stopped.'}
+    Assert-MoonConfigIdentity $Expected $Daemon
+}
+function Save-MoonDesktopCheckpoint {
+    param($Snapshot,$Identity,[string]$Directory)
+    # The caller supplies an already authenticated live peer and a consistent
+    # snapshot. This function persists evidence; it never contacts or stops Moon.
+    if (!$Snapshot -or !$Snapshot.journal -or $Snapshot.journal.Length -gt 16777216) {throw 'Invalid desktop checkpoint size.'}
+    $record=([Text.UTF8Encoding]::new($false,$true)).GetString($Snapshot.journal) | ConvertFrom-Json
+    if ($record.version -ne 1 -or $record.owner -ne $Identity.process_id -or $record.owner_birth -ne $Identity.process_birth -or $record.world.revision -ne $Snapshot.revision) {throw 'The desktop checkpoint does not belong to the captured Moon process.'}
+    if (Test-Path -LiteralPath $Directory) {throw 'The recovery checkpoint directory is already occupied.'}
+    $directory=[IO.Path]::GetFullPath($Directory)
+    Assert-MoonNoReparse ([IO.Path]::GetDirectoryName($directory))
+    [void][IO.Directory]::CreateDirectory($directory)
+    $checkpoint=[pscustomobject]@{version=1;status='saved';identity=$Identity;layout=$Snapshot.layout;revision=$Snapshot.revision;journal_path=(Join-Path $directory 'journal.json');journal_sha256=(Get-MoonBytesHash $Snapshot.journal);receipt_path=(Join-Path $directory 'checkpoint.json')}
+    $stream=[IO.FileStream]::new($checkpoint.journal_path,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+    try {$stream.Write($Snapshot.journal,0,$Snapshot.journal.Length);$stream.Flush($true)} finally {$stream.Dispose()}
+    Write-MoonJsonFile $checkpoint.receipt_path $checkpoint
+    return $checkpoint
+}
+function Read-MoonDesktopCheckpoint($Checkpoint) {
+    Assert-MoonNoReparse $Checkpoint.journal_path
+    $stream=[IO.FileStream]::new($Checkpoint.journal_path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+    $memory=[IO.MemoryStream]::new()
+    try {
+        if ($stream.Length -gt 16777216) {throw 'Recovery checkpoint exceeds 16 MiB.'}
+        $stream.CopyTo($memory);$bytes=$memory.ToArray()
+    } finally {$memory.Dispose();$stream.Dispose()}
+    if ((Get-MoonBytesHash $bytes) -ne $Checkpoint.journal_sha256) {throw 'The retained desktop checkpoint changed; it was not replayed.'}
+    return ,$bytes
+}
+function Publish-MoonDesktopCheckpoint {
+    param($Checkpoint,[string]$JournalPath)
+    # The caller must drain its verified daemon/watchdog before publishing.
+    # Never replace an existing journal: a new owner or interrupted recovery
+    # must be handled explicitly instead of losing its native-window state.
+    $bytes=Read-MoonDesktopCheckpoint $Checkpoint
+    Assert-MoonNoReparse $JournalPath
+    if (Test-Path -LiteralPath $JournalPath) {throw 'A live recovery journal already exists; the saved checkpoint was retained.'}
+    $temporary=$JournalPath+'.install-'+[guid]::NewGuid().ToString('N')+'.tmp'
+    try {
+        $stream=[IO.FileStream]::new($temporary,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+        try {$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)} finally {$stream.Dispose()}
+        [IO.File]::Move($temporary,$JournalPath)
+    } finally {if(Test-Path -LiteralPath $temporary){Remove-Item -LiteralPath $temporary -Force}}
 }
 function Write-MoonJsonFile([string]$Path,$Value) {
     $directory=[IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($Path))
@@ -366,8 +461,8 @@ function Assert-MoonOwnedTask($Task,$State,[string]$Target) {
     if (![string]::Equals($Task.Actions[0].Execute,$powershell,[StringComparison]::OrdinalIgnoreCase) -or $Task.Actions[0].Arguments -notmatch '^-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand ([A-Za-z0-9+/=]+)$') { throw 'Unexpected startup task executable or arguments.' }
     $launch=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($Matches[1]))
     $legacy="Start-Process -FilePath '$($Target.Replace("'","''"))' -ArgumentList 'start --background' -WindowStyle Hidden"
-    $expected=Get-MoonTaskLaunchScript $Target
-    if ($launch -ne $expected -and $launch -ne $legacy) { throw 'The startup task points outside the expected moon launch operation.' }
+    $expected=Get-MoonTaskLaunchScript $Target (Get-MoonLaunchArguments $State)
+    if ($launch -ne $expected -and ((Get-MoonConfiguredPath $State) -or $launch -ne $legacy)) { throw 'The startup task points outside the expected moon launch operation.' }
     $principal=$Task.Principal.UserId
     if ($principal -notmatch '^S-1-') { $principal=([Security.Principal.NTAccount]::new($principal)).Translate([Security.Principal.SecurityIdentifier]).Value }
     if ($principal -ne $State.owner_sid) { throw 'Unexpected startup task user.' }

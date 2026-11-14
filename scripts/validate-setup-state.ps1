@@ -255,6 +255,18 @@ function Start-Process {
         $context.done=$true;$Mode='Install'
         $window=[pscustomobject]@{closed=$false};$window|Add-Member ScriptMethod Close {$this.closed=$true}
         function Get-MoonWebViewRuntime {'fixture-runtime'}
+        function Get-MoonInstallDirectory {Join-Path $temporary 'owned-installed-fixture'}
+        function Read-MoonInstallState {param($Directory) $script:setupInstalledFixture}
+        foreach($configuration in @($null,(Join-Path $temporary 'custom settings.yaml'))) {
+            $script:setupInstalledFixture=[pscustomobject]@{config_path=$configuration}
+            $script:settingsArguments=$null;$script:settingsTarget=$null
+            function Start-Process {param($FilePath,$ArgumentList) $script:settingsTarget=$FilePath;$script:settingsArguments=$ArgumentList}
+            . $primaryHandler
+            $expected=Get-MoonLaunchArguments $script:setupInstalledFixture -Settings
+            if(!$window.closed -or $script:settingsTarget -ne (Join-Path (Get-MoonInstallDirectory) 'moon-settings.exe') -or [string]$script:settingsArguments -cne [string]$expected){throw 'Open Settings did not preserve the installation configuration path.'}
+            $window.closed=$false
+        }
+        $checks.Add('Actual Open Settings carries the recorded config path and preserves legacy argument-free launch')
         function Start-Process {param($FilePath,$ArgumentList) throw [ComponentModel.Win32Exception]::new(2)}
         $script:setupReportedProblem=$null
         . $primaryHandler

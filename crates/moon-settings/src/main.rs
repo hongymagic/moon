@@ -1,7 +1,11 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+#[cfg(any(windows, test))]
+mod application;
 #[cfg(windows)]
 mod native;
+#[cfg(any(windows, test))]
+mod startup;
 #[cfg(any(windows, test))]
 mod store;
 

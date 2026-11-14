@@ -11,6 +11,20 @@ or turn off workspace animation in Moon Settings for immediate switches. Windows
 reduced-motion and high-contrast preferences also disable animated presentation.
 There is no separate window-per-page layout.
 
+A workspace change during motion continues from the currently displayed positions.
+Reversing direction returns to an already visible workspace without first snapping
+to the previous destination. Only the visible pages and one incoming page are
+retained, with a maximum of three pages per monitor; there is no queue of obsolete
+transitions. The 200 ms easing duration is unchanged. Native focus and final window
+placement commit immediately, independently of the visual interpolation.
+
+Pointer input, display changes and invalid source windows cancel presentation.
+The animation preference is rechecked during an active transition so disabling
+Windows animations also ends existing motion. Idle loops do not query this
+preference. Microsoft documents
+[the client-area animation setting](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-systemparametersinfow)
+and [updating existing DWM thumbnail relationships](https://learn.microsoft.com/en-us/windows/win32/dwm/thumbnail-ovw).
+
 Workspace membership, split direction, tile proportions, floating rectangles and
 fullscreen state remain ordinary window-manager state. The core Plan describes
 final window rectangles and visibility. Native presentation groups the windows
@@ -24,3 +38,8 @@ visible workspaces on two monitors, floating/fullscreen state, and retaining
 resized tiling through animation-setting reloads and restart serialization. These
 checks establish state and final geometry, not native animation timing or visual
 clipping; those require the separate Windows integration checks.
+
+Portable interruption checks cover a third destination, reversal, bounded retention
+over repeated changes and final committed focus/layout. The updated native probe
+and hidden-popup cleanup regression still require Windows execution; earlier
+captures validate the previous cancellation behavior, not this refinement.

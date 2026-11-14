@@ -57,6 +57,7 @@ $state=[pscustomobject]@{version=1;install_id=$installId;handover_id=$HandoverId
 if ($previousState) { $state.certificate_thumbprints=@($previousState.certificate_thumbprints); $state.files=@($previousState.files) }
 if ($previousState -and $previousState.PSObject.Properties['user_path']) {$state.user_path=$previousState.user_path}
 if ($previousState -and $previousState.PSObject.Properties['shell']) {$state.shell=$previousState.shell}
+$state | Add-Member -NotePropertyName config_path -NotePropertyValue (Get-MoonConfiguredPath $previousState)
 $support=@('moon-settings.exe','install-common.ps1','uninstall.ps1','setup.ps1')
 $supportBefore=@{}
 $supportSecurity=@{}
@@ -77,7 +78,6 @@ $powershell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershel
 $uninstallCommand=((@($powershell,'-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File',(Join-Path $install 'uninstall.ps1'),'-Interactive') | ForEach-Object {ConvertTo-MoonArgument $_}) -join ' ')
 $version=[Diagnostics.FileVersionInfo]::GetVersionInfo($Binary).ProductVersion
 if (!$version) {$version='0.1.0'}
-$shellPlan=New-MoonShellPlan -Directory $install -State $state -Version $version -ShortcutArguments '' -UninstallCommand $uninstallCommand
 $oldTask=Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
 Assert-MoonOwnedTask $oldTask $state $target
 $oldTaskXml=if ($oldTask) {Export-ScheduledTask -TaskName $taskName} else {$null}
@@ -91,7 +91,10 @@ if (!$daemon) {
     $unknown=@(Get-CimInstance Win32_Process -Filter "Name='moon.exe'" | Where-Object {$_.SessionId -eq $session})
     if ($unknown.Count -gt 0) { throw 'A moon process is running but did not answer IPC. Recover or stop it before installing.' }
 }
+if ($daemon) {$state.config_path=Get-MoonSelectedConfigPath $daemon}
+$shellPlan=New-MoonShellPlan -Directory $install -State $state -Version $version -ShortcutArguments (Get-MoonLaunchArguments $state -Settings) -UninstallCommand $uninstallCommand
 $journalPath=Join-Path $env:LOCALAPPDATA ('moon\journal-v1-session'+$session+'.json')
+$oldConfig=if ($daemon) {Get-MoonConfigIdentity $daemon} else {$null}
 $oldSnapshot=if ($daemon) {Get-MoonUpgradeSnapshot -JournalPath $journalPath -ProcessId ([uint32]$daemon.process_id)} else {$null}
 $oldLayout=if ($oldSnapshot) {$oldSnapshot.layout} else {$null}
 $oldJournal=if ($oldSnapshot) {,$oldSnapshot.journal} else {$null}
@@ -166,6 +169,15 @@ try {
         $state.files=@($state.files | Where-Object {$_ -ne $supportTemporary[$file]})
     }
     Test-MoonSetupCancellation $OperationId
+    if ($daemon) {
+        # Signing can take time. Capture the latest settled layout before the
+        # executable changes, and refuse a config edit instead of restarting
+        # into different settings while promising the previous layout.
+        Assert-MoonConfigIdentity $oldConfig $daemon
+        $oldSnapshot=Get-MoonUpgradeSnapshot -JournalPath $journalPath -ProcessId ([uint32]$daemon.process_id)
+        $oldLayout=$oldSnapshot.layout;$oldJournal=$oldSnapshot.journal
+        Assert-MoonConfigIdentity $oldConfig $daemon
+    }
     Assert-MoonNoReparse $target
     if (Test-Path -LiteralPath $target) {
         if (!$previousState) { throw 'An unowned target executable already exists.' }
@@ -176,7 +188,7 @@ try {
     Move-Item -LiteralPath $candidate -Destination $target
     $targetReplaced=$true
     $state.files=@($state.files | Where-Object {$_ -ne $candidateName} | Select-Object -Unique)
-    $action=New-MoonTaskAction $target
+    $action=New-MoonTaskAction $target (Get-MoonLaunchArguments $state)
     $trigger=New-ScheduledTaskTrigger -AtLogOn -User $OwnerSid
     $principal=New-ScheduledTaskPrincipal -UserId $OwnerSid -LogonType Interactive -RunLevel Limited
     $settings=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
@@ -186,6 +198,7 @@ try {
     $state.installed_at=[DateTime]::UtcNow.ToString('o')
     Write-MoonInstallState $install $state
     $launchAfter=[DateTime]::UtcNow
+    if ($oldConfig) {Assert-MoonConfigIdentity $oldConfig $daemon}
     if ($daemon) { Invoke-MoonRpc command -Commands @('restart') | Out-Null }
     else { Start-ScheduledTask -TaskName $taskName }
     try {
@@ -277,7 +290,7 @@ try {
         $journalTemporary=$journalPath+'.install-rollback.tmp'
         [IO.File]::WriteAllBytes($journalTemporary,$oldJournal)
         if (Test-Path -LiteralPath $journalPath) {[IO.File]::Replace($journalTemporary,$journalPath,[NullString]::Value)} else {[IO.File]::Move($journalTemporary,$journalPath)}
-        Start-MoonLimitedOnce $target 'start --background --resume' $state
+        Start-MoonLimitedOnce $target (Get-MoonLaunchArguments $state -Resume) $state
         Wait-MoonCondition -Description 'the previous layout after rollback' -Condition {(Get-MoonLayoutFingerprint) -eq $oldLayout}
     }
     $recoveryComplete=$true

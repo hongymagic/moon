@@ -17,6 +17,30 @@ type Loaded = {
   version: string;
   runtime: { running: boolean; message: string; stats?: Obj };
 };
+type LiveShortcuts = {
+  hook_enabled: boolean;
+  mode: string;
+  paused: boolean;
+  emergency: string;
+  bindings: { chord: string; commands: string[] }[];
+};
+type Overview = {
+  managed_windows: number;
+  active_workspace: string | null;
+  workspaces: { name: string; windows: number; active: boolean }[];
+};
+type ApplicationState = {
+  state:
+    | "loaded"
+    | "paused"
+    | "suspended"
+    | "pending"
+    | "unavailable"
+    | "other-config"
+    | "changed"
+    | "failed";
+  message: string;
+};
 type Reply = {
   id: number;
   ok: boolean;
@@ -26,8 +50,10 @@ type Reply = {
 declare global {
   interface Window {
     ipc?: { postMessage(message: string): void };
+    moonStartPage?: "General" | "Shortcuts";
     moonReceive: (reply: Reply) => void;
     moonCloseRequested: () => void;
+    moonActivated: () => void;
   }
 }
 let sequence = 0;
@@ -165,7 +191,7 @@ const descriptions: Record<string, string> = {
   Workspaces:
     "Give each part of your day a place. Names, icons, and monitor assignments stay together.",
   Shortcuts:
-    "Keep your hands on the keyboard. Change a shortcut or give a familiar action a new home.",
+    "Find the shortcuts active on your desktop, or edit your saved bindings below.",
   Rules:
     "Let your apps settle into the right place. Personal rules are applied after Moon’s built-in rules.",
   Advanced:
@@ -175,7 +201,7 @@ const descriptions: Record<string, string> = {
 let loaded: Loaded;
 let draft: Obj;
 let edits: Edit[] = [];
-let active = "General";
+let active = window.moonStartPage === "Shortcuts" ? "Shortcuts" : "General";
 let busy = false;
 let busyLabel = "Saving your changes…";
 const invalidFields = new Map<string, string>();
@@ -189,6 +215,20 @@ let footer: HTMLElement;
 let status: HTMLElement;
 let nav: HTMLElement;
 let errorBox: HTMLElement;
+let undoDraft:
+  { draft: Obj; edits: Edit[]; invalid: [string, string][] } | undefined;
+let application: ApplicationState | undefined;
+let checkingApplication = false;
+let applicationTimer: ReturnType<typeof setTimeout> | undefined;
+let shortcuts: LiveShortcuts | undefined;
+let shortcutsError: string | undefined;
+let shortcutsLoading = false;
+let shortcutFilter = "";
+let shortcutPanel: HTMLElement | undefined;
+let overview: Overview | undefined;
+let overviewError: string | undefined;
+let overviewLoading = false;
+let overviewPanel: HTMLElement | undefined;
 let toastTimer: ReturnType<typeof setTimeout> | undefined;
 function toast(message: string): void {
   document.querySelector(".toast")?.remove();
@@ -248,7 +288,11 @@ function updateFooter(): void {
   const reload = button("Reload", reloadSettings, "quiet");
   reload.title = "Reload saved settings from disk";
   reload.disabled = busy;
-  actions.append(reload, discard, apply);
+  const undo = button("Undo", undoLastChange, "quiet");
+  undo.title = "Undo the last draft change";
+  undo.setAttribute("aria-label", "Undo last change");
+  undo.disabled = !undoDraft || busy;
+  actions.append(undo, reload, discard, apply);
   footer.append(label, actions);
 }
 function reviewErrors(): void {
@@ -264,7 +308,34 @@ function reviewErrors(): void {
     input.focus();
   }
 }
+function rememberDraft(): void {
+  // One checkpoint only: memory is bounded by the current editable document.
+  undoDraft = {
+    draft: clone(draft),
+    edits: clone(edits),
+    invalid: [...invalidFields],
+  };
+}
+function undoLastChange(): void {
+  if (!undoDraft || busy || confirmationOpen) return;
+  const previous = undoDraft;
+  undoDraft = undefined;
+  draft = previous.draft;
+  edits = previous.edits;
+  invalidFields.clear();
+  for (const [key, value] of previous.invalid) invalidFields.set(key, value);
+  errorMessage = undefined;
+  renderPage();
+  updateFooter();
+  content.querySelector<HTMLElement>("h1")?.focus();
+  toast("Undid the last draft change. Saved settings are unchanged.");
+}
 function stage(path: Path, value: Json): void {
+  if (JSON.stringify(value) !== JSON.stringify(get(draft, path)))
+    rememberDraft();
+  queueEdit(path, value);
+}
+function queueEdit(path: Path, value: Json): void {
   put(draft, path, value);
   const ancestor = edits.find(
     (e) => e.path.length < path.length && e.path.every((p, i) => p === path[i]),
@@ -272,7 +343,7 @@ function stage(path: Path, value: Json): void {
   if (ancestor) {
     const parentPath = ancestor.path;
     edits = edits.filter((e) => e !== ancestor);
-    stage(parentPath, get(draft, parentPath));
+    queueEdit(parentPath, get(draft, parentPath));
     return;
   }
   edits = edits.filter((e) => !path.every((p, i) => p === e.path[i]));
@@ -287,6 +358,7 @@ function stage(path: Path, value: Json): void {
   updateFooter();
 }
 function resetField(path: Path): void {
+  rememberDraft();
   edits = edits.filter((e) => !path.every((p, i) => p === e.path[i]));
   edits.push({ op: "reset", path });
   put(draft, path, get(loaded.snapshot.defaults, path));
@@ -349,6 +421,7 @@ async function discardChanges(): Promise<void> {
     return;
   draft = clone(loaded.snapshot.config);
   edits = [];
+  undoDraft = undefined;
   invalidFields.clear();
   errorMessage = undefined;
   errorBox.hidden = true;
@@ -376,6 +449,9 @@ async function reloadSettings(): Promise<void> {
     loaded = next;
     draft = clone(next.snapshot.config);
     edits = [];
+    undoDraft = undefined;
+    application = undefined;
+    clearTimeout(applicationTimer);
     invalidFields.clear();
     errorMessage = undefined;
     renderPage();
@@ -389,7 +465,14 @@ async function reloadSettings(): Promise<void> {
 }
 
 async function save(): Promise<void> {
-  if (busy || confirmationOpen || !edits.length || invalidFields.size) return;
+  if (
+    !loaded ||
+    busy ||
+    confirmationOpen ||
+    !edits.length ||
+    invalidFields.size
+  )
+    return;
   const focusedId = document.activeElement?.id;
   const focusedPage = active;
   let failure: unknown;
@@ -406,6 +489,15 @@ async function save(): Promise<void> {
     loaded = result.data;
     draft = clone(loaded.snapshot.config);
     edits = [];
+    undoDraft = undefined;
+    application = {
+      state: "pending",
+      message: "Saved on this PC. Checking the active desktop settings…",
+    };
+    clearTimeout(applicationTimer);
+    applicationTimer = setTimeout(() => {
+      void checkApplication();
+    }, 1200);
     errorMessage = undefined;
     renderPage();
     updateStatus();
@@ -456,6 +548,7 @@ function switchPage(name: string): void {
   search = "";
   (document.querySelector("#search") as HTMLInputElement).value = "";
   renderPage();
+  refreshVisibleHelp();
   document.querySelector<HTMLElement>("h1")?.focus();
 }
 function renderShell(): void {
@@ -563,6 +656,7 @@ function field(
       desc.textContent = input.validationMessage;
   }
   input.addEventListener("input", () => {
+    rememberDraft();
     if (input instanceof HTMLInputElement && !input.checkValidity()) {
       invalidFields.set(JSON.stringify(path), input.value);
       input.setAttribute("aria-invalid", "true");
@@ -579,7 +673,7 @@ function field(
         : options.type === "number"
           ? Number(input.value)
           : input.value;
-    stage(path, v);
+    queueEdit(path, v);
     if (active === "Appearance") updatePreview();
   });
   control.append(input);
@@ -639,7 +733,347 @@ function resetButton(parent: HTMLElement, label: string, path: Path): void {
     ),
   );
 }
+function readableChord(chord: string): string {
+  const names: Record<string, string> = {
+    ctrl: "Ctrl",
+    control: "Ctrl",
+    alt: "Alt",
+    shift: "Shift",
+    win: "Win",
+    super: "Win",
+    meta: "Win",
+    space: "Space",
+    escape: "Esc",
+    enter: "Enter",
+    left: "←",
+    right: "→",
+    up: "↑",
+    down: "↓",
+    oem_question: "/",
+    oem_plus: "Plus",
+    oem_minus: "Minus",
+    oem_comma: ",",
+    oem_period: ".",
+  };
+  return chord
+    .split("+")
+    .map((key) => names[key.toLowerCase()] ?? key.toUpperCase())
+    .join(" + ");
+}
+function describeCommand(command: string): string {
+  const names: Record<string, string> = {
+    "toggle-direction": "Change the next split direction",
+    "toggle-floating": "Switch between floating and tiled",
+    "toggle-fullscreen": "Toggle fullscreen",
+    "set-floating": "Float this window",
+    "set-tiling": "Tile this window",
+    "recent-workspace": "Return to the previous workspace",
+    pause: "Pause or resume Moon",
+    reload: "Reload saved settings",
+    exit: "Stop Moon and restore windows",
+    restore: "Restore original window positions and stop Moon",
+    close: "Close the focused window",
+    settings: "Open Settings",
+    cheatsheet: "Show current shortcuts",
+  };
+  if (names[command]) return names[command]!;
+  const words = command.split(/\s+/);
+  if (words.length === 2 && words[0] === "focus")
+    return `Focus the ${words[1]} window`;
+  if (words.length === 2 && words[0] === "move")
+    return `Move the window ${words[1]}`;
+  if (words.length === 2 && words[0] === "workspace")
+    return `Switch to workspace ${words[1]}`;
+  if (
+    words[0] === "move-to-workspace" &&
+    (words.length === 2 || (words.length === 3 && words[2] === "--follow"))
+  )
+    return `Move to workspace ${words[1]}${words[2] ? " and follow" : ""}`;
+  if (words.length === 3 && words[0] === "resize")
+    return `Change window ${words[1]} by ${words[2]}`;
+  if (words.length === 2 && words[0] === "mode") return `Use ${words[1]} mode`;
+  return command; // Custom commands remain exact, with no invented interpretation.
+}
+function paintShortcuts(): void {
+  if (!shortcutPanel?.isConnected) return;
+  shortcutPanel.replaceChildren();
+  const heading = document.querySelector("#shortcut-status-heading");
+  if (heading)
+    heading.textContent =
+      shortcuts?.hook_enabled === false
+        ? "Configured shortcuts"
+        : "Available now";
+  const refresh =
+    document.querySelector<HTMLButtonElement>("#refresh-shortcuts");
+  if (refresh) refresh.disabled = shortcutsLoading;
+  if (shortcutsLoading && !shortcuts) {
+    shortcutPanel.append(el("p", "note", "Loading current shortcuts…"));
+    return;
+  }
+  if (!shortcuts) {
+    const notice = el(
+      "div",
+      "notice",
+      "Current shortcuts are unavailable. Start Moon, then refresh this list.",
+    );
+    if (shortcutsError) notice.append(el("div", "note", shortcutsError));
+    shortcutPanel.append(notice);
+    return;
+  }
+  shortcutPanel.append(
+    el(
+      "p",
+      shortcuts.hook_enabled ? "note" : "notice",
+      `Mode: ${shortcuts.mode}${!shortcuts.hook_enabled ? " · Configured shortcuts are disabled for this Moon session. The recovery shortcut above remains available." : shortcuts.paused ? " · Moon is paused; only the available recovery controls are listed." : " · These shortcuts are active on your desktop now."}`,
+    ),
+  );
+  const terms = shortcutFilter.toLocaleLowerCase().trim().split(/\s+/);
+  const entries = shortcuts.bindings.filter(
+    ({ chord, commands }) =>
+      commands.length > 0 &&
+      terms.every((term) =>
+        `${chord} ${readableChord(chord)} ${commands.join(" ")} ${commands.map(describeCommand).join(" ")}`
+          .toLocaleLowerCase()
+          .includes(term),
+      ),
+  );
+  const list = el("div", "card live-shortcuts");
+  list.setAttribute("role", "list");
+  list.setAttribute(
+    "aria-label",
+    shortcuts.hook_enabled
+      ? "Available shortcuts"
+      : "Configured shortcuts (inactive)",
+  );
+  for (const entry of entries) {
+    const row = el("div", "live-shortcut-row");
+    row.setAttribute("role", "listitem");
+    const actions = el("div");
+    for (const command of entry.commands)
+      actions.append(el("div", "", describeCommand(command)));
+    row.append(el("kbd", "", readableChord(entry.chord)), actions);
+    list.append(row);
+  }
+  if (!entries.length)
+    shortcutPanel.append(
+      el(
+        "div",
+        "empty",
+        shortcutFilter.trim()
+          ? "No current shortcuts match. Try a key, action, or workspace name."
+          : "No shortcuts are active in this mode. The recovery shortcut above is always available.",
+      ),
+    );
+  else shortcutPanel.append(list);
+}
+async function refreshShortcuts(): Promise<void> {
+  if (shortcutsLoading) return;
+  shortcutsLoading = true;
+  paintShortcuts();
+  try {
+    shortcuts = await request<LiveShortcuts>("shortcuts");
+    shortcutsError = undefined;
+  } catch (error) {
+    shortcuts = undefined;
+    shortcutsError = error instanceof Error ? error.message : String(error);
+  } finally {
+    shortcutsLoading = false;
+    paintShortcuts();
+  }
+}
+function renderShortcutHelp(parent: HTMLElement): void {
+  const heading = el("h2", "", "Available now");
+  heading.id = "shortcut-status-heading";
+  parent.append(heading);
+  const recovery = el("div", "notice");
+  recovery.append(
+    el("strong", "", "Always a way back"),
+    el("div", "", "Restore original window positions and stop Moon:"),
+    el("kbd", "", readableChord(shortcuts?.emergency ?? "ctrl+alt+shift+f12")),
+  );
+  const toolbar = el("div", "toolbar live-help-toolbar");
+  const search = el("input", "search");
+  search.type = "search";
+  search.id = "shortcut-search";
+  search.placeholder = "Find a shortcut";
+  search.setAttribute("aria-label", "Find a shortcut");
+  search.value = shortcutFilter;
+  search.addEventListener("input", () => {
+    shortcutFilter = search.value;
+    paintShortcuts();
+  });
+  const refresh = button("Refresh", refreshShortcuts);
+  refresh.id = "refresh-shortcuts";
+  refresh.setAttribute("aria-label", "Refresh current shortcuts");
+  toolbar.append(search, refresh);
+  shortcutPanel = el("div");
+  parent.append(recovery, toolbar, shortcutPanel);
+  paintShortcuts();
+  if (!shortcuts && !shortcutsError && !shortcutsLoading)
+    void refreshShortcuts();
+}
+function renderHelpOnly(error: unknown): void {
+  root.replaceChildren();
+  const page = el("main", "page help-only");
+  page.append(
+    mark(),
+    el("h1", "", "Shortcuts"),
+    el("p", "lead", "Help for the desktop you’re using now."),
+  );
+  const notice = el(
+    "div",
+    "notice error",
+    "Saved settings could not be opened. Current shortcut help remains available.",
+  );
+  notice.append(
+    el("div", "note", error instanceof Error ? error.message : String(error)),
+  );
+  errorBox = el("div", "notice error");
+  errorBox.hidden = true;
+  errorBox.setAttribute("role", "alert");
+  errorBox.tabIndex = -1;
+  page.append(notice, errorBox);
+  root.append(page);
+  renderShortcutHelp(page);
+  const actions = el("div", "actions");
+  actions.append(
+    button("Try settings again", boot),
+    button("Open configuration", () => request("open-config")),
+  );
+  page.append(actions);
+}
+function paintOverview(): void {
+  if (!overviewPanel?.isConnected) return;
+  overviewPanel.replaceChildren();
+  const refresh = button("Refresh", refreshOverview, "quiet");
+  refresh.setAttribute("aria-label", "Refresh workspace overview");
+  refresh.disabled = overviewLoading;
+  if (overview) {
+    overviewPanel.append(
+      el(
+        "strong",
+        "",
+        `${overview.managed_windows} managed ${overview.managed_windows === 1 ? "window" : "windows"}`,
+      ),
+      el(
+        "p",
+        "note",
+        overview.active_workspace === null
+          ? "No workspace is active."
+          : `Current workspace: ${overview.active_workspace}`,
+      ),
+    );
+    const list = el("ul", "workspace-summary");
+    for (const workspace of overview.workspaces.filter((w) => w.windows > 0)) {
+      list.append(
+        el(
+          "li",
+          "",
+          `${workspace.name}: ${workspace.windows} ${workspace.windows === 1 ? "window" : "windows"}${workspace.active ? " · active workspace" : ""}`,
+        ),
+      );
+    }
+    overviewPanel.append(
+      list,
+      el(
+        "p",
+        "note",
+        "Moon arranges existing windows using your workspace rules. While tiling is active, Moon keeps other workspaces out of view. Focusing an app brings its workspace into view; its workspace position is kept.",
+      ),
+    );
+    if (object(loaded.runtime.stats?.token).ui_access === false)
+      overviewPanel.append(
+        el(
+          "p",
+          "note",
+          "This copy of Moon runs with normal permissions. Windows from administrator apps may remain outside its control.",
+        ),
+      );
+  } else
+    overviewPanel.append(
+      el(
+        "p",
+        "note",
+        overviewLoading
+          ? "Reading your current workspaces…"
+          : (overviewError ??
+              "Start Moon to see where your windows are arranged."),
+      ),
+    );
+  const actions = el("div", "actions");
+  actions.append(
+    refresh,
+    button("Workspace settings", () => switchPage("Workspaces"), "quiet"),
+    button("Find a shortcut", () => switchPage("Shortcuts"), "quiet"),
+  );
+  overviewPanel.append(actions);
+}
+async function refreshOverview(): Promise<void> {
+  if (overviewLoading) return;
+  overviewLoading = true;
+  paintOverview();
+  try {
+    overview = await request<Overview>("overview");
+    overviewError = undefined;
+  } catch {
+    overview = undefined;
+    overviewError =
+      "Moon is not reachable. Start it, then refresh to see your current workspaces.";
+  } finally {
+    overviewLoading = false;
+    paintOverview();
+  }
+}
+function renderOverview(): void {
+  const card = section("On your desktop");
+  overviewPanel = el("div", "overview");
+  card.append(overviewPanel);
+  paintOverview();
+  if (!overview && !overviewError && !overviewLoading) void refreshOverview();
+}
+function renderApplicationState(): void {
+  content.querySelector(".application-state")?.remove();
+  if (!application) return;
+  const panel = el(
+    "div",
+    `notice application-state${application.state === "failed" || application.state === "changed" ? " error" : ""}`,
+  );
+  panel.setAttribute("role", "status");
+  panel.append(el("div", "", application.message));
+  if (application.state !== "loaded") {
+    const check = button(
+      checkingApplication ? "Checking…" : "Check desktop",
+      checkApplication,
+      "quiet",
+    );
+    check.disabled = checkingApplication || busy;
+    panel.append(check);
+  }
+  errorBox.after(panel);
+}
+async function checkApplication(): Promise<void> {
+  if (!loaded || checkingApplication) return;
+  checkingApplication = true;
+  const source = loaded.snapshot.source;
+  renderApplicationState();
+  try {
+    const next = await request<ApplicationState>("application-status", {
+      expected_source: source,
+    });
+    if (loaded.snapshot.source === source) application = next;
+  } catch (error) {
+    if (loaded.snapshot.source === source)
+      application = {
+        state: "unavailable",
+        message: `Saved on this PC. Could not confirm the desktop settings. ${error instanceof Error ? error.message : String(error)}`,
+      };
+  } finally {
+    checkingApplication = false;
+    renderApplicationState();
+  }
+}
 function renderGeneral(): void {
+  renderOverview();
   const layout = section("Workspace motion");
   field(
     layout,
@@ -762,12 +1196,11 @@ function renderAppearance(): void {
     for (let j = 0; j < 3; j++) window.append(el("div", "mini-line"));
     layout.append(window);
   }
-  preview.append(
-    bar,
-    layout,
-    el("div", "preview-caption", "Appearance preview"),
+  preview.append(bar, layout, el("div", "preview-caption", "Draft preview"));
+  content.append(
+    preview,
+    el("p", "note preview-note", "Your desktop changes only after saving."),
   );
-  content.append(preview);
   content.append(
     el("h2", "", "Desktop theme"),
     el(
@@ -975,6 +1408,15 @@ function renderWorkspaces(): void {
   resetButton(content, "Restore default workspaces", ["workspaces"]);
 }
 function renderShortcuts(): void {
+  renderShortcutHelp(content);
+  content.append(
+    el("h2", "", "Edit saved shortcuts"),
+    el(
+      "p",
+      "note",
+      "These are your default-mode settings, including unsaved edits. The available shortcuts above come from the running desktop.",
+    ),
+  );
   content.append(
     el(
       "div",
@@ -1286,9 +1728,10 @@ function jsonEditor(
     details.open = true;
   }
   input.addEventListener("input", () => {
+    rememberDraft();
     try {
       invalidFields.delete(JSON.stringify(path));
-      stage(path, JSON.parse(input.value) as Json);
+      queueEdit(path, JSON.parse(input.value) as Json);
       error.textContent = "";
       input.setCustomValidity("");
       input.removeAttribute("aria-invalid");
@@ -1549,6 +1992,7 @@ function renderPage(): void {
   errorBox.tabIndex = -1;
   errorBox.hidden = !errorMessage;
   content.append(errorBox);
+  renderApplicationState();
   if (search) {
     const card = el("div", "card");
     const terms = search.toLowerCase().split(/\s+/);
@@ -1583,32 +2027,53 @@ function renderPage(): void {
 }
 let readySent = false;
 async function boot(): Promise<void> {
+  const help = active === "Shortcuts" ? refreshShortcuts() : Promise.resolve();
   try {
     loaded = await request<Loaded>("load");
+    await help;
     draft = clone(loaded.snapshot.config);
     edits = [];
+    undoDraft = undefined;
     renderShell();
   } catch (e) {
-    root.replaceChildren();
-    const page = el("div", "page");
-    page.append(
-      mark(),
-      el("h1", "", "Let’s get Settings ready"),
-      el("p", "lead", e instanceof Error ? e.message : String(e)),
-    );
-    const actions = el("div", "actions");
-    actions.append(
-      button("Try again", boot, "primary"),
-      button("Open configuration", () => request("open-config")),
-    );
-    page.append(actions);
-    root.append(page);
+    await help;
+    if (active === "Shortcuts") {
+      renderHelpOnly(e);
+    } else {
+      root.replaceChildren();
+      const page = el("div", "page");
+      page.append(
+        mark(),
+        el("h1", "", "Let’s get Settings ready"),
+        el("p", "lead", e instanceof Error ? e.message : String(e)),
+      );
+      const actions = el("div", "actions");
+      actions.append(
+        button("Try again", boot, "primary"),
+        button("Show current shortcuts", () => {
+          active = "Shortcuts";
+          void boot();
+        }),
+        button("Open configuration", () => request("open-config")),
+      );
+      page.append(actions);
+      root.append(page);
+    }
   }
   if (!readySent) {
     readySent = true;
     window.ipc?.postMessage(JSON.stringify({ id: 0, method: "ready" }));
   }
 }
+function refreshVisibleHelp(): void {
+  if (!readySent || search) return;
+  if (active === "Shortcuts" && shortcutPanel?.isConnected)
+    void refreshShortcuts();
+  if (active === "General" && overviewPanel?.isConnected)
+    void refreshOverview();
+}
+window.moonActivated = refreshVisibleHelp;
+window.addEventListener("focus", refreshVisibleHelp);
 document.addEventListener("keydown", (event) => {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
     event.preventDefault();
@@ -1618,7 +2083,11 @@ document.addEventListener("keydown", (event) => {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") {
     event.preventDefault();
     if (confirmationOpen) return;
-    document.querySelector<HTMLInputElement>("#search")?.focus();
+    document
+      .querySelector<HTMLInputElement>(
+        active === "Shortcuts" && !search ? "#shortcut-search" : "#search",
+      )
+      ?.focus();
   }
 });
 void boot();

@@ -20,6 +20,13 @@ pub struct Options {
     pub wait_parent: Option<u32>,
 }
 
+impl Options {
+    #[cfg(any(windows, test))]
+    pub fn hook_enabled(&self) -> bool {
+        !self.no_hook && self.only.is_none()
+    }
+}
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("moon: {error:#}");
@@ -139,15 +146,39 @@ pub fn load_config(options: &Options) -> Result<Config> {
 
 #[cfg(windows)]
 pub fn open_settings(options: &Options) -> Result<()> {
+    open_settings_page(options, None)
+}
+
+#[cfg(any(windows, test))]
+pub fn settings_companion_present(path: &std::path::Path) -> Result<bool> {
+    match fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => Ok(true),
+        Ok(_) => bail!("Moon Settings path is not a file: {}", path.display()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).context("check Moon Settings companion"),
+    }
+}
+
+#[cfg(windows)]
+pub fn settings_companion() -> Result<PathBuf> {
+    Ok(std::env::current_exe()?.with_file_name("moon-settings.exe"))
+}
+
+#[cfg(windows)]
+pub fn open_settings_page(options: &Options, page: Option<&str>) -> Result<()> {
     let _apartment = moon_win::platform::Apartment::new()?;
-    let companion = std::env::current_exe()?.with_file_name("moon-settings.exe");
-    if !companion.is_file() {
+    let companion = settings_companion()?;
+    if !settings_companion_present(&companion)? {
         bail!("Moon Settings is missing. Run Moon Setup to repair the installation.");
     }
-    moon_win::runtime::shell_execute(
-        &companion.to_string_lossy(),
-        &format!("--config \"{}\"", config_path(options).display()),
-    )?;
+    let mut arguments = format!("--config \"{}\"", config_path(options).display());
+    if let Some(page) = page {
+        if page != "shortcuts" {
+            bail!("Unknown Moon Settings page {page:?}");
+        }
+        arguments.push_str(" --page shortcuts");
+    }
+    moon_win::runtime::shell_execute(&companion.to_string_lossy(), &arguments)?;
     Ok(())
 }
 
@@ -193,7 +224,7 @@ fn print_help() {
 moon [start] [--background] [--only PROCESS] [--no-hook] [--no-surfaces] [--takeover]\n\
 moon doctor                  Check capabilities and competing managers\n\
 moon settings                Open Moon Settings\n\
-moon query [world|stats|windows|monitors|transactions|config]\n\
+moon query [world|stats|windows|monitors|transactions|config|shortcuts|overview]\n\
 moon subscribe               Stream committed state changes\n\
 moon config default|show|validate|schema|reference|migrate|path\n\
 moon focus|move left|right|up|down\n\
@@ -215,6 +246,37 @@ Emergency recovery: Ctrl+Alt+Shift+F12.",
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn live_shortcut_status_matches_the_hook_startup_options() {
+        assert!(Options::default().hook_enabled());
+        for words in [
+            vec!["start", "--no-hook"],
+            vec!["start", "--only", "testwin"],
+            vec!["start", "--only", "testwin", "--surfaces"],
+        ] {
+            let (options, _) = parse_args(words.into_iter().map(str::to_owned).collect()).unwrap();
+            assert!(!options.hook_enabled());
+        }
+    }
+
+    #[test]
+    fn shortcut_help_falls_back_only_for_a_missing_companion() {
+        let directory = std::env::temp_dir().join(format!(
+            "moon-help-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("moon-settings.exe");
+        assert!(!settings_companion_present(&path).unwrap());
+        fs::write(&path, b"unexecuted companion fixture").unwrap();
+        assert!(settings_companion_present(&path).unwrap());
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(settings_companion_present(&path).is_err());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn command_arguments_keep_follow_and_negative_resize() {
         let (options, command) = parse_args(

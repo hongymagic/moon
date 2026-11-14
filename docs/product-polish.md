@@ -5,7 +5,45 @@ guided setup, product identity, theme editing, Windows 11 materials, and carouse
 navigation. The original signed-install, resilience, performance and seven-day
 acceptance conditions remain tracked in [acceptance-status.md](acceptance-status.md).
 
-## Current ordinary candidate, 13 November 2026
+## Development refinement, 15 November 2026
+
+The isolated `codex/polish-20261115` branch adds searchable live shortcut help,
+a current workspace overview, one-step draft Undo and persistent save/application
+feedback. Existing automatic first-launch adoption remains the source of workspace
+assignments; the overview explains those assignments rather than introducing a
+second placement mechanism. [Settings editing](settings-editing.md#live-help-and-draft-recovery)
+documents the behavior and recovery limits.
+
+Rapid workspace switches now retarget the visible carousel from its current
+positions, including reversals, while retaining at most three pages per monitor.
+The native final layout remains independent of presentation. This refinement has
+portable continuity/bounds tests and a Windows cross-build; it has not yet been
+visually validated on the Windows desktop. Previous carousel results below cover
+the earlier implementation.
+
+Installer changes preserve the active custom configuration path through startup,
+recovery and Settings entry points. The isolated PowerShell 5.1 suites pass
+20 checkpoint/configuration checks and 33 setup-state checks, without installing,
+requesting elevation or changing the live daemon. Reports are
+`target/polish-upgrade-snapshot-20261115.json` and
+`target/polish-setup-state-20261115.json`. Portable-to-installed handoff is still
+being integrated with the separate review's authenticated IPC changes; checkpoint
+helpers alone do not establish that handoff.
+
+The portable core suite passed 83 tests before the final help metadata changes;
+the affected help and motion checks were rerun afterward. The daemon's 12 portable
+tests pass, including standalone-help routing. Settings passes 41 browser checks
+and 11 portable Rust checks. Its Windows-target Clippy check also passes. The
+frontend receipt is `target/polish-20261115/settings-validation.json`; screenshots
+in `target/settings-polish/` include the live overview and shortcut list, dark and
+high-contrast appearances, and narrow previews with no caption overlap.
+Windows-target Clippy passes for the daemon and platform crates; the native unit
+executable and ordinary debug daemon compile without being executed. The exact
+inputs, commands and outputs are in
+`target/polish-20261115/core-motion-build.json`. These results are development
+checks, not signed-installation, live desktop, performance or soak acceptance.
+
+## Recorded ordinary candidate, 13 November 2026
 
 The session-recovery update is now staged as ordinary build `47521240…` and
 UIAccess build `AFBA0420…`. It guards cursor movement while suspended and resets
@@ -100,7 +138,7 @@ dialog owns keyboard shortcuts and repeated close requests until it is dismissed
 A successful save reloads only a daemon using the same configuration path.
 
 At narrow widths, navigation becomes a compact grid and the status sits above one
-aligned row of Reload, Discard and Save actions. Short viewports use normal
+aligned row of Undo, Reload, Discard and Save actions. Short viewports use normal
 document scrolling so navigation, editing and saving remain reachable. High
 contrast uses the user's system Highlight/HighlightText colors for the primary
 action, preventing an unreadable forced-color text backplate.
@@ -152,7 +190,7 @@ motion apply to these surfaces as well as Settings. Window-manager performance
 and settings-window performance are separate measurements, not an aggregated
 claim that a WebView fits the daemon's memory budget.
 
-## Current polish verification
+## Earlier polish verification
 
 The following checks cover the E050 polish baseline and unchanged frontend
 bundle. Renderer and workspace-label follow-up results are listed below. These

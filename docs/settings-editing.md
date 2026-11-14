@@ -78,6 +78,43 @@ and the CLI/IPC command flow. It produces a Settings control effect; the daemon
 opens the companion window through its normal application-launch path. The
 built-in process rule keeps `moon-settings` outside managed tiling.
 
+## Live help and draft recovery
+
+`moon cheatsheet` opens the Shortcuts page of the Settings companion. Its
+**Available now** list comes from the running daemon's committed binding mode,
+including its pause state. The same resolver supplies the keyboard hook, so
+disabled bindings and empty aliases do not appear as available actions. Searching
+matches keys and actions; the emergency recovery shortcut remains visible.
+Help still opens when the saved configuration is invalid. A standalone `moon.exe`
+without the companion retains its text help; a broken companion produces an
+actionable error rather than silently switching applications.
+
+The native launcher accepts only the named `general` and `shortcuts` pages.
+It passes a typed page value to the local interface without changing navigation
+or origin rules. Live help and the General workspace overview refresh when their
+page opens or Settings regains focus, with an explicit Refresh action as well.
+Neither requires an idle polling loop. The overview reports current workspace
+counts without transmitting window titles or claiming to reconstruct past
+first-launch assignments.
+
+**Undo** restores one draft checkpoint, including invalid input, and never writes
+the saved file. Native text-field undo remains available. Saving, discarding or
+reloading clears the checkpoint. The Appearance preview represents the draft;
+it does not apply unsaved colors to the desktop.
+
+After saving, a persistent status separates storage from application. A status
+check compares the expected source against the file, confirms the running
+configuration path, and compares the active configuration against the saved
+effective configuration. Equality confirms that Moon loaded the settings, not
+that every native window accepted its new placement. A stopped daemon, different
+configuration, rejected reload, changed file, paused or suspended session, and
+reported native error remain explicit. An older check cannot replace the status
+of a newer save. **Check desktop** retries without saving again.
+
+The live help follows Microsoft's [keyboard shortcut discovery guidance](https://learn.microsoft.com/en-us/windows/apps/develop/input/keyboard-accelerators),
+checked on 15 November 2026. The existing Bun, TypeScript, Wry and Tao versions
+remain pinned; this work introduces no new runtime dependency.
+
 ## Native window and material lifecycle
 
 The Windows host retains the standard caption and snap behavior. Its WebView

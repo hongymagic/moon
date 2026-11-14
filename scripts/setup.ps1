@@ -143,7 +143,11 @@ $ui.Primary.Add_Click({
         try {
             if ($Mode -eq 'Install') {
                 if (!(Get-MoonWebViewRuntime)) {Start-Process 'https://developer.microsoft.com/microsoft-edge/webview2/consumer/';$ui.Status.Text='After installing WebView2, return here to open Settings.';return}
-                Start-Process -FilePath (Join-Path (Get-MoonInstallDirectory) 'moon-settings.exe')
+                $settingsDirectory=Get-MoonInstallDirectory
+                $settingsArguments=Get-MoonLaunchArguments (Read-MoonInstallState $settingsDirectory) -Settings
+                $settingsStart=@{FilePath=(Join-Path $settingsDirectory 'moon-settings.exe')}
+                if ($settingsArguments) {$settingsStart.ArgumentList=$settingsArguments}
+                Start-Process @settingsStart
             }
             $window.Close()
         } catch {Show-MoonSetupProblem 'Moon is installed, but Settings could not open. You can try again or open Moon from Start.' $_}

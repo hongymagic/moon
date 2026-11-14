@@ -375,7 +375,7 @@ h3 {
   border: 1px solid var(--line);
   border-radius: 14px;
   padding: 15px;
-  margin-bottom: 24px;
+  margin-bottom: 8px;
   position: relative;
   overflow: hidden;
 }
@@ -428,6 +428,9 @@ h3 {
 }
 .mini-line:nth-child(3) {
   max-width: 45%;
+}
+.preview-note {
+  margin-bottom: 24px;
 }
 .preview-caption {
   position: absolute;
@@ -529,6 +532,46 @@ textarea {
 }
 .shortcut-row button {
   padding: 7px 9px;
+}
+.live-help-toolbar .search {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+}
+.live-shortcut-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.8fr) minmax(0, 1.4fr);
+  align-items: start;
+  gap: 16px;
+  padding: 14px 17px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.live-shortcut-row + .live-shortcut-row {
+  border-top: 1px solid var(--line);
+}
+.live-shortcut-row kbd {
+  justify-self: start;
+  white-space: normal;
+}
+.overview {
+  padding: 18px 20px;
+}
+.workspace-summary {
+  margin: 12px 0;
+  padding-left: 20px;
+  line-height: 1.8;
+}
+.help-only {
+  max-width: 1000px;
+  margin: 0 auto;
+}
+.help-only > .moon-mark {
+  width: 38px;
+  height: 38px;
+}
+.application-state button {
+  margin-top: 8px;
 }
 kbd {
   font-family: inherit;
@@ -821,8 +864,12 @@ dialog .actions {
     padding: 12px 16px;
     gap: 10px;
   }
+  .savebar .actions {
+    gap: 4px;
+  }
   .savebar button {
-    padding: 8px 10px;
+    padding: 8px 7px;
+    font-size: 12px;
   }
   .toast {
     left: 50%;

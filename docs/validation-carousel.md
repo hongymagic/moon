@@ -7,6 +7,25 @@ standalone fixtures ran with GlazeWM's previously verified explicit `testwin`
 ignore rule; full-daemon integration ran with the previous manager stopped.
 No UAC prompt or installation was requested.
 
+## Interruption refinement, 15 November 2026
+
+The isolated polish implementation retains visible workspace offsets when a new
+switch arrives during the 200 ms transition. Its portable tests cover a third
+destination, reversal without a position jump, 9,998 successive interruptions
+with at most three retained pages, and immediate committed focus, visibility,
+tree order and exact geometry for both tiles on each selected workspace. These
+three tests pass; the complete core suite also passed 83 tests before the final
+geometry assertions were strengthened and rerun.
+
+The native implementation reuses the popup and mouse hook during compatible
+retargets, releases offscreen thumbnail relationships, and limits each monitor to
+512 relationships. It rechecks reduced motion only during active presentation.
+A hidden-owned-popup regression covers cancellation, monitor removal, preference
+change, expiry, stale sources, a subsequent presentation and final destruction.
+The updated interactive probe now expects a rapid reversal to retarget and settle.
+Those Windows regressions have **not been executed** for this refinement; the
+historical nine-case result below describes the prior cancellation behavior.
+
 ## DWM source lifecycle
 
 `crates/moon-win/examples/thumbnail_probe.rs` used a separate ordinary Win32/GDI

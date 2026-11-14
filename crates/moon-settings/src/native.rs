@@ -1,4 +1,4 @@
-use crate::store::Store;
+use crate::{startup::Startup, store::Store};
 use moon_core::settings::{Edit, Snapshot};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -159,6 +159,41 @@ fn handle(call: &Call, path: &std::path::Path) -> Result<Value, Value> {
     match call.method.as_str() {
         "load" => Ok(data(store.load().map_err(|e| json!(e))?, path, runtime())),
         "status" => Ok(runtime()),
+        "shortcuts" | "overview" => {
+            ipc_request("query", json!({"query":call.method})).map_err(failure)
+        }
+        "application-status" => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Check {
+                expected_source: Option<String>,
+            }
+            let check: Check = serde_json::from_value(call.params.clone()).map_err(failure)?;
+            let snapshot = store.load().map_err(|e| json!(e))?;
+            if snapshot.source != check.expected_source {
+                return Ok(
+                    json!({"state":"changed","message":"The saved file changed in another editor. Reload to review it; your draft has not been overwritten."}),
+                );
+            }
+            let state = runtime();
+            if state["running"] != true {
+                return Ok(
+                    json!({"state":"unavailable","message":"Saved on this PC. Moon is not reachable; these settings will be read when it starts."}),
+                );
+            }
+            if !state["stats"]["config_path"].as_str().is_some_and(|p| same_path(p, path)) {
+                return Ok(
+                    json!({"state":"other-config","message":"Saved on this PC. The running Moon is using a different configuration file."}),
+                );
+            }
+            let expected = serde_json::to_value(&snapshot.config).map_err(failure)?;
+            serde_json::to_value(crate::application::describe(
+                &expected,
+                ipc_request("query", json!({"query":"config"})),
+                &state["stats"],
+            ))
+            .map_err(failure)
+        }
         "save" => {
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
@@ -182,7 +217,7 @@ fn handle(call: &Call, path: &std::path::Path) -> Result<Value, Value> {
                             if ipc_request("query", json!({"query":"config"}))
                                 .is_ok_and(|actual| actual == expected)
                             {
-                                "Saved and applied to your desktop.".to_owned()
+                                "Saved and loaded by Moon.".to_owned()
                             } else {
                                 "Saved. Moon is using different settings; refresh its status before continuing.".to_owned()
                             }
@@ -235,22 +270,13 @@ fn local_data() -> Result<PathBuf, Value> {
         .map(|p| PathBuf::from(p).join("moon/settings"))
         .ok_or_else(|| failure("Windows did not provide a local application data folder."))
 }
-fn config_path() -> Result<PathBuf, String> {
-    let mut args = std::env::args().skip(1);
-    let path = match args.next().as_deref() {
+fn config_path(config: Option<PathBuf>) -> Result<PathBuf, String> {
+    let path = match config {
         None => std::env::var_os("USERPROFILE")
             .map(|p| PathBuf::from(p).join(".config/moon/config.toml"))
             .ok_or("Windows did not provide a user profile folder.")?,
-        Some("--config") => PathBuf::from(args.next().ok_or("--config needs a file path.")?),
-        Some(_) => {
-            return Err(
-                "Use Moon Settings with no arguments, or --config followed by a file path.".into(),
-            );
-        }
+        Some(path) => path,
     };
-    if args.next().is_some() {
-        return Err("Unexpected settings argument.".into());
-    }
     if path.is_absolute() {
         Ok(path)
     } else {
@@ -303,7 +329,9 @@ pub fn run() -> Result<(), String> {
     }
     // Appearance reads use UISettings before WebView2 initializes its thread.
     let _apartment = moon_win::platform::Apartment::new().map_err(|e| e.to_string())?;
-    let path = config_path()?;
+    let startup = Startup::parse(std::env::args_os().skip(1))?;
+    let page = serde_json::to_string(startup.page.name()).map_err(|e| e.to_string())?;
+    let path = config_path(startup.config)?;
     let loop_ = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let window = WindowBuilder::new()
         .with_title("Moon Settings")
@@ -350,7 +378,7 @@ pub fn run() -> Result<(), String> {
         .with_background_color((0,0,0,0))
         .with_devtools(false)
         .with_browser_accelerator_keys(false)
-        .with_initialization_script(format!("document.addEventListener('DOMContentLoaded',()=>document.documentElement.classList.toggle('mica',{mica}));"))
+        .with_initialization_script(format!("window.moonStartPage={page};document.addEventListener('DOMContentLoaded',()=>document.documentElement.classList.toggle('mica',{mica}));"))
         .with_navigation_handler(|url| trusted_url(&url))
         .with_new_window_req_handler(|_,_| wry::NewWindowResponse::Deny)
         .with_download_started_handler(|_,_| false)
@@ -391,7 +419,11 @@ pub fn run() -> Result<(), String> {
                 let mica = apply_material(&window);
                 let _ = webview.evaluate_script(&format!("document.documentElement.classList.toggle('mica',{mica})"));
             }
-            Event::WindowEvent { event: WindowEvent::ThemeChanged(_) | WindowEvent::Focused(true), .. } => {
+            Event::WindowEvent { event: WindowEvent::Focused(true), .. } => {
+                let mica = apply_material(&window);
+                let _ = webview.evaluate_script(&format!("document.documentElement.classList.toggle('mica',{mica});window.moonActivated?.()"));
+            }
+            Event::WindowEvent { event: WindowEvent::ThemeChanged(_), .. } => {
                 let mica = apply_material(&window);
                 let _ = webview.evaluate_script(&format!("document.documentElement.classList.toggle('mica',{mica})"));
             }

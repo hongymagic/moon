@@ -16,7 +16,23 @@ Each UTF-8 JSON frame ends in a newline. Requests are at most 64 KiB; responses 
 {"version":1,"id":3,"method":"subscribe"}
 ```
 
-Replies contain `version`, the same `id`, `ok`, `result`, `error`, and the committed `revision`. Queries accept `world`, `windows` (desired placements), `monitors`, `config`, `transactions`, and `stats`. Command arrays execute in order and stop on an error; earlier successful commands remain committed. The grammar is shared with bindings, rules, aliases and widget clicks.
+Replies contain `version`, the same `id`, `ok`, `result`, `error`, and the committed `revision`. Queries accept `world`, `windows` (desired placements), `monitors`, `config`, `transactions`, `stats`, `shortcuts`, and `overview`. Command arrays execute in order and stop on an error; earlier successful commands remain committed. The grammar is shared with bindings, rules, aliases and widget clicks.
+
+`shortcuts` returns `{mode, paused, hook_enabled, bindings: [{chord, commands}], emergency}`.
+It uses the same resolver as the live keyboard hook: modes replace normal bindings,
+paused operation keeps the recovery commands, and disabled bindings are omitted.
+It reflects the daemon's committed configuration even when the saved file is invalid.
+`moon cheatsheet` opens this help in Moon Settings. When the companion is absent
+from a standalone copy, it opens readable text help with the same bindings and session status.
+`hook_enabled` is false when this session started with `--no-hook` or `--only`; the listed bindings remain configured, while the independent emergency recovery shortcut remains available.
+`moon query shortcuts` also works without the Settings companion.
+
+`overview` returns `{managed_windows, active_workspace, workspaces: [{name,
+windows, active}]}`. Counts include hidden and suspended managed windows. Each
+monitor can have an active workspace; `active_workspace` identifies the active
+monitor's selection. The summary contains no window titles or process identities
+and describes current membership, not a historical startup event. Both additions
+use the existing version-1 query envelope; the request/response schema is unchanged.
 
 `moon protocol schema` prints the generated request/response schema. The integration suite runs this extension as a separate protocol client. Windows titles are available to explicitly connected clients through the world; raw keys are never exposed.
 

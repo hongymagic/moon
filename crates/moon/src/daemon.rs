@@ -82,31 +82,11 @@ impl Drop for StartupRecovery {
 }
 
 fn bindings(world: &World) -> Vec<HookBinding> {
-    let mut bindings = world.config.bindings.clone();
-    if world.mode != "default"
-        && let Some(mode) = world.config.modes.get(&world.mode)
-    {
-        // A binding mode replaces normal keys; emergency recovery remains independent.
-        bindings = mode.clone();
-    }
-    if world.paused {
-        bindings.retain(|_, texts| {
-            texts.iter().any(|text| {
-                world.config.commands(text).is_ok_and(|commands| {
-                    commands.iter().any(|command| {
-                        matches!(
-                            command,
-                            moon_core::command::Command::Pause
-                                | moon_core::command::Command::Reload
-                                | moon_core::command::Command::Exit
-                                | moon_core::command::Command::Restore
-                        )
-                    })
-                })
-            })
-        });
-    }
-    bindings.into_iter().map(|(chord, commands)| HookBinding { chord, commands }).collect()
+    moon_core::help::shortcuts(world, true)
+        .bindings
+        .into_iter()
+        .map(|binding| HookBinding { chord: binding.chord, commands: binding.commands })
+        .collect()
 }
 
 fn forward<T: Send + 'static>(
@@ -312,7 +292,7 @@ pub fn run(options: Options) -> Result<()> {
     runtime::install_shutdown_handler(main)?;
     let (tx, rx) = mpsc::channel();
     let (hook_tx, hook_rx) = mpsc::channel();
-    let hook = Hooks::start(bindings(&world), hook_tx, !options.no_hook && options.only.is_none())?;
+    let hook = Hooks::start(bindings(&world), hook_tx, options.hook_enabled())?;
     hook.set_pointer_tracking(world.config.focus_follows_cursor && options.only.is_none())?;
     forward(hook_rx, tx.clone(), main, Intake::Platform);
     let (pipe_tx, pipe_rx) = mpsc::channel();
@@ -779,6 +759,8 @@ impl Daemon {
                 viewport.height -= inset;
             }
             transitions.push(CarouselTransition {
+                from_workspace: old_workspace,
+                to_workspace: new_workspace,
                 from,
                 to,
                 viewport,
@@ -943,17 +925,18 @@ impl Daemon {
         self.commands(self.world.config.hooks.reload.clone())
     }
     fn cheatsheet(&self) -> Result<()> {
-        let mut content = String::from(
-            "moon — current bindings\r\n\r\nEmergency restore: Ctrl+Alt+Shift+F12\r\nOpen Moon Settings: moon settings (or bind the settings command)\r\n\r\n",
-        );
-        for binding in bindings(&self.world) {
-            content.push_str(&format!("{:<24} {}\r\n", binding.chord, binding.commands.join("; ")));
+        if crate::settings_companion_present(&crate::settings_companion()?)? {
+            return crate::open_settings_page(&self.options, Some("shortcuts"));
         }
         let path = journal::data_dir().join("bindings.txt");
-        fs::write(&path, content)?;
+        fs::write(
+            &path,
+            moon_core::help::shortcuts(&self.world, self.options.hook_enabled()).text(),
+        )?;
         runtime::shell_execute("notepad.exe", &format!("\"{}\"", path.display()))?;
         Ok(())
     }
+
     fn window_event(&mut self, id: WindowId, kind: u32) -> Result<()> {
         // A queued event can outlive its HWND. Check its current owner before
         // accepting placement echoes, changing suspension, or issuing effects.
@@ -1225,9 +1208,14 @@ impl Daemon {
             "windows" => serde_json::to_value(self.world.plan().placements)?,
             "monitors" => serde_json::to_value(&self.world.monitors)?,
             "config" => serde_json::to_value(&self.world.config)?,
+            "shortcuts" => serde_json::to_value(moon_core::help::shortcuts(
+                &self.world,
+                self.options.hook_enabled(),
+            ))?,
+            "overview" => serde_json::to_value(moon_core::help::overview(&self.world))?,
             "transactions" => serde_json::to_value(&self.transactions)?,
             "stats" => {
-                json!({"process_id":process::id(),"executable":std::env::current_exe()?,"config_path":config_path(&self.options),"carousel_active":self.carousel.is_active(),"session_suspended":self.session_suspended,"token":platform::token_capabilities(process::id())?,"uptime_seconds":self.started.elapsed().as_secs_f64(),"ready_us":self.ready_us,"revision":self.world.revision,"managed_windows":self.world.windows.len(),"resources":runtime::resource_stats()?,"surface_pixel_bytes":self.surfaces.as_ref().map_or(0, Surfaces::surface_pixel_bytes),"renderer":self.surfaces.as_ref().map(Surfaces::diagnostics),"hooks":hooks::stats(),"key_to_placed_us":self.key_latencies,"key_to_dispatch_us":self.dispatch_latencies,"recent_transactions":self.transactions,"last_error":self.error})
+                json!({"process_id":process::id(),"executable":std::env::current_exe()?,"config_path":config_path(&self.options),"config_explicit":self.options.config.is_some(),"carousel_active":self.carousel.is_active(),"session_suspended":self.session_suspended,"paused":self.world.paused,"token":platform::token_capabilities(process::id())?,"uptime_seconds":self.started.elapsed().as_secs_f64(),"ready_us":self.ready_us,"revision":self.world.revision,"managed_windows":self.world.windows.len(),"resources":runtime::resource_stats()?,"surface_pixel_bytes":self.surfaces.as_ref().map_or(0, Surfaces::surface_pixel_bytes),"renderer":self.surfaces.as_ref().map(Surfaces::diagnostics),"hooks":hooks::stats(),"key_to_placed_us":self.key_latencies,"key_to_dispatch_us":self.dispatch_latencies,"recent_transactions":self.transactions,"last_error":self.error})
             }
             _ => bail!("unknown query {query:?}"),
         })
