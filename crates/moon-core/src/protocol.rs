@@ -24,6 +24,15 @@ pub enum RequestAction {
         expected_focus: Option<crate::ids::WindowId>,
     },
     Subscribe {},
+    Lifecycle {
+        action: LifecycleAction,
+    },
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum LifecycleAction {
+    Restart,
+    Exit,
 }
 fn world() -> String {
     "world".into()
@@ -49,7 +58,8 @@ impl Request {
             Some("query") => &["version", "id", "method", "query"],
             Some("command") => &["version", "id", "method", "commands", "expected_focus"],
             Some("subscribe") => &["version", "id", "method"],
-            _ => return Err("method must be query, command or subscribe".into()),
+            Some("lifecycle") => &["version", "id", "method", "action"],
+            _ => return Err("method must be query, command, subscribe or lifecycle".into()),
         };
         if let Some(key) = object.keys().find(|k| !allowed.contains(&k.as_str())) {
             return Err(format!("unknown request field {key:?}"));
@@ -107,6 +117,13 @@ mod tests {
             Request::parse(r#"{"version":1,"id":1,"method":"command","commands":[]}"#).is_err()
         );
         assert!(Request::parse(r#"{"version":1,"id":1,"method":"query","extra":true}"#).is_err());
+        assert!(
+            Request::parse(r#"{"version":1,"id":1,"method":"lifecycle","action":"restart"}"#)
+                .is_ok()
+        );
+        assert!(
+            Request::parse(r#"{"version":1,"id":1,"method":"lifecycle","action":"exec"}"#).is_err()
+        );
     }
 
     #[test]

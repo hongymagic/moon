@@ -62,7 +62,7 @@ const pending = new Map<
   {
     resolve(value: unknown): void;
     reject(reason: Error): void;
-    timer: ReturnType<typeof setTimeout>;
+    timer?: ReturnType<typeof setTimeout>;
   }
 >();
 window.moonReceive = (reply) => {
@@ -87,17 +87,8 @@ async function request<T>(method: string, params: unknown = {}): Promise<T> {
     );
   return new Promise((resolve, reject) => {
     const id = ++sequence;
-    const timer = setTimeout(() => {
-      pending.delete(id);
-      reject(
-        new Error(
-          "Moon is taking longer than expected. Your unsaved changes are still here. Try again.",
-        ),
-      );
-    }, 20000);
     const message = JSON.stringify({ id, method, params });
     if (new TextEncoder().encode(message).length > 4 * 1024 * 1024) {
-      clearTimeout(timer);
       reject(
         new Error(
           "This change is too large to save in Settings. Reduce the configuration size and try again.",
@@ -105,8 +96,25 @@ async function request<T>(method: string, params: unknown = {}): Promise<T> {
       );
       return;
     }
+    // A save may have reached disk before its reply. Keep the draft locked
+    // until the native host confirms the outcome.
+    const timer =
+      method === "save"
+        ? undefined
+        : setTimeout(() => {
+            pending.delete(id);
+            reject(
+              new Error("Moon is taking longer than expected. Try again."),
+            );
+          }, 20000);
     pending.set(id, { resolve: (value) => resolve(value as T), reject, timer });
-    window.ipc!.postMessage(message);
+    try {
+      window.ipc!.postMessage(message);
+    } catch (error) {
+      pending.delete(id);
+      clearTimeout(timer);
+      reject(error);
+    }
   });
 }
 const object = (value: Json | undefined): Obj =>
@@ -330,43 +338,55 @@ function undoLastChange(): void {
   content.querySelector<HTMLElement>("h1")?.focus();
   toast("Undid the last draft change. Saved settings are unchanged.");
 }
+function clearInvalidFields(path: Path): void {
+  for (const key of invalidFields.keys()) {
+    const invalidPath = JSON.parse(key) as Path;
+    if (path.every((part, index) => part === invalidPath[index]))
+      invalidFields.delete(key);
+  }
+}
 function stage(path: Path, value: Json): void {
   if (JSON.stringify(value) !== JSON.stringify(get(draft, path)))
     rememberDraft();
+  applyDraft(path, value);
+}
+function applyDraft(path: Path, value: Json): void {
+  put(draft, path, value);
+  clearInvalidFields(path);
   queueEdit(path, value);
+  updateFooter();
 }
 function queueEdit(path: Path, value: Json): void {
-  put(draft, path, value);
-  const ancestor = edits.find(
+  const ancestor = edits.findLast(
     (e) => e.path.length < path.length && e.path.every((p, i) => p === path[i]),
   );
-  if (ancestor) {
+  if (ancestor?.op === "set") {
     const parentPath = ancestor.path;
     edits = edits.filter((e) => e !== ancestor);
     queueEdit(parentPath, get(draft, parentPath));
     return;
   }
   edits = edits.filter((e) => !path.every((p, i) => p === e.path[i]));
-  if (
-    JSON.stringify(value) !== JSON.stringify(get(loaded.snapshot.config, path))
-  )
+  const baseline =
+    ancestor?.op === "reset"
+      ? loaded.snapshot.defaults
+      : loaded.snapshot.config;
+  if (JSON.stringify(value) !== JSON.stringify(get(baseline, path)))
     edits.push(
       value === null
         ? { op: "reset", path }
         : { op: "set", path, value: clone(value) },
     );
-  updateFooter();
 }
 function resetField(path: Path): void {
   rememberDraft();
   edits = edits.filter((e) => !path.every((p, i) => p === e.path[i]));
   edits.push({ op: "reset", path });
-  put(draft, path, get(loaded.snapshot.defaults, path));
-  for (const key of invalidFields.keys()) {
-    const invalidPath = JSON.parse(key) as Path;
-    if (path.every((part, index) => part === invalidPath[index]))
-      invalidFields.delete(key);
-  }
+  const fallback = get(loaded.snapshot.defaults, path);
+  if (path[0] === "bindings" && path.length === 2 && fallback === null)
+    delete object(draft.bindings)[path[1]!];
+  else put(draft, path, fallback);
+  clearInvalidFields(path);
   updateFooter();
   renderPage();
 }
@@ -601,7 +621,7 @@ type FieldOptions = {
   type?: "text" | "number" | "checkbox" | "color";
   min?: number;
   max?: number;
-  step?: number;
+  step?: "any";
   choices?: string[];
   placeholder?: string;
 };
@@ -643,7 +663,7 @@ function field(
     }
     if (options.min !== undefined) input.min = String(options.min);
     if (options.max !== undefined) input.max = String(options.max);
-    if (options.step !== undefined) input.step = String(options.step);
+    if (options.step !== undefined) input.step = options.step;
     input.placeholder = options.placeholder ?? "";
     if (input.type === "number") input.required = true;
   }
@@ -673,7 +693,7 @@ function field(
         : options.type === "number"
           ? Number(input.value)
           : input.value;
-    queueEdit(path, v);
+    applyDraft(path, v);
     if (active === "Appearance") updatePreview();
   });
   control.append(input);
@@ -1266,7 +1286,7 @@ function renderAppearance(): void {
     "Text size",
     "Adjust readability without changing display scaling.",
     ["bar", "font-size"],
-    { type: "number", min: 6, max: 72, step: 0.5 },
+    { type: "number", min: 6, max: 72, step: "any" },
   );
   field(
     barCard,
@@ -1280,7 +1300,7 @@ function renderAppearance(): void {
     "Opacity",
     "1 is solid; lower values allow more transparency.",
     ["bar", "opacity"],
-    { type: "number", min: 0, max: 1, step: 0.05 },
+    { type: "number", min: 0, max: 1, step: "any" },
   );
   const borderCard = section("Window borders");
   field(
@@ -1448,13 +1468,14 @@ function renderShortcuts(): void {
         button(
           "Add",
           () => {
-            if (!chord.trim()) throw new Error("Enter a key chord.");
-            if (object(draft.bindings)[chord] !== undefined)
+            const key = chord.trim();
+            if (!key) throw new Error("Enter a key chord.");
+            if (Object.hasOwn(object(draft.bindings), key))
               throw new Error(
                 "That shortcut already exists. Edit its row below.",
               );
             stage(
-              ["bindings", chord.trim()],
+              ["bindings", key],
               commands
                 .split("\n")
                 .map((s) => s.trim())
@@ -1731,7 +1752,7 @@ function jsonEditor(
     rememberDraft();
     try {
       invalidFields.delete(JSON.stringify(path));
-      queueEdit(path, JSON.parse(input.value) as Json);
+      applyDraft(path, JSON.parse(input.value) as Json);
       error.textContent = "";
       input.setCustomValidity("");
       input.removeAttribute("aria-invalid");
@@ -1804,21 +1825,21 @@ function renderAdvanced(): void {
       "Latitude",
       "Enter a coordinate for your location.",
       ["weather", "latitude"],
-      { type: "number", min: -90, max: 90, step: 0.0001 },
+      { type: "number", min: -90, max: 90, step: "any" },
     );
     field(
       weather,
       "Longitude",
       "Used only to request the weather forecast.",
       ["weather", "longitude"],
-      { type: "number", min: -180, max: 180, step: 0.0001 },
+      { type: "number", min: -180, max: 180, step: "any" },
     );
     field(
       weather,
       "Update interval",
       "Seconds between weather requests.",
       ["weather", "interval-seconds"],
-      { type: "number", min: 60, max: 86400 },
+      { type: "number", min: 60, max: 0xffffffff },
     );
   }
   const advanced = section("Structured settings");

@@ -63,11 +63,11 @@ if(!$ReportPath){$ReportPath=Join-Path $env:LOCALAPPDATA 'moon-dev\paint-dialog-
 if((Test-MoonAdministrator) -or [MoonInstallNative]::Integrity() -ne 8192){throw 'Run the Paint dialog scenario from ordinary medium-integrity PowerShell.'}
 if(@(Get-Process -Name mspaint -ErrorAction SilentlyContinue).Count){throw 'Paint is already running; existing documents were not touched.'}
 if(!$ExpectedDaemonId -or !$ExpectedDaemonPath){throw 'Provide the exact running daemon process ID and executable path for this coordinated desktop scenario.'}
-$baselineStats=Invoke-MoonRpc query stats
+$baselineStats=Invoke-MoonRpc query stats -DevelopmentPath $ExpectedDaemonPath
 if($baselineStats.process_id -ne $ExpectedDaemonId -or ![string]::Equals($baselineStats.executable,$ExpectedDaemonPath,[StringComparison]::OrdinalIgnoreCase)){throw 'The running daemon differs from the explicitly coordinated process/path.'}
-$baselineWorld=Invoke-MoonRpc query world
+$baselineWorld=Invoke-MoonRpc query world -DevelopmentPath $ExpectedDaemonPath
 if($baselineWorld.paused -or $baselineWorld.mode -ne 'default' -or $baselineWorld.native_fullscreen){throw 'The existing Moon session must be active, in its default mode and outside fullscreen.'}
-$baselinePlacements=@(Invoke-MoonRpc query windows)
+$baselinePlacements=@(Invoke-MoonRpc query windows -DevelopmentPath $ExpectedDaemonPath)
 $configHashBefore=if(Test-Path -LiteralPath $baselineStats.config_path){(Get-FileHash -LiteralPath $baselineStats.config_path -Algorithm SHA256).Hash}else{$null}
 $baselineFingerprint=Get-MoonLayoutFingerprint -World $baselineWorld -Placements $baselinePlacements
 $baselineIdentities=@($baselineWorld.windows.PSObject.Properties | ForEach-Object {[pscustomobject]@{id=[long]$_.Name;process_id=$_.Value.info.process_id;birth=[MoonApplicationNative]::Birth([uint32]$_.Value.info.process_id)}})
@@ -102,7 +102,7 @@ function Save-Report {
  [IO.File]::WriteAllText($ReportPath,($report|ConvertTo-Json -Depth 50),[Text.UTF8Encoding]::new($false))
 }
 function Assert-Daemon {
- $stats=Invoke-MoonRpc query stats
+ $stats=Invoke-MoonRpc query stats -DevelopmentPath $ExpectedDaemonPath
  if($stats.process_id -ne $baselineStats.process_id -or ![string]::Equals($stats.executable,$baselineStats.executable,[StringComparison]::OrdinalIgnoreCase)){throw 'The running daemon identity changed; no command was sent.'}
  return $stats
 }
@@ -147,7 +147,7 @@ function Cancel-Dialog {
 function Assert-Placement([bool]$Floating) {
  Wait-MoonCondition -Description 'Paint native frame and planned placement agree' -Seconds 5 -Condition {
   Assert-Owned
-  $placements=@(Invoke-MoonRpc query windows | Where-Object {$_.id -eq $owned.id})
+  $placements=@(Invoke-MoonRpc query windows -DevelopmentPath $ExpectedDaemonPath | Where-Object {$_.id -eq $owned.id})
   if($placements.Count -ne 1 -or !$placements[0].visible -or $placements[0].floating -ne $Floating -or [MoonApplicationNative]::Cloaked($owned.id) -ne 0){return $false}
   $r=$placements[0].rect;$f=[MoonElevatedNative]::Frame($owned.id)
   return [Math]::Abs($f.Left-$r.x) -le 1 -and [Math]::Abs($f.Top-$r.y) -le 1 -and [Math]::Abs($f.Right-$f.Left-$r.width) -le 1 -and [Math]::Abs($f.Bottom-$f.Top-$r.height) -le 1
@@ -181,7 +181,7 @@ try {
  Wait-MoonCondition -Description 'Paint to load actual WinUI3 and join Moon' -Seconds 15 -Condition {
   Assert-Owned
   $module=@($actualProcess.Modules | Where-Object {$_.ModuleName -eq 'Microsoft.UI.Xaml.dll' -and $_.FileVersionInfo.FileMajorPart -eq 3})
-  $state=(Invoke-MoonRpc query world).windows.PSObject.Properties[[string]$owned.id]
+  $state=(Invoke-MoonRpc query world -DevelopmentPath $ExpectedDaemonPath).windows.PSObject.Properties[[string]$owned.id]
   if($module.Count -ne 1 -or !$state){return $false}
   $script:originalFloating=[bool]$state.Value.floating;$script:paintWorkspace=$state.Value.workspace
   $report.winui_module=[pscustomobject]@{path=$module[0].FileName;version=$module[0].FileVersionInfo.FileVersion;major=3}
@@ -204,38 +204,38 @@ try {
   $report.dialog=Find-Dialog;$dialogRuntime=($report.dialog.runtime_id -join '-');Save-Report;Capture-Owned 'dialog'
   Record 'Edit colours opens the observed WinUI3 dialog with its scoped spectrum and OK/Cancel controls'
   $null=Assert-Daemon
-  $null=Invoke-MoonRpc command -Commands @('set-floating') -ExpectedFocus $owned.id
+  $null=Invoke-MoonRpc command -DevelopmentPath $ExpectedDaemonPath -Commands @('set-floating') -ExpectedFocus $owned.id
   Assert-Placement $true
   if(!(Find-Dialog)){throw 'Floating the owner lost the active WinUI colour dialog.'}
   Record 'The dialog remains accessible when its owner floats at its exact native frame'
-  $null=Invoke-MoonRpc command -Commands @('workspace '+$emptyWorkspace[0].name) -ExpectedFocus $owned.id;$switched=$true
+  $null=Invoke-MoonRpc command -DevelopmentPath $ExpectedDaemonPath -Commands @('workspace '+$emptyWorkspace[0].name) -ExpectedFocus $owned.id;$switched=$true
   Wait-MoonCondition -Description 'Paint and its dialog to leave the visible workspace' -Seconds 5 -Condition {
-   $placement=@(Invoke-MoonRpc query windows | Where-Object {$_.id -eq $owned.id})
+   $placement=@(Invoke-MoonRpc query windows -DevelopmentPath $ExpectedDaemonPath | Where-Object {$_.id -eq $owned.id})
    $f=[MoonElevatedNative]::Frame($owned.id)
    $placement.Count -eq 1 -and !$placement[0].visible -and ([MoonApplicationNative]::Cloaked($owned.id) -ne 0 -or $f.Left -le -30000)
   }
   $report.hidden_native_windows=@([MoonApplicationNative]::Windows() | Where-Object {$_.ProcessId -eq $owned.process_id -and [MoonPaintDialogNative]::IsOwnedPopup($_.Id,$owned.id)} | ForEach-Object {[pscustomobject]@{id=$_.Id;class=$_.Class;cloaked=[MoonApplicationNative]::Cloaked($_.Id);frame=[MoonElevatedNative]::Frame($_.Id)}})
   if(@($report.hidden_native_windows | Where-Object {$_.cloaked -eq 0 -and $_.frame.Left -gt -30000}).Count){throw 'An owned Paint popup remained uncloaked on the inactive workspace.'}
-  $null=Assert-Daemon;$null=Invoke-MoonRpc command -Commands @('workspace '+$initialWorkspace[0].name);$switched=$false
+  $null=Assert-Daemon;$null=Invoke-MoonRpc command -DevelopmentPath $ExpectedDaemonPath -Commands @('workspace '+$initialWorkspace[0].name);$switched=$false
   Assert-Placement $true
   Wait-MoonCondition -Description 'the same owned dialog to return' -Seconds 5 -Condition {$null -ne (Find-Dialog)}
   if(((Find-Dialog).runtime_id -join '-') -ne $dialogRuntime){throw 'The original WinUI colour dialog accessibility identity did not survive the workspace round trip.'}
   Capture-Owned 'restored-dialog'
   Record 'Workspace hide/show restores the owner and its live WinUI colour dialog'
   Cancel-Dialog;$dialogWasOpened=$false
-  $null=Invoke-MoonRpc command -Commands @('set-tiling') -ExpectedFocus $owned.id
+  $null=Invoke-MoonRpc command -DevelopmentPath $ExpectedDaemonPath -Commands @('set-tiling') -ExpectedFocus $owned.id
   Assert-Placement $false
   Record 'Cancel dismisses the dialog and tiling resumes with exact geometry'
-  if($originalFloating){$null=Invoke-MoonRpc command -Commands @('set-floating') -ExpectedFocus $owned.id;Assert-Placement $true}
+  if($originalFloating){$null=Invoke-MoonRpc command -DevelopmentPath $ExpectedDaemonPath -Commands @('set-floating') -ExpectedFocus $owned.id;Assert-Placement $true}
  }
  if((Get-FileHash -LiteralPath $bitmap -Algorithm SHA256).Hash -ne $bitmapHash){throw 'The owned bitmap changed unexpectedly.'}
  Record 'The temporary document bytes remain unchanged'
-} catch {$failure=$_;$report.error=$failure.Exception.Message;if($owned){try{$report.failure_native=@([MoonApplicationNative]::Windows()|Where-Object {$_.ProcessId -eq $owned.process_id}|ForEach-Object {[pscustomobject]@{id=$_.Id;process_id=$_.ProcessId;class=$_.Class;title=$_.Title;owner=[MoonPaintDialogNative]::GetWindow([IntPtr][long]$_.Id,4).ToInt64();enabled=[MoonPaintDialogNative]::IsWindowEnabled([IntPtr][long]$_.Id);frame=[MoonElevatedNative]::Frame($_.Id);cloaked=[MoonApplicationNative]::Cloaked($_.Id)}});$report.failure_world=Invoke-MoonRpc query world;$report.failure_stats=Invoke-MoonRpc query stats}catch{$report.snapshot_error=$_.Exception.Message};try{Capture-Owned 'failure'}catch{$report.failure_screenshot_error=$_.Exception.Message}};Save-Report}
+} catch {$failure=$_;$report.error=$failure.Exception.Message;if($owned){try{$report.failure_native=@([MoonApplicationNative]::Windows()|Where-Object {$_.ProcessId -eq $owned.process_id}|ForEach-Object {[pscustomobject]@{id=$_.Id;process_id=$_.ProcessId;class=$_.Class;title=$_.Title;owner=[MoonPaintDialogNative]::GetWindow([IntPtr][long]$_.Id,4).ToInt64();enabled=[MoonPaintDialogNative]::IsWindowEnabled([IntPtr][long]$_.Id);frame=[MoonElevatedNative]::Frame($_.Id);cloaked=[MoonApplicationNative]::Cloaked($_.Id)}});$report.failure_world=Invoke-MoonRpc query world -DevelopmentPath $ExpectedDaemonPath;$report.failure_stats=Invoke-MoonRpc query stats -DevelopmentPath $ExpectedDaemonPath}catch{$report.snapshot_error=$_.Exception.Message};try{Capture-Owned 'failure'}catch{$report.failure_screenshot_error=$_.Exception.Message}};Save-Report}
 finally {
  if($owned){
   try {
    Assert-Owned
-   if($switched){$null=Assert-Daemon;$null=Invoke-MoonRpc command -Commands @('workspace '+$initialWorkspace[0].name);$switched=$false;Start-Sleep -Milliseconds 300}
+   if($switched){$null=Assert-Daemon;$null=Invoke-MoonRpc command -DevelopmentPath $ExpectedDaemonPath -Commands @('workspace '+$initialWorkspace[0].name);$switched=$false;Start-Sleep -Milliseconds 300}
    if($dialogWasOpened){try{Cancel-Dialog}catch{$cleanupErrors.Add('Dialog cancellation failed: '+$_.Exception.Message)}}
    $window=@([MoonApplicationNative]::Windows() | Where-Object {$_.Id -eq $owned.id})
    if($window.Count -ne 1 -or !$window[0].Title.Contains($documentName) -or $window[0].Title.StartsWith('*')){throw 'The owned document title changed; Paint was left open without discarding anything.'}
@@ -257,7 +257,7 @@ finally {
   if([MoonElevatedNative]::IsWindow([IntPtr]$previous) -and [MoonApplicationNative]::ProcessId($previous) -eq $previousPid -and [MoonApplicationNative]::Birth($previousPid) -eq $previousBirth){[void][MoonPaintDialogNative]::SetForegroundWindow([IntPtr]$previous)}
   Wait-MoonCondition -Description 'the original live Moon layout after owned Paint cleanup' -Seconds 5 -Condition {
    $null=Assert-Daemon
-   $script:finalFingerprint=Get-MoonLayoutFingerprint
+   $script:finalFingerprint=Get-MoonLayoutFingerprint -DevelopmentPath $ExpectedDaemonPath
    $script:finalFingerprint -eq $baselineFingerprint
   }
   foreach($identity in $baselineIdentities){if([MoonApplicationNative]::ProcessId($identity.id) -ne $identity.process_id -or [MoonApplicationNative]::Birth([uint32]$identity.process_id) -ne $identity.birth){throw 'A preexisting managed window identity changed during validation.'}}

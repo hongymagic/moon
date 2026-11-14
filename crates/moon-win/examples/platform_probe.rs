@@ -232,7 +232,11 @@ mod native {
                 let _ = request.reply.try_send(json!({"ok":true,"echo":request.message}));
             }
         });
-        let response = ipc::request(&json!({"method":"query","text":"hello"}))?;
+        let response = ipc::request_to(
+            &json!({"method":"query","text":"hello"}),
+            Some(std::process::id()),
+            None,
+        )?;
         if response["echo"]["text"] != "hello" {
             return Err("Pipe round trip failed".into());
         }

@@ -62,6 +62,9 @@ pub struct World {
     pub native_fullscreen: Option<(WindowId, MonitorId)>,
     pub mode: String,
     pub revision: u64,
+    // Preserve automatic assignments across a temporarily disconnected display.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    disconnected_workspaces: BTreeMap<String, MonitorId>,
 }
 #[derive(Clone, Debug)]
 pub enum Event {
@@ -110,21 +113,25 @@ pub struct Transition {
 
 impl World {
     pub fn new(config: Config, monitors: Vec<Monitor>) -> Result<Self, String> {
+        Self::with_previous(config, monitors, None)
+    }
+
+    fn with_previous(
+        config: Config,
+        monitors: Vec<Monitor>,
+        previous: Option<&World>,
+    ) -> Result<Self, String> {
         config.validate()?;
         validate_monitors(&monitors)?;
         let active_monitor = monitors[0].id;
+        let assignments = workspace_monitors(&config, &monitors, previous, false)?;
         let mut active = BTreeMap::new();
         let workspaces = config
             .workspaces
             .iter()
             .enumerate()
             .map(|(index, configured)| {
-                let monitor = configured
-                    .monitor
-                    .as_ref()
-                    .and_then(|name| monitors.iter().find(|m| &m.name == name))
-                    .unwrap_or(&monitors[index.min(monitors.len() - 1)])
-                    .id;
+                let monitor = assignments[index];
                 let id = WorkspaceId(index as u32);
                 active.entry(monitor).or_insert(id);
                 Workspace {
@@ -136,9 +143,6 @@ impl World {
                 }
             })
             .collect();
-        if active.len() != monitors.len() {
-            return Err("at least one workspace per connected monitor is required".into());
-        }
         Ok(Self {
             config,
             monitors,
@@ -152,6 +156,9 @@ impl World {
             native_fullscreen: None,
             mode: "default".into(),
             revision: 0,
+            disconnected_workspaces: previous
+                .map(|world| world.disconnected_workspaces.clone())
+                .unwrap_or_default(),
         })
     }
     pub fn current_workspace(&self) -> WorkspaceId {
@@ -169,6 +176,71 @@ impl World {
     }
     pub fn workspace_visible(&self, id: WorkspaceId) -> bool {
         self.active.values().any(|&active| active == id)
+    }
+    fn preserve_visible_workspaces(&mut self, previous: &World) {
+        for (monitor, active) in &mut self.active {
+            if let Some(id) = previous
+                .active
+                .get(monitor)
+                .and_then(|id| previous.workspaces.get(id.index()))
+                .and_then(|old| {
+                    self.workspaces.iter().find(|w| w.name == old.name && w.monitor == *monitor)
+                })
+                .map(|w| w.id)
+            {
+                *active = id;
+            }
+        }
+    }
+    fn update_monitors(&mut self, previous: &World, monitors: Vec<Monitor>) -> Result<(), String> {
+        for workspace in &self.workspaces {
+            if !monitors.iter().any(|monitor| monitor.id == workspace.monitor) {
+                self.disconnected_workspaces
+                    .entry(workspace.name.clone())
+                    .or_insert(workspace.monitor);
+            }
+        }
+        let assignments = workspace_monitors(&self.config, &monitors, Some(self), true)?;
+        self.monitors = monitors;
+        self.disconnected_workspaces.retain(|_, id| !self.monitors.iter().any(|m| m.id == *id));
+        if self.native_fullscreen.is_some_and(|(_, monitor)| self.monitor(monitor).is_none()) {
+            self.native_fullscreen = None;
+        }
+        self.active.clear();
+        for (workspace, monitor) in self.workspaces.iter_mut().zip(assignments) {
+            workspace.monitor = monitor;
+            self.active.entry(monitor).or_insert(workspace.id);
+        }
+        self.preserve_visible_workspaces(previous);
+        // Preserve the workspace in use when the user's display goes away or returns.
+        let workspace = previous.current_workspace();
+        self.active_monitor = self.workspaces[workspace.index()].monitor;
+        if let Some(&displaced) = self.active.get(&self.active_monitor)
+            && displaced != workspace
+            && previous.active.get(&self.active_monitor) == Some(&displaced)
+            && previous.workspaces[workspace.index()].monitor != self.active_monitor
+        {
+            self.recent_workspace = Some(displaced);
+        }
+        self.active.insert(self.active_monitor, workspace);
+        for window in self.windows.values_mut() {
+            let monitor = self.workspaces[window.workspace.index()].monitor;
+            let old_monitor = previous.workspaces[window.workspace.index()].monitor;
+            let from = previous
+                .monitor(window.info.monitor)
+                .or_else(|| previous.monitor(old_monitor))
+                .unwrap()
+                .work_area;
+            let to = self.monitors.iter().find(|m| m.id == monitor).unwrap().work_area;
+            if from != to {
+                window.floating_rect = window.floating_rect.remapped(&from, &to);
+            }
+            window.info.monitor = monitor;
+        }
+        if self.focused.is_some_and(|id| !self.workspace_visible(self.windows[&id].workspace)) {
+            self.set_focus(self.fallback_focus(self.current_workspace()));
+        }
+        Ok(())
     }
     pub fn tiling_area(&self, workspace: WorkspaceId) -> Rect {
         let ws = &self.workspaces[workspace.index()];
@@ -453,18 +525,18 @@ impl World {
         let focused = target.or(self.focused);
         match command {
             Command::Focus(direction) => {
-                if let Some(id) = focused {
+                let neighbor = focused.and_then(|id| {
                     let window = &self.windows[&id];
                     let tree = self.layout_tree(&self.workspaces[window.workspace.index()]);
-                    let neighbor = tree.neighbor(id, direction, &|id| self.windows[&id].last_focus);
-                    if let Some(next) = neighbor {
-                        self.set_focus(Some(next));
-                    } else if let Some(monitor) =
-                        self.neighbor_monitor(self.active_monitor, direction, false)
-                    {
-                        self.active_monitor = monitor;
-                        self.set_focus(self.fallback_focus(self.current_workspace()));
-                    }
+                    tree.neighbor(id, direction, &|id| self.windows[&id].last_focus)
+                });
+                if let Some(next) = neighbor {
+                    self.set_focus(Some(next));
+                } else if let Some(monitor) =
+                    self.neighbor_monitor(self.active_monitor, direction, false)
+                {
+                    self.active_monitor = monitor;
+                    self.set_focus(self.fallback_focus(self.current_workspace()));
                 }
             }
             Command::Move(direction) => {
@@ -486,11 +558,14 @@ impl World {
                         let w = self.windows.get_mut(&id).unwrap();
                         w.floating_rect = w.floating_rect.translated(dx, dy).clamped_within(&area);
                     } else {
-                        let recency: BTreeMap<_, _> =
-                            self.windows.iter().map(|(&id, w)| (id, w.last_focus)).collect();
-                        self.workspaces[workspace.index()]
-                            .tree
-                            .move_window(id, direction, &|id| recency[&id]);
+                        self.workspaces[workspace.index()].tree.move_visible_window(
+                            id,
+                            direction,
+                            &|id| {
+                                let window = &self.windows[&id];
+                                (!window.suspended).then_some(window.last_focus)
+                            },
+                        );
                     }
                 }
             }
@@ -594,6 +669,8 @@ impl World {
                     let to = self.monitor(monitor).unwrap().work_area;
                     self.workspaces[ws.index()].monitor = monitor;
                     self.workspaces[other.index()].monitor = source;
+                    self.disconnected_workspaces.remove(&self.workspaces[ws.index()].name);
+                    self.disconnected_workspaces.remove(&self.workspaces[other.index()].name);
                     self.active.insert(monitor, ws);
                     self.active.insert(source, other);
                     self.active_monitor = monitor;
@@ -755,8 +832,16 @@ pub fn reduce(world: &World, event: Event) -> Result<Transition, String> {
         Event::PlacementRejected(id) => next.set_floating(id, true),
         Event::Command(command) => next.command(command, &mut effects, None)?,
         Event::ConfigChanged(config) => {
-            config.validate()?;
-            let mut rebuilt = World::new(*config, next.monitors.clone())?;
+            let mut rebuilt = World::with_previous(*config, next.monitors.clone(), Some(&next))?;
+            rebuilt.disconnected_workspaces.retain(|name, _| {
+                rebuilt.config.workspaces.iter().find(|w| &w.name == name).is_some_and(|new| {
+                    next.config
+                        .workspaces
+                        .iter()
+                        .find(|w| &w.name == name)
+                        .is_some_and(|old| old.monitor == new.monitor)
+                })
+            });
             rebuilt.revision = next.revision;
             rebuilt.paused = next.paused;
             rebuilt.native_fullscreen = next.native_fullscreen;
@@ -764,16 +849,19 @@ pub fn reduce(world: &World, event: Event) -> Result<Transition, String> {
                 if let Ok(id) = rebuilt.workspace_named(&old.name) {
                     rebuilt.workspaces[id.index()].tree = old.tree.clone();
                     rebuilt.workspaces[id.index()].focused = old.focused;
-                    if rebuilt.config.workspaces[id.index()].monitor.is_none() {
-                        rebuilt.workspaces[id.index()].monitor = old.monitor;
-                    }
                 }
             }
             for (&id, window) in &next.windows {
                 let mut window = window.clone();
-                let old_name = &next.workspaces[window.workspace.index()].name;
-                window.workspace = rebuilt.workspace_named(old_name).unwrap_or(WorkspaceId(0));
-                window.info.monitor = rebuilt.workspaces[window.workspace.index()].monitor;
+                let old = &next.workspaces[window.workspace.index()];
+                window.workspace = rebuilt.workspace_named(&old.name).unwrap_or(WorkspaceId(0));
+                let monitor = rebuilt.workspaces[window.workspace.index()].monitor;
+                if monitor != old.monitor {
+                    let from = next.monitor(old.monitor).unwrap().work_area;
+                    let to = rebuilt.monitor(monitor).unwrap().work_area;
+                    window.floating_rect = window.floating_rect.remapped(&from, &to);
+                }
+                window.info.monitor = monitor;
                 if !window.floating
                     && !rebuilt.workspaces[window.workspace.index()].tree.contains(id)
                 {
@@ -781,22 +869,7 @@ pub fn reduce(world: &World, event: Event) -> Result<Transition, String> {
                 }
                 rebuilt.windows.insert(id, window);
             }
-            rebuilt.active.clear();
-            for monitor in &rebuilt.monitors {
-                let preferred = next
-                    .active
-                    .get(&monitor.id)
-                    .and_then(|old| {
-                        rebuilt.workspace_named(&next.workspaces[old.index()].name).ok()
-                    })
-                    .filter(|id| rebuilt.workspaces[id.index()].monitor == monitor.id);
-                let active = preferred
-                    .or_else(|| {
-                        rebuilt.workspaces.iter().find(|w| w.monitor == monitor.id).map(|w| w.id)
-                    })
-                    .ok_or("configuration leaves a monitor without a workspace")?;
-                rebuilt.active.insert(monitor.id, active);
-            }
+            rebuilt.preserve_visible_workspaces(&next);
             rebuilt.active_monitor = next.active_monitor;
             rebuilt.mode =
                 if next.mode == "default" || rebuilt.config.modes.contains_key(&next.mode) {
@@ -804,68 +877,26 @@ pub fn reduce(world: &World, event: Event) -> Result<Transition, String> {
                 } else {
                     "default".into()
                 };
-            if let Some(id) = next.focused
-                && rebuilt.windows.contains_key(&id)
+            if let Ok(current) =
+                rebuilt.workspace_named(&next.workspaces[next.current_workspace().index()].name)
             {
-                let ws = rebuilt.windows[&id].workspace;
-                rebuilt.switch_workspace(ws);
+                rebuilt.active_monitor = rebuilt.workspaces[current.index()].monitor;
+                rebuilt.active.insert(rebuilt.active_monitor, current);
+            }
+            if let Some(id) = next.focused {
+                let workspace = rebuilt.windows[&id].workspace;
+                rebuilt.active_monitor = rebuilt.workspaces[workspace.index()].monitor;
+                rebuilt.active.insert(rebuilt.active_monitor, workspace);
                 rebuilt.set_focus(Some(id));
             }
+            rebuilt.recent_workspace = next
+                .recent_workspace
+                .and_then(|id| rebuilt.workspace_named(&next.workspaces[id.index()].name).ok());
             next = rebuilt;
         }
         Event::MonitorsChanged(monitors) => {
             validate_monitors(&monitors)?;
-            if monitors.len() > next.workspaces.len() {
-                return Err("more monitors than configured workspaces".into());
-            }
-            let previous = next.monitors.clone();
-            next.monitors = monitors;
-            if next.native_fullscreen.is_some_and(|(_, monitor)| next.monitor(monitor).is_none()) {
-                next.native_fullscreen = None;
-            }
-            let fallback = next.monitors[0].id;
-            next.active.retain(|id, _| next.monitors.iter().any(|m| m.id == *id));
-            for workspace in &mut next.workspaces {
-                if !next.monitors.iter().any(|m| m.id == workspace.monitor) {
-                    workspace.monitor = fallback;
-                }
-            }
-            for monitor in &next.monitors {
-                if !next.active.contains_key(&monitor.id) {
-                    let candidate = next
-                        .workspaces
-                        .iter()
-                        .find(|w| {
-                            w.monitor == monitor.id && !next.active.values().any(|id| *id == w.id)
-                        })
-                        .or_else(|| {
-                            next.workspaces
-                                .iter()
-                                .find(|w| !next.active.values().any(|id| *id == w.id))
-                        })
-                        .ok_or("no workspace available for monitor")?
-                        .id;
-                    next.workspaces[candidate.index()].monitor = monitor.id;
-                    next.active.insert(monitor.id, candidate);
-                }
-            }
-            if next.monitor(next.active_monitor).is_none() {
-                next.active_monitor = fallback;
-            }
-            for window in next.windows.values_mut() {
-                let monitor = next.workspaces[window.workspace.index()].monitor;
-                let to = next.monitors.iter().find(|m| m.id == monitor).unwrap().work_area;
-                let from = previous
-                    .iter()
-                    .find(|m| m.id == window.info.monitor)
-                    .map(|m| m.work_area)
-                    .unwrap_or(to);
-                window.floating_rect = window.floating_rect.remapped(&from, &to);
-                window.info.monitor = monitor;
-            }
-            if next.focused.is_some_and(|id| !next.workspace_visible(next.windows[&id].workspace)) {
-                next.set_focus(next.fallback_focus(next.current_workspace()));
-            }
+            next.update_monitors(world, monitors)?;
         }
     }
     next.check()?;
@@ -879,6 +910,64 @@ pub fn reduce(world: &World, event: Event) -> Result<Transition, String> {
     }
     Ok(Transition { world: next, plan })
 }
+
+fn workspace_monitors(
+    config: &Config,
+    monitors: &[Monitor],
+    previous: Option<&World>,
+    display_change: bool,
+) -> Result<Vec<MonitorId>, String> {
+    let mut assignments = Vec::with_capacity(config.workspaces.len());
+    let mut movable = Vec::with_capacity(config.workspaces.len());
+    let mut counts = BTreeMap::<MonitorId, usize>::new();
+    for (index, configured) in config.workspaces.iter().enumerate() {
+        let explicit = configured
+            .monitor
+            .as_ref()
+            .and_then(|name| monitors.iter().find(|m| &m.name == name))
+            .map(|m| m.id);
+        let old =
+            previous.and_then(|world| world.workspaces.iter().find(|w| w.name == configured.name));
+        let retained = old.map(|w| w.monitor).filter(|id| monitors.iter().any(|m| m.id == *id));
+        let reconnected = previous
+            .and_then(|world| world.disconnected_workspaces.get(&configured.name).copied())
+            .filter(|id| monitors.iter().any(|m| m.id == *id));
+        let pin = explicit.filter(|id| {
+            !display_change
+                || retained.is_none()
+                || previous.is_some_and(|world| world.monitor(*id).is_none())
+        });
+        let fallback =
+            if display_change && old.is_some() { 0 } else { index.min(monitors.len() - 1) };
+        let monitor = pin.or(reconnected).or(retained).unwrap_or(monitors[fallback].id);
+        let was_visible =
+            old.is_some_and(|w| previous.is_some_and(|world| world.workspace_visible(w.id)));
+        assignments.push(monitor);
+        movable.push((
+            explicit.is_none(),
+            was_visible,
+            reconnected.is_some() || retained.is_some(),
+        ));
+        *counts.entry(monitor).or_default() += 1;
+    }
+    for monitor in monitors {
+        if counts.contains_key(&monitor.id) {
+            continue;
+        }
+        let index = movable
+            .iter()
+            .enumerate()
+            .filter(|&(index, (automatic, _, _))| *automatic && counts[&assignments[index]] > 1)
+            .min_by_key(|&(index, (_, was_visible, retained))| (*was_visible, *retained, index))
+            .map(|(index, _)| index)
+            .ok_or("at least one workspace per connected monitor is required")?;
+        *counts.get_mut(&assignments[index]).unwrap() -= 1;
+        assignments[index] = monitor.id;
+        counts.insert(monitor.id, 1);
+    }
+    Ok(assignments)
+}
+
 fn validate_monitors(monitors: &[Monitor]) -> Result<(), String> {
     if monitors.is_empty() {
         return Err("no connected monitors".into());
@@ -961,7 +1050,67 @@ mod tests {
         apply(&mut w, Event::MonitorsChanged(vec![monitor(1, 0)]));
         w.check().unwrap();
         assert_eq!(w.windows.len(), 1);
-        assert!(w.plan().placements.iter().all(|p| p.rect.x < 1920));
+        assert!(w.plan().placements.iter().all(|p| p.visible && p.rect.x < 1920));
+        assert_eq!(w.focused, Some(WindowId(1)));
+        apply(&mut w, Event::MonitorsChanged(vec![monitor(1, 0), monitor(2, 1920)]));
+        assert!(w.plan().placements.iter().all(|p| p.visible && p.rect.x >= 1920));
+    }
+    #[test]
+    fn a_configured_workspace_returns_to_its_monitor_when_it_reconnects() {
+        let mut config = Config::default();
+        config.workspaces[0].monitor = Some("monitor-2".into());
+        let displays = vec![monitor(1, 0), monitor(2, 1920)];
+        let mut w = World::new(config, displays.clone()).unwrap();
+        assert_eq!(w.workspaces[0].monitor, MonitorId(2));
+        assert_eq!(w.workspaces[1].monitor, MonitorId(1));
+        let mut on_second = window(1);
+        on_second.monitor = MonitorId(2);
+        apply(&mut w, Event::WindowAdded(on_second));
+        apply(&mut w, Event::MonitorsChanged(vec![monitor(1, 0)]));
+        assert_eq!(w.workspaces[0].monitor, MonitorId(1));
+        assert!(w.plan().placements[0].visible);
+        apply(&mut w, Event::MonitorsChanged(displays));
+        assert_eq!(w.workspaces[0].monitor, MonitorId(2));
+        assert_eq!(w.focused, Some(WindowId(1)));
+        assert!(w.plan().placements[0].visible);
+        assert!(w.plan().placements[0].rect.x >= 1920);
+    }
+    #[test]
+    fn directional_focus_returns_from_an_empty_monitor() {
+        let mut w = World::new(Config::default(), vec![monitor(1, 0), monitor(2, 1920)]).unwrap();
+        apply(&mut w, Event::WindowAdded(window(1)));
+        apply(&mut w, Event::Command(Command::Focus(Direction::Right)));
+        assert_eq!(w.active_monitor, MonitorId(2));
+        assert_eq!(w.focused, None);
+        apply(&mut w, Event::Command(Command::Focus(Direction::Left)));
+        assert_eq!(w.active_monitor, MonitorId(1));
+        assert_eq!(w.focused, Some(WindowId(1)));
+    }
+    #[test]
+    fn directional_move_crosses_a_suspended_tile_in_one_command() {
+        let mut w = world();
+        for id in 1..=3 {
+            apply(&mut w, Event::WindowAdded(window(id)));
+        }
+        apply(&mut w, Event::WindowSuspended { id: WindowId(2), suspended: true });
+        apply(&mut w, Event::WindowFocused(WindowId(1)));
+        assert!(w.plan().placements[0].rect.x < w.plan().placements[1].rect.x);
+        apply(&mut w, Event::Command(Command::Move(Direction::Right)));
+        let placements = w.plan().placements;
+        assert_eq!(placements.len(), 2);
+        assert!(placements[0].rect.x > placements[1].rect.x);
+        assert_eq!(w.workspaces[0].tree.windows(), [WindowId(3), WindowId(2), WindowId(1)]);
+    }
+    #[test]
+    fn reload_retains_recent_workspace_by_name_when_order_changes() {
+        let mut w = world();
+        apply(&mut w, Event::Command(Command::Workspace("2".into())));
+        let mut config = w.config.clone();
+        config.workspaces.swap(0, 2);
+        apply(&mut w, Event::ConfigChanged(Box::new(config)));
+        assert_eq!(w.workspaces[w.current_workspace().index()].name, "2");
+        apply(&mut w, Event::Command(Command::RecentWorkspace));
+        assert_eq!(w.workspaces[w.current_workspace().index()].name, "1");
     }
     #[test]
     fn reload_removes_workspace_without_losing_windows() {

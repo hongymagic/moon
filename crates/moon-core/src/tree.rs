@@ -108,8 +108,8 @@ impl Tree {
         if self.contains(window) {
             return;
         }
-        let leaf = self.new_leaf(window);
         let anchor = near.and_then(|near| self.leaves.get(&near).copied());
+        let leaf = self.new_leaf(window);
         let Some(anchor) = anchor else {
             let position = self.children(self.root).len();
             self.attach(self.root, position, leaf);
@@ -241,21 +241,38 @@ impl Tree {
         direction: Direction,
         recency: &dyn Fn(WindowId) -> u64,
     ) -> bool {
+        self.move_visible_window(window, direction, &|id| Some(recency(id)))
+    }
+
+    /// Move past suspended siblings without removing their slots from the tree.
+    pub(crate) fn move_visible_window(
+        &mut self,
+        window: WindowId,
+        direction: Direction,
+        recency: &dyn Fn(WindowId) -> Option<u64>,
+    ) -> bool {
         let Some(&leaf) = self.leaves.get(&window) else {
             return false;
         };
+        if !self.leaves.keys().any(|&id| id != window && recency(id).is_some()) {
+            return false;
+        }
         let axis = direction.axis();
         let forward = direction.is_forward();
         let parent = self.parent_of(leaf);
 
         if self.axis(parent) == axis {
-            if let Some(sibling) = self.sibling(leaf, forward) {
+            let mut following = self.sibling(leaf, forward);
+            while let Some(sibling) = following {
+                following = self.sibling(sibling, forward);
+                let Some((anchor, _)) = self.recent_visible_leaf(sibling, recency) else {
+                    continue;
+                };
                 if self.is_leaf(sibling) {
                     let index = self.index_in_parent(leaf);
                     let other = self.index_in_parent(sibling);
                     self.children_mut(parent).swap(index, other);
                 } else {
-                    let anchor = self.most_recent_leaf(sibling, recency);
                     let anchor_child = self.child_containing(sibling, anchor);
                     self.detach(leaf);
                     let position = self.index_in_parent(anchor_child) + 1;
@@ -855,17 +872,25 @@ impl Tree {
     }
 
     fn most_recent_leaf(&self, id: NodeId, recency: &dyn Fn(WindowId) -> u64) -> NodeId {
+        self.recent_visible_leaf(id, &|window| Some(recency(window)))
+            .expect("a live subtree has a leaf")
+            .0
+    }
+
+    fn recent_visible_leaf(
+        &self,
+        id: NodeId,
+        recency: &dyn Fn(WindowId) -> Option<u64>,
+    ) -> Option<(NodeId, u64)> {
         match &self.node(id).kind {
-            Kind::Leaf { .. } => id,
+            Kind::Leaf { window, .. } => recency(*window).map(|order| (id, order)),
             Kind::Split { children, .. } => {
-                let mut best = self.most_recent_leaf(children[0], recency);
-                for &child in &children[1..] {
-                    let candidate = self.most_recent_leaf(child, recency);
-                    if recency(self.window_of(candidate)) > recency(self.window_of(best)) {
-                        best = candidate;
-                    }
-                }
-                best
+                // max_by_key keeps the last tie, so visit in reverse to keep layout order.
+                children
+                    .iter()
+                    .rev()
+                    .filter_map(|&child| self.recent_visible_leaf(child, recency))
+                    .max_by_key(|&(_, order)| order)
             }
         }
     }

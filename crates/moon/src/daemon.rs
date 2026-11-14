@@ -171,7 +171,7 @@ pub fn background(options: Options) -> Result<()> {
         if let Some(status) = child.try_wait()? {
             bail!("background startup failed ({status}); see {}", path.display());
         }
-        if let Ok(reply) = ipc::request(&query)
+        if let Ok(reply) = ipc::request_to(&query, Some(child.id()), None)
             && reply["result"]["process_id"].as_u64() == Some(u64::from(child.id()))
         {
             println!("{}", json!({"process_id":child.id(),"ready":true,"log":path}));
@@ -384,7 +384,7 @@ pub fn run(options: Options) -> Result<()> {
                         if daemon.dispatch_latencies.len() > 256 {
                             daemon.dispatch_latencies.pop_front();
                         }
-                        if let Err(error) = daemon.commands(commands.to_vec()) {
+                        if let Err(error) = daemon.run_commands(commands.to_vec(), true) {
                             daemon.report(error);
                         }
                     }
@@ -401,7 +401,8 @@ pub fn run(options: Options) -> Result<()> {
                     }
                     Intake::Platform(PlatformEvent::PointerMoved) => {
                         let point = daemon.hooks.take_pointer();
-                        if daemon.world.config.focus_follows_cursor
+                        if !daemon.session_suspended
+                            && daemon.world.config.focus_follows_cursor
                             && let Some(id) = platform::window_at_point(point)
                             && daemon.world.windows.contains_key(&id)
                             && daemon.world.focused != Some(id)
@@ -538,7 +539,7 @@ impl Daemon {
             if !self.options.resume {
                 plan.focus = foreground.filter(|id| self.world.windows.contains_key(id));
             }
-            self.apply(plan)?;
+            self.apply(plan, false)?;
         }
         Ok(())
     }
@@ -550,7 +551,9 @@ impl Daemon {
         self.error = Some(format!("{error:#}"));
     }
     fn refresh_surfaces(&mut self) -> Result<()> {
-        if let Some(surfaces) = &mut self.surfaces {
+        if !self.session_suspended
+            && let Some(surfaces) = &mut self.surfaces
+        {
             surfaces.update(&self.world, &self.values, self.error.as_deref())?;
         }
         Ok(())
@@ -641,7 +644,7 @@ impl Daemon {
         };
         self.world = transition.world;
         let apply_started = Instant::now();
-        if let Err(error) = self.apply(transition.plan) {
+        if let Err(error) = self.apply(transition.plan, kind == "command") {
             self.carousel.cancel();
             return Err(error);
         }
@@ -657,7 +660,10 @@ impl Daemon {
         {
             platform::cursor_jump(monitor.work_area.center())?;
         }
-        if self.world.mode != previous_mode || self.world.paused != previous_paused {
+        if kind == "config"
+            || self.world.mode != previous_mode
+            || self.world.paused != previous_paused
+        {
             self.hooks.update_bindings(bindings(&self.world))?;
         }
         self.transactions.push_back(json!({"revision":self.world.revision,"event":kind,"elapsed_us":started.elapsed().as_micros(),"reduce_us":reduce_us,"journal_us":journal_us,"apply_us":apply_us,"windows":self.world.windows.len()}));
@@ -773,7 +779,7 @@ impl Daemon {
         }
         transitions
     }
-    fn apply(&mut self, plan: Plan) -> Result<()> {
+    fn apply(&mut self, plan: Plan, require_foreground_for_close: bool) -> Result<()> {
         if !self.session_suspended {
             let live: BTreeSet<_> = plan.placements.iter().map(|p| p.id).collect();
             self.applied.retain(|id, _| live.contains(id));
@@ -831,6 +837,9 @@ impl Daemon {
                 self.error = Some(format!("Focus was refused: {error}"));
             }
             for id in plan.close {
+                if require_foreground_for_close && platform::foreground() != Some(id) {
+                    bail!("The foreground window changed before it could be closed");
+                }
                 if self.owns_native_window(id) {
                     platform::close(id)?;
                 }
@@ -860,6 +869,11 @@ impl Daemon {
         Ok(())
     }
     fn commands(&mut self, commands: Vec<String>) -> Result<()> {
+        self.run_commands(commands, false)
+    }
+
+    fn run_commands(&mut self, commands: Vec<String>, from_keyboard: bool) -> Result<()> {
+        use moon_core::command::Command;
         let mut pending: Option<(world::Transition, Instant)> = None;
         for text in commands {
             if text == "open-config" {
@@ -869,7 +883,11 @@ impl Daemon {
                     if let Some(parent) = path.parent() {
                         fs::create_dir_all(parent)?;
                     }
-                    fs::write(&path, "config-version = 1\n")?;
+                    match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+                        Ok(mut file) => file.write_all(b"config-version = 1\n")?,
+                        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                        Err(error) => return Err(error.into()),
+                    }
                 }
                 runtime::shell_execute("notepad.exe", &format!("\"{}\"", path.display()))?;
                 continue;
@@ -884,7 +902,16 @@ impl Daemon {
                 }
             };
             for command in commands {
-                if matches!(&command, moon_core::command::Command::Resize { .. }) {
+                let needs_foreground = command == Command::Close
+                    || (from_keyboard && keyboard_targets_window(&command));
+                if needs_foreground
+                    && (self.world.focused.is_none()
+                        || self.world.focused != platform::foreground())
+                {
+                    self.flush_resizes(&mut pending)?;
+                    bail!("No managed window is in the foreground");
+                }
+                if matches!(&command, Command::Resize { .. }) {
                     let started =
                         pending.as_ref().map_or_else(Instant::now, |(_, started)| *started);
                     let current = pending.as_ref().map_or(&self.world, |(next, _)| &next.world);
@@ -904,6 +931,10 @@ impl Daemon {
         self.flush_resizes(&mut pending)
     }
     fn reload(&mut self) -> Result<()> {
+        let path = config_path(&self.options);
+        // A manual reload also consumes the file change observed by the watcher.
+        // Capture before reading so a concurrent replacement gets another pass.
+        self.config_modified = modified(&path);
         let mut config = match load_config(&self.options) {
             Ok(config) => config,
             Err(error) => {
@@ -915,8 +946,17 @@ impl Daemon {
             config.bar.enabled = false;
             config.borders.enabled = false;
         }
-        self.commit(Event::ConfigChanged(Box::new(config)), "config")?;
-        self.hooks.update_bindings(bindings(&self.world))?;
+        let started = Instant::now();
+        let transition = match world::reduce(&self.world, Event::ConfigChanged(Box::new(config))) {
+            Ok(transition) => transition,
+            Err(error) => {
+                self.report(
+                    anyhow::Error::msg(error).context(format!("config {}", path.display())),
+                );
+                return Ok(());
+            }
+        };
+        self.commit_transition(transition, "config", started)?;
         self.hooks.set_pointer_tracking(
             self.world.config.focus_follows_cursor && self.options.only.is_none(),
         )?;
@@ -1040,16 +1080,35 @@ impl Daemon {
     fn maintain(&mut self) -> Result<()> {
         self.journal_writer.as_ref().expect("writer exists until shutdown").check()?;
         if self.session_suspended {
-            return Ok(());
+            if !platform::session_interactive().unwrap_or(false) {
+                return Ok(());
+            }
+            self.session_suspended = false;
+            self.carousel.cancel();
+            self.applied.clear();
+            self.reconcile_desktop()?;
+            return self.reapply_without_focus();
         }
+        self.reconcile_desktop()
+    }
+    fn reconcile_desktop(&mut self) -> Result<()> {
         let current = modified(&config_path(&self.options));
-        if current != self.config_modified {
-            self.config_modified = current;
-            self.reload()?;
+        if current != self.config_modified
+            && let Err(error) = self.reload()
+        {
+            self.report(error);
         }
         let monitors = platform::monitors()?;
         if monitors != self.world.monitors {
-            self.commit(Event::MonitorsChanged(monitors), "display")?;
+            let started = Instant::now();
+            let transition = match world::reduce(&self.world, Event::MonitorsChanged(monitors)) {
+                Ok(transition) => transition,
+                Err(error) => {
+                    self.report(anyhow::Error::msg(error));
+                    return Ok(());
+                }
+            };
+            self.commit_transition(transition, "display", started)?;
         }
         self.sync_native_fullscreen()?;
         for id in self.world.windows.keys().copied().collect::<Vec<_>>() {
@@ -1100,6 +1159,12 @@ impl Daemon {
         }
         Ok(())
     }
+    fn reapply_without_focus(&mut self) -> Result<()> {
+        let mut plan = self.world.plan();
+        plan.focus = None;
+        self.apply(plan, false)?;
+        self.refresh_surfaces()
+    }
     fn sync_suspension(&mut self, id: WindowId) -> Result<()> {
         if !self.owns_native_window(id) {
             if self.world.windows.contains_key(&id) {
@@ -1127,7 +1192,11 @@ impl Daemon {
             && self.world.monitor(monitor).is_none()
         {
             // Display and foreground notifications can arrive in either order.
-            self.commit(Event::MonitorsChanged(platform::monitors()?), "display")?;
+            let monitors = platform::monitors()?;
+            if let Err(error) = self.commit(Event::MonitorsChanged(monitors), "display") {
+                self.report(error);
+                return Ok(());
+            }
             if self.world.monitor(monitor).is_none() {
                 return Ok(());
             }
@@ -1172,11 +1241,10 @@ impl Daemon {
                         self.surfaces = Some(Surfaces::new()?);
                     }
                 }
-                self.maintain()?;
-                let mut plan = self.world.plan();
-                plan.focus = None;
-                self.apply(plan)?;
-                self.refresh_surfaces()?;
+                if !self.session_suspended {
+                    self.reconcile_desktop()?;
+                    self.reapply_without_focus()?;
+                }
             }
         }
         Ok(())
@@ -1187,7 +1255,8 @@ impl Daemon {
         let result = (|| -> Result<Value> {
             let parsed = moon_core::protocol::Request::parse(&message.to_string())
                 .map_err(anyhow::Error::msg)?;
-            parsed.check_focus(self.world.focused).map_err(anyhow::Error::msg)?;
+            let focus = self.world.focused.filter(|&id| platform::foreground() == Some(id));
+            parsed.check_focus(focus).map_err(anyhow::Error::msg)?;
             match parsed.action {
                 moon_core::protocol::RequestAction::Command { commands, .. } => {
                     self.commands(commands)?;
@@ -1197,6 +1266,15 @@ impl Daemon {
                 moon_core::protocol::RequestAction::Subscribe {} => {
                     self.subscribers.push((id.clone(), request.reply.clone()));
                     Ok(serde_json::to_value(&self.world)?)
+                }
+                moon_core::protocol::RequestAction::Lifecycle { action } => {
+                    use moon_core::protocol::LifecycleAction;
+                    let command = match action {
+                        LifecycleAction::Restart => moon_core::command::Command::Restart,
+                        LifecycleAction::Exit => moon_core::command::Command::Exit,
+                    };
+                    self.commit(Event::Command(command), "command")?;
+                    Ok(json!({"revision":self.world.revision}))
                 }
             }
         })();
@@ -1222,6 +1300,22 @@ impl Daemon {
     }
 }
 
+fn keyboard_targets_window(command: &moon_core::command::Command) -> bool {
+    use moon_core::command::Command;
+    matches!(
+        command,
+        Command::Move(_)
+            | Command::Resize { .. }
+            | Command::ToggleFullscreen
+            | Command::ToggleFloating
+            | Command::SetFloating
+            | Command::SetTiling
+            | Command::MoveToWorkspace { .. }
+            | Command::MoveToMonitor(_)
+            | Command::Ignore
+    )
+}
+
 fn modified(path: &std::path::Path) -> Option<SystemTime> {
     fs::metadata(path).and_then(|m| m.modified()).ok()
 }
@@ -1245,14 +1339,19 @@ pub fn client(words: &[String]) -> Result<()> {
         "subscribe" => json!({"version":1,"id":1,"method":"subscribe"}),
         _ => json!({"version":1,"id":1,"method":"command","commands":[words.join(" ")]}),
     };
+    let executable = std::env::current_exe()?;
+    let own_path = executable
+        .file_name()
+        .filter(|name| !name.eq_ignore_ascii_case("moon.exe"))
+        .map(|_| executable.as_path());
     if first == "subscribe" {
-        ipc::subscribe(&request, |reply| {
+        ipc::subscribe_to(&request, own_path, |reply| {
             println!("{reply}");
             true
         })?;
     } else {
-        let reply =
-            ipc::request(&request).context("connect to moon; start it first with `moon start`")?;
+        let reply = ipc::request_to(&request, None, own_path)
+            .context("connect to moon; start it first with `moon start`")?;
         if reply.get("ok").and_then(Value::as_bool) != Some(true) {
             bail!("{}", reply.get("error").and_then(Value::as_str).unwrap_or("IPC request failed"));
         }

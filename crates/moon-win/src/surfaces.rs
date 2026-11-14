@@ -391,6 +391,12 @@ struct WindowData {
 }
 
 impl WindowData {
+    fn enqueue(&self, command: String) {
+        if let Ok(mut commands) = self.commands.lock() {
+            commands.push(command);
+        }
+    }
+
     fn press(&mut self, point: Point) {
         self.pressed = self.hit_regions.iter().find(|(rect, _)| rect.contains(point)).cloned();
     }
@@ -413,32 +419,47 @@ unsafe extern "system" fn window_proc(
             let create = &*(lparam.0 as *const CREATESTRUCTW);
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, create.lpCreateParams as isize);
         }
-        let pointer = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WindowData;
+        let pointer = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const RefCell<WindowData>;
         if !pointer.is_null() {
-            let data = &mut *pointer;
-            if message == data.taskbar_created {
-                if data.appbar {
-                    data.appbar_dirty = true;
-                    data.appbar_registered = false;
+            let state = &*pointer;
+            // USER32 and Explorer can synchronously reenter this procedure.
+            // Copy message data out before calling them so nested callbacks can borrow it.
+            let (is_appbar, is_tray) = {
+                let data = state.borrow();
+                (data.appbar, data.tray)
+            };
+            let tray_after_restart = {
+                let mut data = state.borrow_mut();
+                if message == data.taskbar_created {
+                    if is_appbar {
+                        data.appbar_dirty = true;
+                        data.appbar_registered = false;
+                    }
+                    if is_tray {
+                        data.preferences_dirty = true;
+                        Some(tray_info(hwnd, &data))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
                 }
-                if data.tray {
-                    add_tray(hwnd, data);
-                    data.preferences_dirty = true;
-                }
+            };
+            if let Some(icon) = tray_after_restart {
+                add_tray(icon);
             }
-            if message == TRAY_MESSAGE && data.tray {
+            if message == TRAY_MESSAGE && is_tray {
                 let notification = lparam.0 as u32 & 0xffff;
-                if (notification == NIN_SELECT || notification == (NIN_SELECT | NINF_KEY))
-                    && let Ok(mut commands) = data.commands.lock()
-                {
-                    commands.push("settings".into());
+                if notification == NIN_SELECT || notification == (NIN_SELECT | NINF_KEY) {
+                    state.borrow().enqueue("settings".into());
                 }
                 if notification == WM_CONTEXTMENU || notification == WM_RBUTTONUP {
                     let menu = CreatePopupMenu();
                     if let Ok(menu) = menu {
+                        let paused = state.borrow().paused;
                         for (id, label) in [
                             (6, "Settings…"),
-                            (1, if data.paused { "Resume tiling" } else { "Pause tiling" }),
+                            (1, if paused { "Resume tiling" } else { "Pause tiling" }),
                             (2, "Reload configuration"),
                             (3, "Open configuration"),
                             (4, "Keybindings"),
@@ -479,23 +500,22 @@ unsafe extern "system" fn window_proc(
                             6 => Some("settings"),
                             _ => None,
                         };
-                        if let Some(command) = command
-                            && let Ok(mut commands) = data.commands.lock()
-                        {
-                            commands.push(command.into());
+                        if let Some(command) = command {
+                            state.borrow().enqueue(command.into());
                         }
                         let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
                         let _ = DestroyMenu(menu);
                         if selected == 0 {
-                            let _ = Shell_NotifyIconW(NIM_SETFOCUS, &tray_info(hwnd, data));
+                            let icon = tray_info(hwnd, &state.borrow());
+                            let _ = Shell_NotifyIconW(NIM_SETFOCUS, &icon);
                         }
                     }
                 }
                 return LRESULT(0);
             }
-            if message == APPBAR_MESSAGE && data.appbar {
+            if message == APPBAR_MESSAGE && is_appbar {
                 if wparam.0 == ABN_POSCHANGED as usize {
-                    data.appbar_dirty = true;
+                    state.borrow_mut().appbar_dirty = true;
                 }
                 if wparam.0 == ABN_FULLSCREENAPP as usize {
                     let _ = SetWindowPos(
@@ -512,19 +532,23 @@ unsafe extern "system" fn window_proc(
             }
             match message {
                 WM_SETTINGCHANGE | WM_THEMECHANGED | WM_SYSCOLORCHANGE | WM_DPICHANGED => {
+                    let mut data = state.borrow_mut();
                     data.preferences_dirty = true;
                     data.interaction_dirty = true;
                 }
-                WM_MOUSEMOVE if data.appbar => {
+                WM_MOUSEMOVE if is_appbar => {
                     let point = mouse_point(lparam);
-                    let hovered = data
-                        .hit_regions
-                        .iter()
-                        .find(|(rect, _)| rect.contains(point))
-                        .map(|(rect, _)| *rect);
-                    if hovered != data.hovered {
-                        data.hovered = hovered;
-                        data.interaction_dirty = true;
+                    {
+                        let mut data = state.borrow_mut();
+                        let hovered = data
+                            .hit_regions
+                            .iter()
+                            .find(|(rect, _)| rect.contains(point))
+                            .map(|(rect, _)| *rect);
+                        if hovered != data.hovered {
+                            data.hovered = hovered;
+                            data.interaction_dirty = true;
+                        }
                     }
                     let _ = TrackMouseEvent(&mut TRACKMOUSEEVENT {
                         cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
@@ -533,43 +557,71 @@ unsafe extern "system" fn window_proc(
                         ..Default::default()
                     });
                 }
-                WM_MOUSELEAVE if data.appbar => {
+                WM_MOUSELEAVE if is_appbar => {
+                    let mut data = state.borrow_mut();
                     data.hovered = None;
                     data.interaction_dirty = true;
                 }
-                WM_SETCURSOR if data.appbar && data.hovered.is_some() => {
-                    SetCursor(LoadCursorW(None, IDC_HAND).ok());
-                    return LRESULT(1);
+                WM_SETCURSOR if is_appbar => {
+                    let hovered = state.borrow().hovered.is_some();
+                    if hovered {
+                        SetCursor(LoadCursorW(None, IDC_HAND).ok());
+                        return LRESULT(1);
+                    }
                 }
-                WM_LBUTTONDOWN if data.appbar => {
+                WM_LBUTTONDOWN if is_appbar => {
                     let point = mouse_point(lparam);
-                    data.press(point);
-                    if data.pressed.is_some() {
-                        SetCapture(hwnd);
+                    let capture = {
+                        let mut data = state.borrow_mut();
+                        data.press(point);
                         data.interaction_dirty = true;
+                        data.pressed.is_some()
+                    };
+                    if capture {
+                        SetCapture(hwnd);
                     }
                     return LRESULT(0);
                 }
-                WM_CAPTURECHANGED if data.appbar => {
+                WM_CAPTURECHANGED if is_appbar => {
+                    let mut data = state.borrow_mut();
                     data.pressed = None;
                     data.interaction_dirty = true;
                 }
-                WM_NCHITTEST if data.click_through => return LRESULT(HTTRANSPARENT as isize),
+                WM_NCHITTEST if state.borrow().click_through => {
+                    return LRESULT(HTTRANSPARENT as isize);
+                }
+                WM_ACTIVATE | WM_WINDOWPOSCHANGED if is_appbar => {
+                    let registered = state.borrow().appbar_registered;
+                    if registered {
+                        let mut appbar = APPBARDATA {
+                            cbSize: size_of::<APPBARDATA>() as u32,
+                            hWnd: hwnd,
+                            ..Default::default()
+                        };
+                        let notification = if message == WM_ACTIVATE {
+                            ABM_ACTIVATE
+                        } else {
+                            ABM_WINDOWPOSCHANGED
+                        };
+                        SHAppBarMessage(notification, &mut appbar);
+                    }
+                }
                 WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as isize),
                 WM_ERASEBKGND => return LRESULT(1),
                 WM_PAINT => {
                     let _ = ValidateRect(Some(hwnd), None);
                     return LRESULT(0);
                 }
-                WM_LBUTTONUP if data.appbar => {
+                WM_LBUTTONUP if is_appbar => {
                     let point = mouse_point(lparam);
-                    if let Some(command) = data.release(point)
-                        && let Ok(mut commands) = data.commands.lock()
                     {
-                        commands.push(command);
+                        let mut data = state.borrow_mut();
+                        if let Some(command) = data.release(point) {
+                            data.enqueue(command);
+                        }
+                        data.interaction_dirty = true;
                     }
                     let _ = ReleaseCapture();
-                    data.interaction_dirty = true;
                     return LRESULT(0);
                 }
                 WM_CLOSE => return LRESULT(0),
@@ -986,7 +1038,8 @@ fn border_brush(
 
 struct Canvas {
     hwnd: HWND,
-    data: Box<WindowData>,
+    data: Rc<RefCell<WindowData>>,
+    requested_rect: Rect,
     rect: Rect,
     context: ID2D1DeviceContext,
     surface: Option<IDCompositionSurface>,
@@ -1000,7 +1053,7 @@ struct Canvas {
     _target: IDCompositionTarget,
     visual: IDCompositionVisual,
     visible: bool,
-    reservation: Option<windows::Win32::Foundation::RECT>,
+    reservation: Option<(windows::Win32::Foundation::RECT, windows::Win32::Foundation::RECT)>,
     feedback: Option<Feedback>,
     entrance: Option<IDCompositionEffectGroup>,
     tooltip: Option<Tooltips>,
@@ -1076,7 +1129,7 @@ impl Canvas {
             };
             // RegisterClassW returns zero if an earlier surface registered this class.
             RegisterClassW(&class);
-            let mut data = Box::new(WindowData {
+            let data = Rc::new(RefCell::new(WindowData {
                 hit_regions: Vec::new(),
                 commands,
                 click_through: border,
@@ -1087,7 +1140,7 @@ impl Canvas {
                 tray: false,
                 preferences_dirty: true,
                 ..Default::default()
-            });
+            }));
             let ex_style = WS_EX_NOACTIVATE
                 | WS_EX_TOOLWINDOW
                 | WS_EX_NOREDIRECTIONBITMAP
@@ -1104,11 +1157,12 @@ impl Canvas {
                 None,
                 None,
                 Some(instance.into()),
-                Some((&mut *data as *mut WindowData).cast()),
+                Some(Rc::as_ptr(&data).cast()),
             )?;
             if !border {
                 // Explorer must still deliver callbacks when moon has UIAccess.
-                let _ = ChangeWindowMessageFilterEx(hwnd, data.taskbar_created, MSGFLT_ALLOW, None);
+                let taskbar_created = data.borrow().taskbar_created;
+                let _ = ChangeWindowMessageFilterEx(hwnd, taskbar_created, MSGFLT_ALLOW, None);
                 let _ = ChangeWindowMessageFilterEx(hwnd, APPBAR_MESSAGE, MSGFLT_ALLOW, None);
             }
             if border
@@ -1174,6 +1228,7 @@ impl Canvas {
             Ok(Self {
                 hwnd,
                 data,
+                requested_rect: rect,
                 rect,
                 context,
                 surface,
@@ -1193,12 +1248,29 @@ impl Canvas {
         }
     }
 
-    fn position(&mut self, rect: Rect, visible: bool) -> Result<()> {
+    fn position(&mut self, requested: Rect, visible: bool) -> Result<()> {
         unsafe {
+            let (is_appbar, click_through, appbar_dirty) = {
+                let data = self.data.borrow();
+                (data.appbar, data.click_through, data.appbar_dirty)
+            };
+            let rect = if is_appbar {
+                if requested != self.requested_rect || self.visible != visible || appbar_dirty {
+                    self.appbar_position(requested, visible)
+                } else {
+                    self.rect
+                }
+            } else {
+                requested
+            };
+            let resized = self.rect.width != rect.width || self.rect.height != rect.height;
+            if is_appbar && resized {
+                self.surface = None;
+            }
             if self.rect != rect || self.visible != visible {
                 SetWindowPos(
                     self.hwnd,
-                    Some(if self.data.click_through { HWND_BOTTOM } else { HWND_TOPMOST }),
+                    Some(if click_through { HWND_BOTTOM } else { HWND_TOPMOST }),
                     rect.x,
                     rect.y,
                     rect.width,
@@ -1206,38 +1278,69 @@ impl Canvas {
                     SWP_NOACTIVATE | if visible { SWP_SHOWWINDOW } else { SWP_HIDEWINDOW },
                 )?;
             }
-            if self.data.appbar
-                && (self.rect != rect || self.visible != visible || self.data.appbar_dirty)
-            {
-                let mut appbar = APPBARDATA {
-                    cbSize: size_of::<APPBARDATA>() as u32,
-                    hWnd: self.hwnd,
-                    uCallbackMessage: APPBAR_MESSAGE,
-                    uEdge: ABE_TOP,
-                    rc: windows::Win32::Foundation::RECT {
-                        left: rect.x,
-                        top: rect.y,
-                        right: rect.right(),
-                        bottom: rect.y + if visible { rect.height } else { 0 },
-                    },
-                    ..Default::default()
-                };
-                if !self.data.appbar_registered {
-                    self.data.appbar_registered = SHAppBarMessage(ABM_NEW, &mut appbar) != 0;
-                    self.reservation = None;
-                }
-                SHAppBarMessage(ABM_QUERYPOS, &mut appbar);
-                appbar.rc.bottom = appbar.rc.top + if visible { rect.height } else { 0 };
-                if self.reservation != Some(appbar.rc) {
-                    SHAppBarMessage(ABM_SETPOS, &mut appbar);
-                    self.reservation = Some(appbar.rc);
-                }
-                self.data.appbar_dirty = false;
-            }
+            self.requested_rect = requested;
             self.rect = rect;
             self.visible = visible;
             Ok(())
         }
+    }
+
+    fn appbar_position(&mut self, requested: Rect, visible: bool) -> Rect {
+        let registered = {
+            let mut data = self.data.borrow_mut();
+            data.appbar_dirty = false;
+            data.appbar_registered
+        };
+        let mut appbar = APPBARDATA {
+            cbSize: size_of::<APPBARDATA>() as u32,
+            hWnd: self.hwnd,
+            uCallbackMessage: APPBAR_MESSAGE,
+            uEdge: ABE_TOP,
+            rc: windows::Win32::Foundation::RECT {
+                left: requested.x,
+                top: requested.y,
+                right: requested.right(),
+                bottom: requested.y + if visible { requested.height } else { 0 },
+            },
+            ..Default::default()
+        };
+        unsafe {
+            if !registered {
+                self.reservation = None;
+                if !visible {
+                    return requested;
+                }
+                if SHAppBarMessage(ABM_NEW, &mut appbar) == 0 {
+                    self.data.borrow_mut().appbar_dirty = true;
+                    return requested;
+                }
+                self.data.borrow_mut().appbar_registered = true;
+            }
+            if SHAppBarMessage(ABM_QUERYPOS, &mut appbar) == 0 {
+                self.data.borrow_mut().appbar_dirty = true;
+                return self.rect;
+            }
+            appbar.rc.bottom = appbar.rc.top + if visible { requested.height } else { 0 };
+            let proposed = appbar.rc;
+            if let Some((previous, accepted)) = self.reservation
+                && previous == proposed
+            {
+                appbar.rc = accepted;
+            } else {
+                if SHAppBarMessage(ABM_SETPOS, &mut appbar) == 0 {
+                    self.data.borrow_mut().appbar_dirty = true;
+                    return self.rect;
+                }
+                self.reservation = Some((proposed, appbar.rc));
+            }
+        }
+        let rect = appbar.rc;
+        Rect::new(
+            rect.left,
+            rect.top,
+            (rect.right - rect.left).max(1),
+            if visible { (rect.bottom - rect.top).max(1) } else { requested.height },
+        )
     }
 
     fn text(
@@ -1277,6 +1380,16 @@ impl Canvas {
         preferences: &Preferences,
     ) -> Result<()> {
         unsafe {
+            if self.surface.is_none() {
+                let surface = graphics.bar_surfaces.CreateSurface(
+                    self.rect.width.max(1) as u32,
+                    self.rect.height.max(1) as u32,
+                    DXGI_FORMAT_B8G8R8A8_UNORM,
+                    DXGI_ALPHA_MODE_PREMULTIPLIED,
+                )?;
+                self.visual.SetContent(&surface)?;
+                self.surface = Some(surface);
+            }
             let drawing = Drawing::begin(
                 graphics,
                 self.surface.as_ref().expect("bar surface"),
@@ -1285,18 +1398,22 @@ impl Canvas {
             )?;
             self.context.Clear(Some(&parse_color(&bar.background, bar.opacity)));
             let targets = bar_targets(bar);
-            self.data.hit_regions = targets
-                .iter()
-                .filter_map(|target| {
-                    target.command.as_ref().map(|command| (target.rect, command.clone()))
-                })
-                .collect();
+            let hovered = {
+                let mut data = self.data.borrow_mut();
+                data.hit_regions = targets
+                    .iter()
+                    .filter_map(|target| {
+                        target.command.as_ref().map(|command| (target.rect, command.clone()))
+                    })
+                    .collect();
+                data.hovered
+            };
             let scale = GetDpiForWindow(self.hwnd).max(96) as f32 / 96.0;
             for (index, item) in bar.items.iter().enumerate() {
                 let bounds = item.rect.translated(-bar.rect.x, -bar.rect.y);
                 let highlighted = preferences.contrast
                     && item.command.is_some()
-                    && self.data.hovered.is_some_and(|hover| hover.intersects(&bounds));
+                    && hovered.is_some_and(|hover| hover.intersects(&bounds));
                 let background = if highlighted {
                     Some(&preferences.highlight)
                 } else {
@@ -1502,7 +1619,8 @@ impl Drop for Canvas {
     fn drop(&mut self) {
         self.tooltip.take();
         unsafe {
-            if self.data.appbar {
+            let registered = self.data.borrow().appbar_registered;
+            if registered {
                 let mut data = APPBARDATA {
                     cbSize: size_of::<APPBARDATA>() as u32,
                     hWnd: self.hwnd,
@@ -1716,21 +1834,20 @@ impl Surfaces {
         values: &BTreeMap<String, String>,
         error: Option<&str>,
     ) -> Result<()> {
-        if self._tray._data.preferences_dirty
-            || self.bars.values().any(|canvas| canvas.data.preferences_dirty)
+        if self._tray.data.borrow().preferences_dirty
+            || self.bars.values().any(|canvas| canvas.data.borrow().preferences_dirty)
         {
             self.preferences = Preferences::read();
-            self._tray._data.preferences_dirty = false;
-            for canvas in self.bars.values_mut() {
-                canvas.data.preferences_dirty = false;
-                canvas.data.interaction_dirty = true;
+            self._tray.data.borrow_mut().preferences_dirty = false;
+            for canvas in self.bars.values() {
+                let mut data = canvas.data.borrow_mut();
+                data.preferences_dirty = false;
+                data.interaction_dirty = true;
             }
         }
         self._tray.update(world.paused, error.is_some(), self.preferences.contrast)?;
         self.update_native_edges(world, values.get("system.theme").map(String::as_str));
-        let mut scene = scene::derive(world, values, error);
-        self.preferences.apply(&mut scene);
-        match self.render(world, scene.clone()) {
+        match self.render(world, values, error) {
             Ok(()) => Ok(()),
             Err(_) => {
                 // Recreate the entire shared device after device loss. Window drop
@@ -1747,7 +1864,7 @@ impl Surfaces {
                         counters.device_recreation_attempts.saturating_add(1);
                 }
                 self.graphics = Graphics::new(diagnostics)?;
-                self.render(world, scene)
+                self.render(world, values, error)
             }
         }
     }
@@ -1815,15 +1932,38 @@ impl Surfaces {
             }
         }
     }
-    fn render(&mut self, world: &World, scene: Scene) -> Result<()> {
+    fn render(
+        &mut self,
+        world: &World,
+        values: &BTreeMap<String, String>,
+        error: Option<&str>,
+    ) -> Result<()> {
         {
             let mut counters = self.graphics.diagnostics.borrow_mut();
             counters.render_calls = counters.render_calls.saturating_add(1);
         }
+        self.bars.retain(|id, _| world.monitor(*id).is_some());
+        let mut entering = Vec::new();
+        let mut scene =
+            scene::derive_with_bar_bounds(world, values, error, |id, requested, visible| {
+                let canvas =
+                    match self.bars.entry(id) {
+                        std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                        std::collections::btree_map::Entry::Vacant(entry) => entry.insert(
+                            Canvas::new(&self.graphics, requested, false, self.commands.clone())?,
+                        ),
+                    };
+                if visible && !canvas.visible {
+                    entering.push(id);
+                }
+                canvas.position(requested, visible)?;
+                Ok::<_, windows::core::Error>(canvas.rect)
+            })?;
+        self.preferences.apply(&mut scene);
         // Border scenes contain absolute ring rectangles, not monitor bounds.
         // A bounds change can require a new canvas even when those rings match.
         let changed = self.previous.as_ref() != Some(&scene)
-            || self.bars.values().any(|canvas| canvas.data.interaction_dirty)
+            || self.bars.values().any(|canvas| canvas.data.borrow().interaction_dirty)
             || world.monitors.iter().any(|monitor| {
                 scene.borders.iter().any(|border| border.monitor == monitor.id)
                     && self
@@ -1843,53 +1983,41 @@ impl Surfaces {
             // the message loop free immediately after this scene is submitted.
             unsafe { self.graphics.composition.WaitForCommitCompletion()? };
         }
-        self.bars.retain(|id, _| scene.bars.iter().any(|bar| bar.monitor == *id));
         self.borders.retain(|id, _| world.monitors.iter().any(|monitor| monitor.id == *id));
         for bar in &scene.bars {
-            let recreated = self.bars.get(&bar.monitor).is_none_or(|canvas| {
-                canvas.rect.width != bar.rect.width || canvas.rect.height != bar.rect.height
-            });
-            if recreated {
-                self.bars.remove(&bar.monitor);
-            }
-            if !self.bars.contains_key(&bar.monitor) {
-                self.bars.insert(
-                    bar.monitor,
-                    Canvas::new(&self.graphics, bar.rect, false, self.commands.clone())?,
-                );
-            }
             let canvas = self.bars.get_mut(&bar.monitor).expect("inserted canvas");
             canvas.text_layouts.prepare(bar.items.len(), bar.visible);
-            let entering = bar.visible && !canvas.visible;
-            canvas.position(bar.rect, bar.visible)?;
+            let interaction_dirty = canvas.data.borrow().interaction_dirty;
             let same = self
                 .previous
                 .as_ref()
                 .and_then(|previous| previous.bars.iter().find(|old| old.monitor == bar.monitor))
                 .is_some_and(|old| old == bar);
-            if (!same || recreated || (self.preferences.contrast && canvas.data.interaction_dirty))
-                && bar.visible
-            {
+            if (!same || (self.preferences.contrast && interaction_dirty)) && bar.visible {
                 canvas.draw_bar(&self.graphics, bar, &self.preferences)?;
             }
-            if bar.visible && (!same || recreated || canvas.data.interaction_dirty) {
-                if canvas.data.hovered.is_some_and(|hover| {
-                    !canvas.data.hit_regions.iter().any(|(rect, _)| *rect == hover)
-                }) {
-                    canvas.data.hovered = None;
-                }
+            if bar.visible && (!same || interaction_dirty) {
+                let (hovered, pressed) = {
+                    let mut data = canvas.data.borrow_mut();
+                    if data.hovered.is_some_and(|hover| {
+                        !data.hit_regions.iter().any(|(rect, _)| *rect == hover)
+                    }) {
+                        data.hovered = None;
+                    }
+                    (data.hovered, data.pressed.is_some())
+                };
                 if let Some(feedback) = &mut canvas.feedback {
                     feedback.update(
                         &self.graphics,
-                        canvas.data.hovered,
-                        canvas.data.pressed.is_some(),
+                        hovered,
+                        pressed,
                         &bar.background,
                         &self.preferences,
                     )?;
                 }
                 if let Some(entrance) = &canvas.entrance {
                     unsafe {
-                        if entering && self.preferences.animations {
+                        if entering.contains(&bar.monitor) && self.preferences.animations {
                             entrance.SetOpacity(&transition(&self.graphics, 0.88, 1.0, 0.167)?)?;
                         } else if !self.preferences.animations {
                             entrance.SetOpacity2(1.0)?;
@@ -1897,7 +2025,7 @@ impl Surfaces {
                     }
                 }
             }
-            canvas.data.interaction_dirty = false;
+            canvas.data.borrow_mut().interaction_dirty = false;
         }
         for monitor in &world.monitors {
             let rings: Vec<_> =
@@ -1968,7 +2096,7 @@ fn parse_color(text: &str, alpha: f32) -> D2D1_COLOR_F {
 
 struct Tray {
     hwnd: HWND,
-    _data: Box<WindowData>,
+    data: Rc<RefCell<WindowData>>,
     appearance: Option<(u16, u32, bool, bool)>,
 }
 impl Tray {
@@ -1982,7 +2110,7 @@ impl Tray {
                 ..Default::default()
             };
             RegisterClassW(&class);
-            let mut data = Box::new(WindowData {
+            let data = Rc::new(RefCell::new(WindowData {
                 hit_regions: Vec::new(),
                 commands,
                 click_through: false,
@@ -1994,7 +2122,7 @@ impl Tray {
                 preferences_dirty: true,
                 tray_tip: "Moon · Open Settings".into(),
                 ..Default::default()
-            });
+            }));
             let hwnd = CreateWindowExW(
                 WS_EX_TOOLWINDOW,
                 w!("moon.notification"),
@@ -2007,19 +2135,22 @@ impl Tray {
                 None,
                 None,
                 Some(instance.into()),
-                Some((&mut *data as *mut WindowData).cast()),
+                Some(Rc::as_ptr(&data).cast()),
             )?;
-            let _ = ChangeWindowMessageFilterEx(hwnd, data.taskbar_created, MSGFLT_ALLOW, None);
+            let taskbar_created = data.borrow().taskbar_created;
+            let _ = ChangeWindowMessageFilterEx(hwnd, taskbar_created, MSGFLT_ALLOW, None);
             let _ = ChangeWindowMessageFilterEx(hwnd, TRAY_MESSAGE, MSGFLT_ALLOW, None);
-            data.tray_icon = match load_brand_icon(101, GetDpiForWindow(hwnd).max(96)) {
+            let icon = match load_brand_icon(101, GetDpiForWindow(hwnd).max(96)) {
                 Ok(icon) => icon,
                 Err(error) => {
                     let _ = DestroyWindow(hwnd);
                     return Err(error);
                 }
             };
-            add_tray(hwnd, &data);
-            Ok(Self { hwnd, _data: data, appearance: None })
+            data.borrow_mut().tray_icon = icon;
+            let icon = tray_info(hwnd, &data.borrow());
+            add_tray(icon);
+            Ok(Self { hwnd, data, appearance: None })
         }
     }
 }
@@ -2036,21 +2167,24 @@ impl Tray {
             }
             if self.appearance.is_none_or(|old| old.0 != resource || old.1 != dpi) {
                 let icon = load_brand_icon(resource, dpi)?;
-                let old = std::mem::replace(&mut self._data.tray_icon, icon);
+                let old = std::mem::replace(&mut self.data.borrow_mut().tray_icon, icon);
                 if !old.is_invalid() {
                     let _ = DestroyIcon(old);
                 }
             }
-            self._data.paused = paused;
-            self._data.tray_tip = if error {
-                "Moon · Needs attention"
-            } else if paused {
-                "Moon · Tiling paused"
-            } else {
-                "Moon · Open Settings"
-            }
-            .into();
-            let icon = tray_info(self.hwnd, &self._data);
+            let icon = {
+                let mut data = self.data.borrow_mut();
+                data.paused = paused;
+                data.tray_tip = if error {
+                    "Moon · Needs attention"
+                } else if paused {
+                    "Moon · Tiling paused"
+                } else {
+                    "Moon · Open Settings"
+                }
+                .into();
+                tray_info(self.hwnd, &data)
+            };
             let _ = Shell_NotifyIconW(NIM_MODIFY, &icon);
             self.appearance = Some(appearance);
             Ok(())
@@ -2106,15 +2240,15 @@ impl Drop for Tray {
             };
             let _ = Shell_NotifyIconW(NIM_DELETE, &icon);
             let _ = DestroyWindow(self.hwnd);
-            if !self._data.tray_icon.is_invalid() {
-                let _ = DestroyIcon(self._data.tray_icon);
+            let tray_icon = self.data.borrow().tray_icon;
+            if !tray_icon.is_invalid() {
+                let _ = DestroyIcon(tray_icon);
             }
         }
     }
 }
-unsafe fn add_tray(hwnd: HWND, data: &WindowData) {
+unsafe fn add_tray(mut icon: NOTIFYICONDATAW) {
     unsafe {
-        let mut icon = tray_info(hwnd, data);
         let _ = Shell_NotifyIconW(NIM_ADD, &icon);
         icon.Anonymous.uVersion = NOTIFYICON_VERSION_4;
         let _ = Shell_NotifyIconW(NIM_SETVERSION, &icon);
@@ -2426,6 +2560,43 @@ mod tests {
             opacity: 0.6,
             backdrop: "mica".into(),
         }
+    }
+
+    #[test]
+    fn negotiated_appbar_bounds_are_shared_by_layout_and_hit_targets() {
+        let world = World::new(
+            moon_core::config::Config::default(),
+            vec![moon_core::world::Monitor {
+                id: MonitorId(1),
+                name: "Fixture".into(),
+                bounds: Rect::new(-1920, -400, 1920, 1080),
+                work_area: Rect::new(-1920, -400, 1920, 1040),
+                scale: 1.0,
+            }],
+        )
+        .unwrap();
+        let approved = Rect::new(-1810, -360, 1750, 40);
+        let scene = scene::derive_with_bar_bounds(
+            &world,
+            &BTreeMap::new(),
+            None,
+            |id, request, visible| {
+                assert_eq!(id, MonitorId(1));
+                assert_eq!(request, Rect::new(-1920, -400, 1920, 40));
+                assert!(visible);
+                Ok::<_, ()>(approved)
+            },
+        )
+        .unwrap();
+        let bar = &scene.bars[0];
+        assert_eq!(bar.rect, approved);
+        let targets = bar_targets(bar);
+        assert!(!targets.is_empty());
+        let client = Rect::new(0, 0, approved.width, approved.height);
+        assert!(targets.iter().all(|target| {
+            target.rect.intersection_area(&client)
+                == i64::from(target.rect.width) * i64::from(target.rect.height)
+        }));
     }
 
     #[test]

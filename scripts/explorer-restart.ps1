@@ -93,7 +93,7 @@ function Get-WorkAreas($Inventory) {
     @($Inventory.monitors | Sort-Object id | ForEach-Object {[ordered]@{id=$_.id;bounds=$_.bounds;work_area=$_.work_area;scale=$_.scale}}) | ConvertTo-Json -Depth 5 -Compress
 }
 function Test-NativePlacements {
-    $placements=@(Invoke-MoonRpc query windows)
+    $placements=@(Invoke-MoonRpc query windows -DevelopmentPath $MoonPath)
     if ($placements.Count -ne 4) {return $false}
     foreach ($placement in $placements) {
         $frame=[MoonElevatedNative]::Frame([long]$placement.id);$cloak=[MoonApplicationNative]::Cloaked([long]$placement.id)
@@ -135,17 +135,17 @@ try {
     foreach ($id in [MoonElevatedNative]::Windows([uint32]$helper.Id)) {$originals[[string]$id]=[MoonElevatedNative]::Frame($id)}
     $started=(Invoke-MoonNative $MoonPath @('start','--background','--only','testwin','--surfaces','--config',$config) -TimeoutSeconds 20).Output | ConvertFrom-Json
     $daemonId=[int]$started.process_id;$daemonBirth=[MoonInstallNative]::ProcessIdentity([uint32]$daemonId).Birth
-    Wait-MoonCondition -Description 'four owned windows adopted' -Condition {(Invoke-MoonRpc query stats).managed_windows -eq 4 -and (Test-NativePlacements)}
-    Invoke-MoonRpc command -Commands @('move-to-workspace 2','workspace 1') | Out-Null
-    Wait-MoonCondition -Description 'three visible and one hidden owned window' -Condition {(Test-NativePlacements) -and @((Invoke-MoonRpc query windows) | Where-Object {!$_.visible}).Count -eq 1}
+    Wait-MoonCondition -Description 'four owned windows adopted' -Condition {(Invoke-MoonRpc query stats -DevelopmentPath $MoonPath).managed_windows -eq 4 -and (Test-NativePlacements)}
+    Invoke-MoonRpc command -DevelopmentPath $MoonPath -Commands @('move-to-workspace 2','workspace 1') | Out-Null
+    Wait-MoonCondition -Description 'three visible and one hidden owned window' -Condition {(Test-NativePlacements) -and @((Invoke-MoonRpc query windows -DevelopmentPath $MoonPath) | Where-Object {!$_.visible}).Count -eq 1}
     Wait-MoonCondition -Description 'moon tray icon registered' -Condition {$null -ne [MoonExplorerNative]::TrayRect([uint32]$daemonId)}
     $trayBefore=[MoonExplorerNative]::TrayRect([uint32]$daemonId)
-    $stateBefore=Get-MoonLayoutFingerprint
+    $stateBefore=Get-MoonLayoutFingerprint -DevelopmentPath $MoonPath
     $workWithMoon=Get-WorkAreas (Get-Inventory)
     if ($workWithMoon -ceq $workBefore) {throw 'The enabled AppBar did not reserve work area before the restart.'}
     Assert-PreservedApplications
     $checks.Add('Four helpers, hidden membership, exact placements, AppBar reservation and tray exist before restart')
-    [IO.File]::WriteAllText((Join-Path $directory 'before.json'),(@{shell=$desktopBefore;shell_windows=$shellWindows;user_inventory=$inventoryBefore;world=(Invoke-MoonRpc query world);layout=$stateBefore;work_area=$workWithMoon}|ConvertTo-Json -Depth 100),[Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $directory 'before.json'),(@{shell=$desktopBefore;shell_windows=$shellWindows;user_inventory=$inventoryBefore;world=(Invoke-MoonRpc query world -DevelopmentPath $MoonPath);layout=$stateBefore;work_area=$workWithMoon}|ConvertTo-Json -Depth 100),[Text.UTF8Encoding]::new($false))
     $null=Assert-ShellHasNoUserWindows $desktopBefore
     [MoonExplorerNative]::StopVerifiedDesktopShell([uint32]$desktopBefore.process_id,[long]$desktopBefore.birth,$desktopBefore.path)
     $shellStopped=$true
@@ -157,28 +157,28 @@ try {
     }
     $desktopAfter=Get-DesktopShell
     Wait-MoonCondition -Description 'moon layout, native placements and AppBar after Explorer restart' -Seconds 30 -Condition {
-        (Invoke-MoonRpc query stats).process_id -eq $daemonId -and (Get-MoonLayoutFingerprint) -ceq $stateBefore -and (Test-NativePlacements) -and (Get-WorkAreas (Get-Inventory)) -ceq $workWithMoon
+        (Invoke-MoonRpc query stats -DevelopmentPath $MoonPath).process_id -eq $daemonId -and (Get-MoonLayoutFingerprint -DevelopmentPath $MoonPath) -ceq $stateBefore -and (Test-NativePlacements) -and (Get-WorkAreas (Get-Inventory)) -ceq $workWithMoon
     }
     Wait-MoonCondition -Description 'moon tray icon re-added after Explorer restart' -Condition {$null -ne [MoonExplorerNative]::TrayRect([uint32]$daemonId)}
     $trayAfter=[MoonExplorerNative]::TrayRect([uint32]$daemonId)
-    $stateAfter=Get-MoonLayoutFingerprint
+    $stateAfter=Get-MoonLayoutFingerprint -DevelopmentPath $MoonPath
     Assert-PreservedApplications
     if ([MoonInstallNative]::ProcessIdentity([uint32]$daemonId).Birth -ne $daemonBirth) {throw 'The daemon restarted instead of surviving Explorer.'}
     $checks.Add('New Explorer shell identity; original daemon, full semantic layout, exact frames, work area and tray restored')
-    Invoke-MoonRpc command -Commands @('workspace 2') | Out-Null
-    Wait-MoonCondition -Description 'the previously hidden workspace usable after shell restart' -Condition {(Test-NativePlacements) -and [MoonElevatedNative]::GetForegroundWindow().ToInt64() -eq (Invoke-MoonRpc query world).focused}
-    Invoke-MoonRpc command -Commands @('workspace 1') | Out-Null
-    Wait-MoonCondition -Description 'the original workspace and semantic layout restored' -Condition {(Get-MoonLayoutFingerprint) -ceq $stateBefore -and (Test-NativePlacements)}
+    Invoke-MoonRpc command -DevelopmentPath $MoonPath -Commands @('workspace 2') | Out-Null
+    Wait-MoonCondition -Description 'the previously hidden workspace usable after shell restart' -Condition {(Test-NativePlacements) -and [MoonElevatedNative]::GetForegroundWindow().ToInt64() -eq (Invoke-MoonRpc query world -DevelopmentPath $MoonPath).focused}
+    Invoke-MoonRpc command -DevelopmentPath $MoonPath -Commands @('workspace 1') | Out-Null
+    Wait-MoonCondition -Description 'the original workspace and semantic layout restored' -Condition {(Get-MoonLayoutFingerprint -DevelopmentPath $MoonPath) -ceq $stateBefore -and (Test-NativePlacements)}
     $checks.Add('Workspace switching and actual foreground remain usable after restart')
 } catch {
     $failure=$_
     # Capture every failed predicate before cleanup changes the evidence.
     $failureSnapshot=[ordered]@{recorded_at=[DateTime]::UtcNow.ToString('o')}
     if ($daemonId) {
-        try {$failureSnapshot.stats=Invoke-MoonRpc query stats} catch {$failureSnapshot.stats_error=[string]$_}
-        try {$failureSnapshot.world=Invoke-MoonRpc query world} catch {$failureSnapshot.world_error=[string]$_}
+        try {$failureSnapshot.stats=Invoke-MoonRpc query stats -DevelopmentPath $MoonPath} catch {$failureSnapshot.stats_error=[string]$_}
+        try {$failureSnapshot.world=Invoke-MoonRpc query world -DevelopmentPath $MoonPath} catch {$failureSnapshot.world_error=[string]$_}
         try {
-            $failureSnapshot.placements=@(Invoke-MoonRpc query windows)
+            $failureSnapshot.placements=@(Invoke-MoonRpc query windows -DevelopmentPath $MoonPath)
             $failureSnapshot.native=@($failureSnapshot.placements | ForEach-Object {[ordered]@{id=$_.id;frame=[MoonElevatedNative]::Frame([long]$_.id);cloaked=[MoonApplicationNative]::Cloaked([long]$_.id)}})
             $stateAfter=Get-MoonLayoutFingerprint -World $failureSnapshot.world -Placements $failureSnapshot.placements
             $failureSnapshot.layout=$stateAfter
@@ -194,8 +194,8 @@ finally {
     }
     if ($daemonId) {
         try {
-            $running=Get-MoonDaemon
-            if ($running -and $running.process_id -eq $daemonId) {Invoke-MoonRpc command -Commands @('exit') | Out-Null}
+            $running=Get-MoonDaemon -DevelopmentPath $MoonPath
+            if ($running -and $running.process_id -eq $daemonId) {Invoke-MoonRpc command -DevelopmentPath $MoonPath -Commands @('exit') | Out-Null}
             try {Wait-MoonCondition -Description 'owned daemon and journal cleanup' -Seconds 8 -Condition {!(Get-Process -Id $daemonId -ErrorAction SilentlyContinue) -and !(Test-Path -LiteralPath $journal)}}
             catch {
                 if ((Get-Process -Id $daemonId -ErrorAction SilentlyContinue) -and [MoonInstallNative]::ProcessIdentity([uint32]$daemonId).Birth -eq $daemonBirth) {Stop-Process -Id $daemonId -Force}

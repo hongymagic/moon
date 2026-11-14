@@ -54,7 +54,7 @@ The settings frontend uses pinned Bun 1.4.4 and TypeScript 7.0.2. `just settings
 
 ## IPC and recovery
 
-The public API is version 1, newline-delimited JSON over a named pipe restricted to the current logon session. Remote, low-integrity and AppContainer clients are refused. `moon query`, ordinary commands and `moon subscribe` use the same API. No keystrokes are exposed by the protocol or recorded in traces. See [the protocol example](examples/README.md).
+The public API is version 1, newline-delimited JSON over Windows named pipes restricted to the current logon session. Clients verify the server process on a single-instance endpoint before sending requests. Remote, low-integrity and AppContainer clients are refused. `moon query`, ordinary commands and `moon subscribe` use the same API. No keystrokes are exposed by the protocol or recorded in traces. See [the protocol example](examples/README.md).
 
 Before changing a window, moon saves its original native placement, border colour and process identity under `%LOCALAPPDATA%\moon`. The watchdog restores this state when the manager exits unexpectedly. Restart transfers workspace/tree state to the successor. Handle/PID reuse is checked against process creation time before recovery.
 

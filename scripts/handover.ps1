@@ -215,7 +215,7 @@ try {
     if (!(Test-MoonHandoverInstallation $saved $installedState)) {throw 'The installed result belongs to a different setup operation; it was not claimed.'}
     $saved.installation_id=$installedState.install_id
     Write-MoonJsonFile $StatePath $saved
-    $saved.installed_stats=Invoke-MoonRpc query stats
+    $saved.installed_stats=Invoke-MoonRpc query stats -Installed
     $report=Join-Path $directory 'uiaccess-results.json'
     $verification=Invoke-MoonNative $powershell @('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $PSScriptRoot 'verify-uiaccess.ps1'),'-ReportPath',$report) -TimeoutSeconds 60
     $saved.uiaccess_report=$report

@@ -83,7 +83,7 @@ if([MoonInstallNative]::Integrity() -ne 8192 -or [MoonInstallNative]::TokenWord(
 $execution=$manifest.SelectSingleNode("//*[local-name()='requestedExecutionLevel']")
 if(!$execution -or $execution.GetAttribute('uiAccess') -ne 'false' -or $execution.GetAttribute('level') -ne 'asInvoker'){throw 'This visual check requires the ordinary non-UIAccess candidate.'}
 $conflicts=@(Get-Process -Name moon,testwin,glazewm,komorebi,whim,zebar,tacky-borders -ErrorAction SilentlyContinue)
-if($conflicts.Count -or (Get-MoonDaemon)){throw 'Stop existing Moon/testwin and other desktop managers before this isolated check.'}
+if($conflicts.Count -or (Get-MoonDaemon -DevelopmentPath $moon)){throw 'Stop existing Moon/testwin and other desktop managers before this isolated check.'}
 $journal=Join-Path $env:LOCALAPPDATA ('moon\journal-v1-session'+[Diagnostics.Process]::GetCurrentProcess().SessionId+'.json')
 if(Test-Path -LiteralPath $journal){throw 'A previous recovery journal must be restored before this check.'}
 if(!$OutputDirectory){$OutputDirectory=Join-Path $env:LOCALAPPDATA ('moon-dev\render-reuse-'+[guid]::NewGuid().ToString('N'))}
@@ -127,7 +127,7 @@ function Assert-Window([long]$Handle) {
 }
 function Assert-DaemonIdentity {
  Assert-Process $daemon $daemonIdentity
- $stats=Invoke-MoonRpc query stats
+ $stats=Invoke-MoonRpc query stats -DevelopmentPath $moon
  if($stats.process_id -ne $daemon.Id -or ![string]::Equals($stats.executable,$moon,[StringComparison]::OrdinalIgnoreCase) -or
     ![string]::Equals($stats.config_path,$config,[StringComparison]::OrdinalIgnoreCase)){throw 'The IPC endpoint is not the exact owned daemon.'}
  if($stats.token.ui_access -or $stats.token.integrity_rid -ne 8192){throw 'The owned daemon is not ordinary medium integrity.'}
@@ -135,7 +135,7 @@ function Assert-DaemonIdentity {
 }
 function Assert-Daemon {
  $stats=Assert-DaemonIdentity
- $world=Invoke-MoonRpc query world
+ $world=Invoke-MoonRpc query world -DevelopmentPath $moon
  foreach($entry in $world.windows.PSObject.Properties){
   Assert-Window ([long]$entry.Name)
   if($entry.Value.info.process_id -ne $helper.Id){throw 'The isolated daemon admitted another process.'}
@@ -146,19 +146,19 @@ function Assert-Daemon {
 }
 function Invoke-OwnedCommand([string[]]$Commands) {
  $null=Assert-Daemon
- $world=Invoke-MoonRpc query world
+ $world=Invoke-MoonRpc query world -DevelopmentPath $moon
  if($world.focused){Assert-Window ([long]$world.focused)}
- if($world.focused){$null=Invoke-MoonRpc -Method command -Commands $Commands -ExpectedFocus ([long]$world.focused)}
- else{$null=Invoke-MoonRpc -Method command -Commands $Commands}
+ if($world.focused){$null=Invoke-MoonRpc -Method command -DevelopmentPath $moon -Commands $Commands -ExpectedFocus ([long]$world.focused)}
+ else{$null=Invoke-MoonRpc -Method command -DevelopmentPath $moon -Commands $Commands}
 }
 function Read-PlacementEvidence {
  $e=[ordered]@{phase=$phase;checked_at=[DateTime]::UtcNow.ToString('o');expected_count=$expectedPlacementCount;require_foreground=$requireForeground;actual_count=$null;count_matches=$false;world_focused=$null;actual_foreground=[MoonRenderReuseNative]::GetForegroundWindow().ToInt64();foreground_matches=$false;daemon_error=$null;renderer=$null;windows=@();error=$null}
  try{
   $stats=Assert-DaemonIdentity
   $e.daemon_error=$stats.last_error;$e.renderer=$stats.renderer
-  $world=Invoke-MoonRpc query world;$e.world_focused=$world.focused
+  $world=Invoke-MoonRpc query world -DevelopmentPath $moon;$e.world_focused=$world.focused
   $e.foreground_matches=[bool]($world.focused -and $e.actual_foreground -eq [long]$world.focused)
-  $placements=@(Invoke-MoonRpc query windows);$e.actual_count=$placements.Count;$e.count_matches=$placements.Count -eq $expectedPlacementCount
+  $placements=@(Invoke-MoonRpc query windows -DevelopmentPath $moon);$e.actual_count=$placements.Count;$e.count_matches=$placements.Count -eq $expectedPlacementCount
   $rows=[Collections.Generic.List[object]]::new()
   # A failed scope check cannot produce an unbounded dump or expose other apps'
   # titles. Native inspection remains limited to verified fixture HWNDs.
@@ -182,7 +182,7 @@ function Wait-Placement([int]$Count,[bool]$RequireForeground=$true) {
  $script:expectedPlacementCount=$Count;$script:requireForeground=$RequireForeground
  Wait-MoonCondition -Seconds 10 -Description "$Count owned windows with exact native placement" -Condition {
   $null=Assert-Daemon
-  $placements=@(Invoke-MoonRpc query windows)
+  $placements=@(Invoke-MoonRpc query windows -DevelopmentPath $moon)
   if($placements.Count -ne $Count){return $false}
   foreach($p in $placements){
    Assert-Window ([long]$p.id)
@@ -191,16 +191,16 @@ function Wait-Placement([int]$Count,[bool]$RequireForeground=$true) {
    if([Math]::Abs($f.Left-$p.rect.x)-gt 1 -or [Math]::Abs($f.Top-$p.rect.y)-gt 1 -or
       [Math]::Abs($f.Right-$f.Left-$p.rect.width)-gt 1 -or [Math]::Abs($f.Bottom-$f.Top-$p.rect.height)-gt 1){return $false}
   }
-  $world=Invoke-MoonRpc query world
+  $world=Invoke-MoonRpc query world -DevelopmentPath $moon
   return !$RequireForeground -or ($world.focused -and [MoonRenderReuseNative]::GetForegroundWindow().ToInt64() -eq [long]$world.focused)
  }
 }
 function Establish-OwnedFocus {
  $script:phase='establish-owned-focus'
- $world=Invoke-MoonRpc query world
+ $world=Invoke-MoonRpc query world -DevelopmentPath $moon
  if(!$world.focused){throw 'The adopted fixture has no managed focus from which to issue a guarded focus command.'}
  Assert-Window ([long]$world.focused)
- $placements=@(Invoke-MoonRpc query windows)
+ $placements=@(Invoke-MoonRpc query windows -DevelopmentPath $moon)
  $current=@($placements|Where-Object{[long]$_.id -eq [long]$world.focused})
  $other=@($placements|Where-Object{[long]$_.id -ne [long]$world.focused})
  if($current.Count -ne 1 -or $other.Count -ne 1){throw 'Expected exactly two owned placements when establishing focus.'}
@@ -274,9 +274,9 @@ function Capture-State([string]$Name,[int]$Count) {
  # Settle before inspection: any later Moon update may restore HWND_BOTTOM.
  # This is not a timing measurement; each inspection copy is separately guarded.
  Start-Sleep -Milliseconds 250
- $stats=Assert-Daemon;$world=Invoke-MoonRpc query world
+ $stats=Assert-Daemon;$world=Invoke-MoonRpc query world -DevelopmentPath $moon
  if([MoonRenderReuseNative]::GetForegroundWindow().ToInt64() -ne [long]$world.focused){throw 'Foreground left the owned fixture; screenshot capture was refused.'}
- $placements=@(Invoke-MoonRpc query windows)
+ $placements=@(Invoke-MoonRpc query windows -DevelopmentPath $moon)
  $inspected=[Collections.Generic.List[object]]::new()
  $handles=@();$underlays=@()
  if($InspectUnderlay){
@@ -321,7 +321,7 @@ function Stop-OwnedDaemon {
   # Cleanup must remain possible after a renderer failure; only ownership is
   # required here, not successful rendering or surviving helper windows.
   $null=Assert-DaemonIdentity
-  $null=Invoke-MoonRpc -Method command -Commands @('exit')
+  $null=Invoke-MoonRpc -Method command -DevelopmentPath $moon -Commands @('exit')
   if(!$daemon.WaitForExit(5000)){throw 'Owned daemon did not exit normally; no forced termination was used.'}
  }
  Wait-MoonCondition -Seconds 5 -Description 'owned recovery journal removed' -Condition {!(Test-Path -LiteralPath $journal)}
@@ -387,20 +387,20 @@ try {
  Establish-OwnedFocus
  Capture-State '01-initial' 2
  Invoke-OwnedCommand @('resize width +12%','resize height -8%','focus left')
- $oldFocus=[long](Invoke-MoonRpc query world).focused
+ $oldFocus=[long](Invoke-MoonRpc query world -DevelopmentPath $moon).focused
  Invoke-OwnedCommand @('focus right')
- Wait-MoonCondition -Seconds 5 -Description 'focus changed between the two owned windows' -Condition {[long](Invoke-MoonRpc query world).focused -ne $oldFocus}
+ Wait-MoonCondition -Seconds 5 -Description 'focus changed between the two owned windows' -Condition {[long](Invoke-MoonRpc query world -DevelopmentPath $moon).focused -ne $oldFocus}
  Capture-State '02-resize-focus' 2
  Write-Fixture $true;Invoke-OwnedCommand @('reload')
- Wait-MoonCondition -Seconds 5 -Description 'fixture font and gradient reload' -Condition {$c=(Invoke-MoonRpc query world).config;return $c.theme -eq 'light' -and $c.bar.font -eq 'Arial' -and $c.bar.'font-size' -eq 18 -and $c.borders.focused -eq '#25d366' -and $c.borders.'focused-end' -eq '#8e5cff'}
+ Wait-MoonCondition -Seconds 5 -Description 'fixture font and gradient reload' -Condition {$c=(Invoke-MoonRpc query world -DevelopmentPath $moon).config;return $c.theme -eq 'light' -and $c.bar.font -eq 'Arial' -and $c.bar.'font-size' -eq 18 -and $c.borders.focused -eq '#25d366' -and $c.borders.'focused-end' -eq '#8e5cff'}
  Capture-State '03-theme-font' 2
- $closing=[long](Invoke-MoonRpc query world).focused;Assert-Window $closing
+ $closing=[long](Invoke-MoonRpc query world -DevelopmentPath $moon).focused;Assert-Window $closing
  Invoke-OwnedCommand @('close')
  Wait-MoonCondition -Seconds 5 -Description 'the selected owned helper closes' -Condition {![MoonRenderReuseNative]::IsWindow([IntPtr]$closing)}
  $retired[[string]$closing]=$true
  Capture-State '04-slot-removal' 1
  Write-Fixture $false;Invoke-OwnedCommand @('reload')
- Wait-MoonCondition -Seconds 5 -Description 'baseline font and gradient restored' -Condition {$c=(Invoke-MoonRpc query world).config;return $c.theme -eq 'dark' -and $c.bar.font -eq 'Segoe UI' -and $c.bar.'font-size' -eq 13 -and $c.borders.focused -eq '#ff5c35' -and $c.borders.'focused-end' -eq '#ffc247'}
+ Wait-MoonCondition -Seconds 5 -Description 'baseline font and gradient restored' -Condition {$c=(Invoke-MoonRpc query world -DevelopmentPath $moon).config;return $c.theme -eq 'dark' -and $c.bar.font -eq 'Segoe UI' -and $c.bar.'font-size' -eq 13 -and $c.borders.focused -eq '#ff5c35' -and $c.borders.'focused-end' -eq '#ffc247'}
  Capture-State '05-restored-style' 1
  Stop-OwnedDaemon
  Wait-MoonCondition -Seconds 5 -Description 'surviving original frame restored' -Condition {Check-Restoration;return $true}

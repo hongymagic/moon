@@ -1,10 +1,15 @@
 //! Settings persistence; no daemon or UI handles are retained here.
-use moon_core::settings::{self, Edit, ErrorCode, MAX_SETTINGS_BYTES, SettingsError, Snapshot};
+use moon_core::{
+    config::Config,
+    settings::{self, Edit, ErrorCode, MAX_SETTINGS_BYTES, SettingsError, Snapshot},
+};
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, File, OpenOptions, TryLockError},
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
+    thread,
+    time::{Duration, Instant},
 };
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -23,6 +28,7 @@ impl Store {
         &self,
         expected_source: Option<&str>,
         edits: &[Edit],
+        validate: impl FnOnce(&Config) -> Result<(), SettingsError>,
     ) -> Result<Snapshot, SettingsError> {
         let parent = self
             .path
@@ -57,16 +63,40 @@ impl Store {
             .truncate(false)
             .open(PathBuf::from(lock_name))
             .map_err(|e| io_error("open the settings save lock", e))?;
-        lock.lock().map_err(|e| io_error("lock settings for saving", e))?;
+        lock_for_save(&lock, Duration::from_secs(1))?;
         let current = read_source(&path)?;
         let prepared = settings::prepare_update(current.as_deref(), expected_source, edits)?;
         if prepared.changed {
+            validate(&prepared.config)?;
+            let snapshot = Snapshot::load(Some(&prepared.source))?;
             write_atomically(&path, current.as_deref(), &prepared.source)?;
-            Snapshot::load(Some(&prepared.source))
+            Ok(snapshot)
         } else {
             Snapshot::load(current.as_deref())
         }
         // Closing the sidecar handle releases its OS lock, including on errors.
+    }
+}
+
+fn lock_for_save(lock: &File, timeout: Duration) -> Result<(), SettingsError> {
+    let start = Instant::now();
+    loop {
+        match lock.try_lock() {
+            Ok(()) => return Ok(()),
+            Err(TryLockError::WouldBlock) if start.elapsed() < timeout => {
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(TryLockError::WouldBlock) => {
+                return Err(SettingsError::new(
+                    ErrorCode::Io,
+                    "Another Settings window is saving this configuration.",
+                    "Wait for that save to finish and try again.",
+                ));
+            }
+            Err(TryLockError::Error(error)) => {
+                return Err(io_error("lock settings for saving", error));
+            }
+        }
     }
 }
 fn io_error(action: &str, error: std::io::Error) -> SettingsError {
@@ -195,6 +225,13 @@ fn write_atomically(
 mod tests {
     use super::*;
     use moon_core::settings::PathSegment;
+    fn save(
+        store: &Store,
+        source: Option<&str>,
+        edits: &[Edit],
+    ) -> Result<Snapshot, SettingsError> {
+        store.save(source, edits, |_| Ok(()))
+    }
     struct Fixture(PathBuf);
     impl Fixture {
         fn new() -> Self {
@@ -224,9 +261,9 @@ mod tests {
         let fixture = Fixture::new();
         let store = fixture.store();
         assert!(store.load().unwrap().source.is_none());
-        assert!(store.save(None, &[]).unwrap().source.is_none());
+        assert!(save(&store, None, &[]).unwrap().source.is_none());
         assert!(!fixture.path().exists());
-        let saved = store.save(None, &[theme("light")]).unwrap();
+        let saved = save(&store, None, &[theme("light")]).unwrap();
         assert_eq!(saved.config.theme, "light");
         assert_eq!(read_source(&fixture.path()).unwrap(), saved.source);
     }
@@ -237,17 +274,17 @@ mod tests {
         fs::write(fixture.path(), "theme='light' # external\n").unwrap();
         let original = fs::read_to_string(fixture.path()).unwrap();
         assert_eq!(
-            store.save(Some("theme='dark'\n"), &[theme("system")]).unwrap_err().code,
+            save(&store, Some("theme='dark'\n"), &[theme("system")]).unwrap_err().code,
             ErrorCode::Conflict
         );
         assert_eq!(
-            store.save(Some(&original), &[theme("invalid")]).unwrap_err().code,
+            save(&store, Some(&original), &[theme("invalid")]).unwrap_err().code,
             ErrorCode::Validation
         );
         assert_eq!(fs::read_to_string(fixture.path()).unwrap(), original);
         fs::write(fixture.path(), "[bar\n").unwrap();
         assert_eq!(
-            store.save(Some("[bar\n"), &[theme("dark")]).unwrap_err().code,
+            save(&store, Some("[bar\n"), &[theme("dark")]).unwrap_err().code,
             ErrorCode::InvalidConfig
         );
         assert_eq!(fs::read_to_string(fixture.path()).unwrap(), "[bar\n");
@@ -262,7 +299,7 @@ mod tests {
             value: serde_json::json!("x".repeat(MAX_SETTINGS_BYTES)),
         };
         assert_eq!(
-            fixture.store().save(Some(original), &[edit]).unwrap_err().code,
+            save(&fixture.store(), Some(original), &[edit]).unwrap_err().code,
             ErrorCode::Validation
         );
         assert_eq!(fs::read_to_string(fixture.path()).unwrap(), original);
@@ -300,7 +337,7 @@ mod tests {
                 let barrier = barrier.clone();
                 std::thread::spawn(move || {
                     barrier.wait();
-                    store.save(Some(initial), &[theme(value)])
+                    save(&store, Some(initial), &[theme(value)])
                 })
             })
             .collect();
@@ -320,7 +357,34 @@ mod tests {
         let fixture = Fixture::new();
         fs::write(fixture.path(), "theme='dark'\n").unwrap();
         fs::set_permissions(fixture.path(), fs::Permissions::from_mode(0o600)).unwrap();
-        fixture.store().save(Some("theme='dark'\n"), &[theme("light")]).unwrap();
+        save(&fixture.store(), Some("theme='dark'\n"), &[theme("light")]).unwrap();
         assert_eq!(fs::metadata(fixture.path()).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+    #[test]
+    fn failed_runtime_validation_leaves_the_saved_configuration_intact() {
+        let fixture = Fixture::new();
+        let original = "theme='dark'\n";
+        fs::write(fixture.path(), original).unwrap();
+        let error = fixture
+            .store()
+            .save(Some(original), &[theme("light")], |config| {
+                assert_eq!(config.theme, "light");
+                Err(SettingsError::new(ErrorCode::Validation, "Rejected by monitor preflight", ""))
+            })
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Validation);
+        assert_eq!(fs::read_to_string(fixture.path()).unwrap(), original);
+    }
+    #[test]
+    fn waiting_for_a_busy_save_lock_can_end_without_writing() {
+        let fixture = Fixture::new();
+        let lock_path = fixture.0.join("config.toml.moon-settings.lock");
+        let holder = File::create_new(&lock_path).unwrap();
+        holder.lock().unwrap();
+        let waiting = OpenOptions::new().read(true).write(true).open(lock_path).unwrap();
+        let error = lock_for_save(&waiting, Duration::ZERO).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Io);
+        assert_eq!(error.message, "Another Settings window is saving this configuration.");
+        assert!(!fixture.path().exists());
     }
 }

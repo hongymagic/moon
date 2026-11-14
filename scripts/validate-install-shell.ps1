@@ -64,6 +64,19 @@ try {
     Remove-Item -LiteralPath $plan.paths.shortcut
     $checks.Add('Concurrent shortcut creation rejects the stale plan before registry publication')
 
+    $plan=Plan;$state.shell=$plan.ownership
+    Publish-MoonShellPlan $plan $state $root
+    $upgrade=Plan '0.2.0';$publicationStarted=$false
+    $key=$root.OpenSubKey($plan.paths.registry,$true)
+    try {$key.SetValue('DisplayName','Newer registered name')} finally {$key.Dispose()}
+    try {Publish-MoonShellPlan $upgrade $state $root -Started ([ref]$publicationStarted); throw 'Stale plan was accepted.'}
+    catch {if ($publicationStarted -or $_.Exception.Message -notmatch 'changed during setup'){throw}}
+    $snapshot=Read-MoonShellRegistry $root $plan.paths.registry
+    if (($snapshot.values | Where-Object name -eq 'DisplayName').value -ne 'Newer registered name') {throw 'Stale publication changed the newer registration.'}
+    Remove-MoonShellIntegration -State $state -ProgramsDirectory $programs -RegistryRoot $root
+    $state.shell=$null
+    $checks.Add('A stale registry plan does not enter rollback or overwrite the newer registration')
+
     $plan=Plan;$state.shell=$plan.ownership;Publish-MoonShellPlan $plan $state $root
     [IO.File]::WriteAllText($plan.paths.shortcut,'edited owned shortcut')
     Remove-MoonShellIntegration -State $state -ProgramsDirectory $programs -RegistryRoot $root -WarningAction SilentlyContinue

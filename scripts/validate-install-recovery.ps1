@@ -118,6 +118,21 @@ try {
         if ([IO.File]::ReadAllText($published) -ne 'previous setup') {throw 'A locked support file lost its original content.'}
     } finally {$blocked.Dispose()}
     $checks.Add('Actual support publication records rollback ownership before a Windows sharing violation')
+    $pipeName='moon-peer-fixture-'+[guid]::NewGuid().ToString('N')
+    $server=[IO.Pipes.NamedPipeServerStream]::new($pipeName,[IO.Pipes.PipeDirection]::InOut,1,[IO.Pipes.PipeTransmissionMode]::Byte,[IO.Pipes.PipeOptions]::Asynchronous)
+    $client=[IO.Pipes.NamedPipeClientStream]::new('.',$pipeName,[IO.Pipes.PipeDirection]::InOut,[IO.Pipes.PipeOptions]::Asynchronous,[Security.Principal.TokenImpersonationLevel]::Identification)
+    try {
+        $client.Connect(3000);$server.WaitForConnection()
+        $here=[MoonInstallNative]::ProcessIdentity([uint32]$PID)
+        $installed=Join-Path (Get-MoonInstallDirectory) 'moon.exe'
+        $peer=[MoonInstallNative]::VerifyPipeServer($client.SafePipeHandle,'',$null,$here.Path,$installed,$true)
+        if ($peer.ProcessId -ne $PID -or $peer.Birth -ne $here.Birth -or ![MoonInstallNative]::ProcessStillRunning($peer)){throw 'The exact development fixture was rejected.'}
+        $rejected=0
+        try {[void][MoonInstallNative]::VerifyPipeServer($client.SafePipeHandle,$installed,$null,$here.Path,$installed,$true)}catch {$rejected++}
+        try {[void][MoonInstallNative]::VerifyPipeServer($client.SafePipeHandle,'',$null,(Join-Path $temporary 'moon.exe'),$installed,$true)}catch {$rejected++}
+        if($rejected -ne 2){throw 'The unexpected pipe server image was accepted.'}
+    } finally {$client.Dispose();$server.Dispose()}
+    $checks.Add('Connected client handles accept the expected image and reject an unrelated server before sending data')
     $writeJson=${function:Write-MoonJsonFile}
     function Write-MoonJsonFile([string]$Path,$Value) {
         if ($Path -eq $statusPath) {throw [IO.IOException]::new('Injected status publication failure')}
@@ -126,8 +141,8 @@ try {
     function Get-MoonDaemon {if ($script:fixtureDaemon) {$script:fixtureDaemon}}
     function Get-CimInstance {param($ClassName) @()}
     function Invoke-MoonRpc {
-        param($Method,[string[]]$Commands)
-        if ($Method -ne 'command' -or $Commands.Count -ne 1 -or $Commands[0] -ne 'exit') {throw 'Recovery issued an unexpected desktop command.'}
+        param($Method,[string]$LifecycleAction)
+        if ($Method -ne 'lifecycle' -or $LifecycleAction -ne 'exit') {throw 'Recovery issued an unexpected desktop command.'}
         if ([IO.File]::ReadAllText($target) -ne 'new executable') {throw 'The replacement was removed before its daemon restored windows.'}
         $script:fixtureDaemon=$null;$script:fixtureExit=$true
     }
@@ -148,7 +163,7 @@ try {
         [IO.File]::WriteAllText((Join-Path $install 'setup.ps1'),'new setup')
         $previousState=[pscustomobject]@{version=1;fixture='previous metadata'}
         $targetReplaced=$true;$backupCreated=$true;$oldPid=123;$oldProcesses=@();$taskChanged=$false;$pathAdded=$false;$shellStarted=$false;$newCertificate=$null;$oldJournal=$null;$recoveryComplete=$false
-        $script:fixtureDaemon=[pscustomobject]@{process_id=456;executable=$target};$script:fixtureExit=$false
+        $script:fixtureDaemon=[pscustomobject]@{process_id=456;executable=$target;pipe_peer=[MoonInstallNative+ProcessIdentityInfo]::new()};$script:fixtureExit=$false
         $OperationId=$operation
         $original=if($kind -eq 'cancelled'){[OperationCanceledException]::new('Injected cancellation checkpoint')}else{[IO.IOException]::new('Injected support replacement failure')}
         $caught=$null

@@ -282,6 +282,11 @@ but are not overwritten during rollback, since handover never edits them.
 
 ## Upgrades and uninstall
 
+For an upgrade from a release that uses a shared multi-instance IPC pipe, exit
+Moon from its tray menu before opening Setup. Setup requires the new single-instance
+IPC endpoints for a running upgrade. Later releases can transfer their live window
+layout through the normal upgrade flow.
+
 `just install` builds the UIAccess release and invokes `scripts/install.ps1`.
 The installer refuses to replace an unrelated installation or startup task. A
 running installation is restarted into the signed replacement, and its window

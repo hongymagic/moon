@@ -1,5 +1,5 @@
 //! Surfaces are immutable projections of the world and provider values.
-use crate::{geometry::Rect, ids::MonitorId, world::World};
+use crate::{command::workspace_command, geometry::Rect, ids::MonitorId, world::World};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use taffy::prelude::*;
@@ -68,6 +68,19 @@ pub fn template_placeholders(template: &str) -> impl Iterator<Item = &str> {
     template.split('{').skip(1).filter_map(|s| s.split_once('}').map(|(key, _)| key))
 }
 pub fn derive(world: &World, providers: &BTreeMap<String, String>, error: Option<&str>) -> Scene {
+    derive_with_bar_bounds(world, providers, error, |_, rect, _| {
+        Ok::<_, std::convert::Infallible>(rect)
+    })
+    .unwrap_or_else(|never| match never {})
+}
+
+/// Derive the scene using native bar bounds where the platform has negotiated them.
+pub fn derive_with_bar_bounds<E>(
+    world: &World,
+    providers: &BTreeMap<String, String>,
+    error: Option<&str>,
+    mut bar_bounds: impl FnMut(MonitorId, Rect, bool) -> Result<Rect, E>,
+) -> Result<Scene, E> {
     let config = &world.config;
     let plan = world.plan();
     let mut scene = Scene::default();
@@ -90,7 +103,9 @@ pub fn derive(world: &World, providers: &BTreeMap<String, String>, error: Option
             });
         let scale = monitor.scale as f32;
         let height = (config.bar_height_on(&monitor.name) as f32 * scale).round() as i32;
-        let rect = Rect::new(monitor.bounds.x, monitor.bounds.y, monitor.bounds.width, height);
+        let visible = config.bar_enabled_on(&monitor.name) && !fullscreen;
+        let requested = Rect::new(monitor.bounds.x, monitor.bounds.y, monitor.bounds.width, height);
+        let rect = bar_bounds(monitor.id, requested, visible)?;
         let mut values = providers.clone();
         values.insert(
             "title".into(),
@@ -145,7 +160,7 @@ pub fn derive(world: &World, providers: &BTreeMap<String, String>, error: Option
                         } else {
                             widget.background.as_deref().unwrap_or("surface0")
                         })),
-                        command: Some(format!("workspace {}", ws.name)),
+                        command: Some(workspace_command(&ws.name)),
                         font_size: config.bar.font_size * scale,
                     });
                     alignments.push((widget.align.as_str(), width, 0.0, 6.0 * scale));
@@ -248,7 +263,7 @@ pub fn derive(world: &World, providers: &BTreeMap<String, String>, error: Option
         scene.bars.push(BarScene {
             monitor: monitor.id,
             rect,
-            visible: config.bar_enabled_on(&monitor.name) && !fullscreen,
+            visible,
             background: color(&config.bar.background),
             items,
             font: config.bar.font.clone(),
@@ -283,7 +298,7 @@ pub fn derive(world: &World, providers: &BTreeMap<String, String>, error: Option
             }
         }
     }
-    scene
+    Ok(scene)
 }
 fn place_items(
     items: &mut [BarItem],
@@ -296,8 +311,32 @@ fn place_items(
     let mut nodes = Vec::new();
     let padding = (rect.width as f32 * 0.015).round();
     let available = (rect.width as f32 - 2.0 * padding).max(1.0);
+    let alignments_in_order = ["left", "center", "right"];
+    let minimum_widths = alignments_in_order.map(|alignment| {
+        alignments
+            .iter()
+            .filter(|(align, ..)| *align == alignment)
+            .map(|&(_, width, shrink, gap)| {
+                gap + if shrink > 0.0 { 0.0 } else { width.min(24.0 * scale) }
+            })
+            .sum::<f32>()
+    });
+    let nominal_width = available / 3.0;
+    let minimum_total = minimum_widths.iter().sum::<f32>();
+    let compressed = minimum_total > available;
+    let group_widths = if compressed {
+        minimum_widths.map(|width| available * width / minimum_total)
+    } else if minimum_widths.iter().any(|&width| width > nominal_width) {
+        let spare = minimum_widths.map(|width| (nominal_width - width).max(0.0));
+        let spare_total = spare.iter().sum::<f32>();
+        std::array::from_fn(|index| {
+            minimum_widths[index] + (available - minimum_total) * spare[index] / spare_total
+        })
+    } else {
+        [nominal_width; 3]
+    };
     // Three flex groups share the bar; title/media shrink first when space is tight.
-    for alignment in ["left", "center", "right"] {
+    for (group_index, alignment) in alignments_in_order.into_iter().enumerate() {
         let mut group = Vec::new();
         for (index, &(align, width, shrink, gap)) in alignments.iter().enumerate() {
             if align != alignment {
@@ -310,7 +349,17 @@ fn place_items(
                         height: Dimension::from_length(rect.height as f32),
                     },
                     min_size: taffy::geometry::Size {
-                        width: LengthPercentageAuto::from_length(if shrink > 0.0 {
+                        width: LengthPercentageAuto::from_length(if compressed {
+                            if items[index]
+                                .command
+                                .as_ref()
+                                .is_some_and(|c| c.starts_with("workspace "))
+                            {
+                                1.0
+                            } else {
+                                0.0
+                            }
+                        } else if shrink > 0.0 {
                             0.0
                         } else {
                             width.min(24.0 * scale)
@@ -318,7 +367,11 @@ fn place_items(
                         height: LengthPercentageAuto::AUTO,
                     },
                     margin: taffy::geometry::Rect {
-                        right: LengthPercentageAuto::from_length(gap),
+                        right: LengthPercentageAuto::from_length(if compressed {
+                            0.0
+                        } else {
+                            gap
+                        }),
                         left: LengthPercentageAuto::ZERO,
                         top: LengthPercentageAuto::ZERO,
                         bottom: LengthPercentageAuto::ZERO,
@@ -336,11 +389,15 @@ fn place_items(
                     Style {
                         display: Display::Flex,
                         size: taffy::geometry::Size {
-                            width: Dimension::from_length(available / 3.0),
+                            width: Dimension::from_length(group_widths[group_index]),
                             height: Dimension::AUTO,
                         },
                         flex_grow: 0.0,
-                        flex_shrink: 1.0,
+                        flex_shrink: 0.0,
+                        min_size: taffy::geometry::Size {
+                            width: LengthPercentageAuto::ZERO,
+                            height: LengthPercentageAuto::AUTO,
+                        },
                         justify_content: if alignment == "right" {
                             JustifyContent::END
                         } else if alignment == "center" {
@@ -381,11 +438,15 @@ fn place_items(
         let layout = taffy.layout(node).unwrap();
         let parent = taffy.parent(node).unwrap();
         let group = taffy.layout(parent).unwrap();
+        let group_left = (padding + group.location.x).round() as i32;
+        let group_right = (padding + group.location.x + group.size.width).round() as i32;
         let left = (padding + group.location.x + layout.location.x).round() as i32;
-        let width = (layout.size.width.round() as i32).min((rect.width - left).max(0));
+        let right = left.saturating_add(layout.size.width.round() as i32);
+        let left = left.clamp(group_left, group_right).clamp(0, rect.width);
+        let right = right.clamp(left, group_right.max(left)).min(rect.width);
         let height = (28.0 * scale).round().min(rect.height as f32) as i32;
         items[index].rect =
-            Rect::new(rect.x + left, rect.y + (rect.height - height) / 2, width, height);
+            Rect::new(rect.x + left, rect.y + (rect.height - height) / 2, right - left, height);
     }
 }
 #[cfg(test)]
@@ -595,9 +656,22 @@ mod tests {
             ("volume".into(), "Muted".into()),
             ("weather".into(), "Cloudy 28°C".into()),
         ]);
-        for (width, scale) in [(1280, 1.0), (1920, 1.5), (3840, 1.25)] {
+        for (width, scale, workspace_count) in [
+            (800, 1.5, 10),
+            (1280, 1.0, 10),
+            (1280, 1.25, 15),
+            (1920, 1.5, 10),
+            (1920, 1.0, 128),
+            (3840, 1.25, 10),
+        ] {
+            let mut config = Config::default();
+            while config.workspaces.len() < workspace_count {
+                let mut workspace = config.workspaces[0].clone();
+                workspace.name = (config.workspaces.len() + 1).to_string();
+                config.workspaces.push(workspace);
+            }
             let world = World::new(
-                Config::default(),
+                config,
                 vec![Monitor {
                     id: MonitorId(1),
                     name: "secondary".into(),
@@ -610,6 +684,11 @@ mod tests {
             for error in [None, Some("A long runtime error requiring attention")] {
                 let scene = derive(&world, &providers, error);
                 let bar = &scene.bars[0];
+                let workspace_buttons = bar.items.iter().filter(|item| {
+                    !item.rect.is_empty()
+                        && item.command.as_ref().is_some_and(|c| c.starts_with("workspace "))
+                });
+                assert_eq!(workspace_buttons.count(), workspace_count);
                 for (index, item) in bar.items.iter().enumerate() {
                     assert!(item.rect.x >= bar.rect.x && item.rect.right() <= bar.rect.right());
                     assert!(item.rect.y >= bar.rect.y && item.rect.bottom() <= bar.rect.bottom());
@@ -624,6 +703,28 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_multiword_workspace_button_uses_the_same_command_as_the_reducer() {
+        let config = Config::load("workspaces=[{name='1'},{name='Web Browsing'}]").unwrap();
+        let rect = Rect::new(0, 0, 1920, 1080);
+        let world = World::new(
+            config,
+            vec![Monitor {
+                id: MonitorId(1),
+                name: "screen".into(),
+                bounds: rect,
+                work_area: rect,
+                scale: 1.0,
+            }],
+        )
+        .unwrap();
+        let bar = derive(&world, &BTreeMap::new(), None).bars.remove(0);
+        let button = bar.items.iter().find(|item| item.text == "Web Browsing").unwrap();
+        let command = button.command.as_ref().unwrap().parse().unwrap();
+        let switched = reduce(&world, Event::Command(command)).unwrap().world;
+        assert_eq!(switched.workspaces[switched.current_workspace().index()].name, "Web Browsing");
     }
     #[test]
     fn native_fullscreen_suppresses_only_its_monitor_without_changing_manual_state() {

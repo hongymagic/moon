@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const CONFIG_VERSION: u32 = 1;
 pub const MAX_CONFIG_BYTES: usize = 1_048_576;
 pub const DEFAULT_CONFIG: &str = include_str!("default.toml");
+const MAX_ALIAS_VISITS: usize = 4096;
 pub type Bindings = BTreeMap<String, Vec<String>>;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -245,6 +246,16 @@ impl Config {
         })?;
         let mut base: toml::Value =
             toml::from_str(DEFAULT_CONFIG).expect("compiled defaults parse");
+        if let Some(bindings) = overrides.get("bindings").and_then(toml::Value::as_table) {
+            let overridden = binding_chords(bindings.keys()).map_err(ConfigError::from)?;
+            base.get_mut("bindings")
+                .and_then(toml::Value::as_table_mut)
+                .expect("compiled bindings are a table")
+                .retain(|chord, _| {
+                    let key = parse_chord(chord).expect("compiled chord is valid");
+                    !overridden.contains(&key)
+                });
+        }
         merge(&mut base, overrides, "");
         let config: Self = base.try_into().map_err(|e: toml::de::Error| {
             let message = e.to_string();
@@ -320,21 +331,21 @@ impl Config {
         {
             self.color(color)?;
         }
-        for (chord, commands) in &self.bindings {
-            validate_chord(chord)?;
-            self.validate_commands(commands)?;
+        binding_chords(self.bindings.keys())?;
+        for commands in self.bindings.values() {
+            self.validate_commands(commands, false)?;
         }
         for bindings in self.modes.values() {
-            for (chord, commands) in bindings {
-                validate_chord(chord)?;
-                self.validate_commands(commands)?;
+            binding_chords(bindings.keys())?;
+            for commands in bindings.values() {
+                self.validate_commands(commands, false)?;
             }
         }
         for name in self.aliases.keys() {
             self.commands(name)?;
         }
         for commands in [&self.hooks.startup, &self.hooks.shutdown, &self.hooks.reload] {
-            self.validate_commands(commands)?;
+            self.validate_commands(commands, false)?;
         }
         for command in &self.hooks.reload {
             if self.commands(command)?.contains(&Command::Reload) {
@@ -348,7 +359,7 @@ impl Config {
             if rule.matches.is_empty() {
                 return Err("rule needs at least one match".into());
             }
-            self.validate_commands(&rule.commands)?;
+            self.validate_commands(&rule.commands, true)?;
             for matcher in &rule.matches {
                 if matcher.process.is_none() && matcher.class.is_none() && matcher.title.is_none() {
                     return Err("empty rule match would match every window".into());
@@ -389,12 +400,17 @@ impl Config {
         }
         Ok(())
     }
-    fn validate_commands(&self, commands: &[String]) -> Result<(), String> {
+    fn validate_commands(&self, commands: &[String], window_rule: bool) -> Result<(), String> {
         for command in commands {
             for parsed in self.commands(command)? {
                 match parsed {
                     Command::Mode(name) if name != "default" && !self.modes.contains_key(&name) => {
                         return Err(format!("command names unknown mode {name:?}"));
+                    }
+                    Command::Workspace(name) | Command::MoveToWorkspace { workspace: name, .. }
+                        if window_rule && !self.workspaces.iter().any(|w| w.name == name) =>
+                    {
+                        return Err(format!("window rule names unknown workspace {name:?}"));
                     }
                     _ => {}
                 }
@@ -408,16 +424,18 @@ impl Config {
             input: &str,
             active: &mut BTreeSet<String>,
             out: &mut Vec<Command>,
+            remaining: &mut usize,
         ) -> Result<(), String> {
-            if out.len() >= 128 || active.len() >= 16 {
+            if out.len() >= 128 || active.len() >= 16 || *remaining == 0 {
                 return Err("command alias expansion exceeds limit".into());
             }
+            *remaining -= 1;
             if let Some(commands) = config.aliases.get(input) {
                 if !active.insert(input.into()) {
                     return Err(format!("recursive alias {input:?}"));
                 }
                 for command in commands {
-                    expand(config, command, active, out)?;
+                    expand(config, command, active, out, remaining)?;
                 }
                 active.remove(input);
             } else {
@@ -426,7 +444,8 @@ impl Config {
             Ok(())
         }
         let mut out = Vec::new();
-        expand(self, input, &mut BTreeSet::new(), &mut out)?;
+        let mut remaining = MAX_ALIAS_VISITS;
+        expand(self, input, &mut BTreeSet::new(), &mut out, &mut remaining)?;
         Ok(out)
     }
     pub fn gaps_for(&self, workspace: usize, monitor: &str) -> &Gaps {
@@ -519,48 +538,83 @@ fn merge(base: &mut toml::Value, overlay: toml::Value, key: &str) {
         (base, value) => *base = value,
     }
 }
-pub fn validate_chord(chord: &str) -> Result<(), String> {
-    let parts: Vec<_> = chord.split('+').collect();
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct KeyChord {
+    /// Win32 virtual-key code.
+    pub key: u32,
+    /// Alt, Shift, Ctrl, and Win occupy bits 0 through 3, respectively.
+    pub modifiers: u8,
+}
+
+pub fn parse_chord(chord: &str) -> Result<KeyChord, String> {
+    let normalized = chord.to_ascii_lowercase();
+    let parts: Vec<_> = normalized.split('+').map(str::trim).collect();
     let Some((key, modifiers)) = parts.split_last() else {
         return Err("empty key binding".into());
     };
-    let mut seen = BTreeSet::new();
-    for modifier in modifiers {
-        if !["alt", "ctrl", "shift", "win"].contains(modifier) || !seen.insert(modifier) {
+    let mut mask = 0;
+    for &modifier in modifiers {
+        let bit = match modifier {
+            "alt" => 1,
+            "shift" => 2,
+            "ctrl" | "control" => 4,
+            "win" | "super" => 8,
+            _ => 0,
+        };
+        if bit == 0 || mask & bit != 0 {
             return Err(format!("invalid modifier in key binding {chord:?}"));
         }
+        mask |= bit;
     }
-    let known = [
-        "left",
-        "right",
-        "up",
-        "down",
-        "space",
-        "tab",
-        "enter",
-        "escape",
-        "backspace",
-        "delete",
-        "home",
-        "end",
-        "pageup",
-        "pagedown",
-        "oem_minus",
-        "oem_plus",
-        "oem_question",
-        "minus",
-        "equal",
-        "slash",
-    ];
-    let character = key.len() == 1 && key.bytes().all(|c| c.is_ascii_alphanumeric());
-    let function = key
-        .strip_prefix('f')
-        .and_then(|n| n.parse::<u8>().ok())
-        .is_some_and(|n| (1..=24).contains(&n));
-    if !character && !function && !known.contains(key) {
-        return Err(format!("unknown key in binding {chord:?}"));
+    // https://learn.microsoft.com/windows/win32/inputdev/virtual-key-codes
+    let key = match *key {
+        "backspace" => 0x08,
+        "tab" => 0x09,
+        "enter" | "return" => 0x0d,
+        "esc" | "escape" => 0x1b,
+        "space" => 0x20,
+        "pageup" => 0x21,
+        "pagedown" => 0x22,
+        "end" => 0x23,
+        "home" => 0x24,
+        "left" => 0x25,
+        "up" => 0x26,
+        "right" => 0x27,
+        "down" => 0x28,
+        "delete" => 0x2e,
+        ";" => 0xba,
+        "=" | "equal" | "plus" | "oem_plus" => 0xbb,
+        "-" | "minus" | "oem_minus" => 0xbd,
+        "/" | "slash" | "oem_question" => 0xbf,
+        "[" => 0xdb,
+        "]" => 0xdd,
+        name if name.len() == 1 && name.as_bytes()[0].is_ascii_alphanumeric() => {
+            u32::from(name.as_bytes()[0].to_ascii_uppercase())
+        }
+        name => name
+            .strip_prefix('f')
+            .and_then(|n| n.parse::<u32>().ok())
+            .filter(|n| (1..=24).contains(n))
+            .map(|n| 0x70 + n - 1)
+            .ok_or_else(|| format!("unknown key in binding {chord:?}"))?,
+    };
+    Ok(KeyChord { key, modifiers: mask })
+}
+
+pub fn validate_chord(chord: &str) -> Result<(), String> {
+    parse_chord(chord).map(|_| ())
+}
+
+fn binding_chords<'a>(
+    keys: impl Iterator<Item = &'a String>,
+) -> Result<BTreeSet<KeyChord>, String> {
+    let mut chords = BTreeSet::new();
+    for key in keys {
+        if !chords.insert(parse_chord(key)?) {
+            return Err(format!("duplicate key binding {key:?}"));
+        }
     }
-    Ok(())
+    Ok(chords)
 }
 pub fn schema() -> serde_json::Value {
     let mut schema =
@@ -733,6 +787,42 @@ mod tests {
         assert!(
             Config::load("[[rules]]\ncommands=['ignore']\nmatches=[{title={regex='['}}]").is_err()
         );
+    }
+
+    #[test]
+    fn alias_expansion_bounds_fan_out_even_when_no_commands_are_produced() {
+        let mut source = String::from("[aliases]\na00=[]\n");
+        for index in 1..=15 {
+            let child = format!("\"a{:02}\"", index - 1);
+            let children = [(); 16].map(|()| child.as_str()).join(",");
+            source.push_str(&format!("a{index:02}=[{children}]\n"));
+        }
+        let error = Config::load(&source).unwrap_err();
+        assert!(error.message.contains("alias expansion exceeds limit"));
+        assert!(Config::load("[aliases]\nnoop=[]").unwrap().commands("noop").unwrap().is_empty());
+    }
+
+    #[test]
+    fn physical_chords_override_defaults_and_reject_duplicates_in_the_same_table() {
+        assert_eq!(parse_chord("alt+slash"), parse_chord("Alt + OEM_QUESTION"));
+        assert_eq!(parse_chord("shift+Alt+equal"), parse_chord("alt+shift+oem_plus"));
+        let config = Config::load("[bindings]\n'shift+alt+h'=['close']").unwrap();
+        assert_eq!(config.bindings["shift+alt+h"], ["close"]);
+        assert!(!config.bindings.contains_key("alt+shift+h"));
+        for table in ["bindings", "modes.example"] {
+            let error = Config::load(&format!("[{table}]\n'alt+slash'=[]\n'alt+oem_question'=[]"))
+                .unwrap_err();
+            assert!(error.message.contains("duplicate key binding"));
+        }
+    }
+
+    #[test]
+    fn app_rules_validate_workspace_references_through_aliases() {
+        let source = "workspaces=[{name='Web Browsing'}]\n[aliases]\nroute=['move-to-workspace Web Browsing']\n[[rules]]\ncommands=['route']\nmatches=[{process={equals='Browser'}}]";
+        let config = Config::load(source).unwrap();
+        assert_eq!(config.bindings["alt+2"], ["workspace 2"]);
+        let invalid = source.replace("move-to-workspace Web Browsing", "move-to-workspace Missing");
+        assert!(Config::load(&invalid).unwrap_err().message.contains("unknown workspace"));
     }
     #[test]
     fn editor_schema_accepts_partial_root_sections_without_weakening_replaced_items() {

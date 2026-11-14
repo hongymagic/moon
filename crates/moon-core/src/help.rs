@@ -159,6 +159,28 @@ mod tests {
     }
 
     #[test]
+    fn live_help_matches_canonical_overrides_and_preserves_workspace_command_text() {
+        let world = world(Config::load(
+            "workspaces=[{name='Web Browsing'}]\n[bindings]\n'Shift + Alt + H'=['workspace Web Browsing']\n'alt+l'=['noop']\n[aliases]\nnoop=[]\n",
+        ).unwrap());
+        let help = shortcuts(&world, true);
+        let chord = crate::config::parse_chord("alt+shift+h").unwrap();
+        let matches = help
+            .bindings
+            .iter()
+            .filter(|binding| crate::config::parse_chord(&binding.chord).unwrap() == chord)
+            .collect::<Vec<_>>();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].chord, "Shift + Alt + H");
+        assert_eq!(matches[0].commands, ["workspace Web Browsing"]);
+        assert_eq!(
+            world.config.commands(&matches[0].commands[0]).unwrap(),
+            [Command::Workspace("Web Browsing".into())]
+        );
+        assert!(!help.bindings.iter().any(|binding| binding.chord == "alt+l"));
+    }
+
+    #[test]
     fn disabled_hooks_retain_configured_bindings_but_never_claim_they_are_active() {
         let world = world(Config::default());
         let active = shortcuts(&world, true);

@@ -1,11 +1,13 @@
 //! Native, local-only provider sampling. Construct and sample on one worker thread.
 //! Missing capabilities produce an explicit error key, never invented measurements.
 use moon_core::{
-    config::{Config, WeatherConfig},
+    config::{Config, WeatherConfig, WidgetConfig},
     scene::template_placeholders,
 };
 use std::{
     collections::BTreeMap,
+    sync::mpsc::{self, Receiver, TryRecvError},
+    thread,
     time::{Duration, Instant},
 };
 use windows::{
@@ -41,6 +43,69 @@ use windows::{
 use windows_future::{AsyncStatus, IAsyncOperation};
 
 pub type Values = BTreeMap<String, String>;
+const MAX_EXEC_JOBS: usize = 4;
+
+fn exec_for<'a>(widgets: &'a [WidgetConfig], id: &str) -> Option<&'a str> {
+    widgets.iter().find(|widget| widget.id == id).and_then(|widget| widget.exec.as_deref())
+}
+
+type Completed<T> = (Instant, Result<T, String>);
+
+struct BackgroundSample<T> {
+    completed: Option<Completed<T>>,
+    pending: Option<(bool, Receiver<Completed<T>>)>,
+}
+
+impl<T: Send + 'static> BackgroundSample<T> {
+    fn new() -> Self {
+        Self { completed: None, pending: None }
+    }
+
+    fn invalidate(&mut self) {
+        self.completed = None;
+        if let Some((valid, _)) = &mut self.pending {
+            *valid = false;
+        }
+    }
+
+    fn poll(&mut self) {
+        let Some((valid, receive)) = &self.pending else { return };
+        let completed = match receive.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => {
+                (Instant::now(), Err("Provider worker stopped before returning a result".into()))
+            }
+        };
+        if *valid {
+            self.completed = Some(completed);
+        }
+        self.pending = None;
+    }
+
+    fn due(&self, seconds: u32) -> bool {
+        self.pending.is_none()
+            && self
+                .completed
+                .as_ref()
+                .is_none_or(|(time, _)| time.elapsed() >= Duration::from_secs(u64::from(seconds)))
+    }
+
+    fn start(&mut self, name: &str, sample: impl FnOnce() -> Result<T, String> + Send + 'static) {
+        let (sender, receive) = mpsc::channel();
+        match thread::Builder::new().name(name.into()).spawn(move || {
+            let result = sample();
+            let _ = sender.send((Instant::now(), result));
+        }) {
+            Ok(_) => self.pending = Some((true, receive)),
+            Err(error) => self.completed = Some((Instant::now(), Err(error.to_string()))),
+        }
+    }
+
+    fn value(&self) -> Option<&Result<T, String>> {
+        self.completed.as_ref().map(|(_, result)| result)
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct ProviderDemand {
@@ -107,8 +172,8 @@ pub struct Providers {
     media_values: Values,
     media_retry: Instant,
     config: Config,
-    weather: Option<(Instant, Values)>,
-    exec: BTreeMap<String, (String, Instant, std::result::Result<String, String>)>,
+    weather: BackgroundSample<(f64, i64)>,
+    exec: BTreeMap<String, BackgroundSample<String>>,
 }
 
 impl Default for Providers {
@@ -133,7 +198,7 @@ impl Providers {
             media_values: Values::new(),
             media_retry: Instant::now(),
             config,
-            weather: None,
+            weather: BackgroundSample::new(),
             exec: BTreeMap::new(),
         }
     }
@@ -147,7 +212,7 @@ impl Providers {
             self.previous_cpu = None;
         }
         if self.config.weather != config.weather || !demand.weather {
-            self.weather = None;
+            self.weather.invalidate();
         }
         if !demand.media {
             self.clear_media();
@@ -158,12 +223,12 @@ impl Providers {
             self.ui_settings = None;
         }
         self.demand = demand;
-        self.exec.retain(|id, (command, _, _)| {
-            config
-                .bar
-                .widgets
-                .iter()
-                .any(|widget| &widget.id == id && widget.exec.as_ref() == Some(command))
+        self.exec.retain(|id, sample| {
+            let next = exec_for(&config.bar.widgets, id);
+            if next != exec_for(&self.config.bar.widgets, id) {
+                sample.invalidate();
+            }
+            next.is_some() || sample.pending.is_some()
         });
         self.config = config.clone();
     }
@@ -380,21 +445,48 @@ impl Providers {
             }
             values.extend(self.media_values.clone());
         }
-        for widget in &self.config.bar.widgets {
-            let Some(command) = &widget.exec else {
-                continue;
-            };
-            let refresh = self.exec.get(&widget.id).is_none_or(|(_, time, _)| {
-                time.elapsed() >= Duration::from_secs(u64::from(widget.interval_seconds))
-            });
-            if refresh {
-                let value =
-                    crate::runtime::capture_unprivileged(command, Duration::from_secs(5), 4096)
+        self.sample_external(&mut values);
+        values
+    }
+
+    fn sample_external(&mut self, values: &mut Values) {
+        let widgets: Vec<_> = self.config.bar.widgets.iter().filter(|w| w.exec.is_some()).collect();
+        for sample in self.exec.values_mut() {
+            sample.poll();
+        }
+        self.exec.retain(|_, sample| sample.pending.is_some() || sample.completed.is_some());
+        let active = self.exec.values().filter(|sample| sample.pending.is_some()).count();
+        let mut due: Vec<_> = widgets
+            .iter()
+            .filter(|widget| {
+                self.exec.get(&widget.id).is_none_or(|sample| sample.due(widget.interval_seconds))
+            })
+            .map(|widget| {
+                let last = self
+                    .exec
+                    .get(&widget.id)
+                    .and_then(|sample| sample.completed.as_ref().map(|(time, _)| *time));
+                (last, *widget)
+            })
+            .collect();
+        // Prefer work that has never run, then the oldest result, so a short
+        // interval cannot starve widgets later in the configuration.
+        due.sort_by_key(|(last, _)| *last);
+        for (_, widget) in due.into_iter().take(MAX_EXEC_JOBS.saturating_sub(active)) {
+            let command = widget.exec.clone().expect("exec widget has a command");
+            self.exec.entry(widget.id.clone()).or_insert_with(BackgroundSample::new).start(
+                "moon-provider-exec",
+                move || {
+                    let _apartment =
+                        crate::platform::Apartment::new().map_err(|e| e.to_string())?;
+                    crate::runtime::capture_unprivileged(&command, Duration::from_secs(5), 4096)
                         .map(|value| value.trim().replace(['\r', '\n'], " "))
-                        .map_err(|error| error.to_string());
-                self.exec.insert(widget.id.clone(), (command.clone(), Instant::now(), value));
-            }
-            if let Some((_, _, result)) = self.exec.get(&widget.id) {
+                        .map_err(|error| error.to_string())
+                },
+            );
+        }
+        for widget in widgets {
+            if let Some(result) = self.exec.get(&widget.id).and_then(BackgroundSample::value) {
                 match result {
                     Ok(value) => {
                         values.insert(widget.id.clone(), value.clone());
@@ -405,34 +497,27 @@ impl Providers {
                 }
             }
         }
+        self.weather.poll();
         if self.demand.weather
             && let Some(config) = &self.config.weather
         {
-            let refresh = self.weather.as_ref().is_none_or(|(time, _)| {
-                time.elapsed() >= Duration::from_secs(u64::from(config.interval_seconds))
-            });
-            if refresh {
-                let mut weather_values = Values::new();
-                match fetch_weather(config) {
-                    Ok((temperature, code)) => {
-                        weather_values.insert("weather".into(), format!("{temperature:.0}°C"));
-                        weather_values
-                            .insert("weather.temperature".into(), format!("{temperature:.1}"));
-                        weather_values.insert("weather.code".into(), code.to_string());
-                        weather_values
-                            .insert("weather.source".into(), "Open-Meteo.com (CC BY 4.0)".into());
-                    }
-                    Err(error) => {
-                        weather_values.insert("weather.error".into(), error);
-                    }
-                }
-                self.weather = Some((Instant::now(), weather_values));
+            if self.weather.due(config.interval_seconds) {
+                let config = config.clone();
+                self.weather.start("moon-provider-weather", move || fetch_weather(&config));
             }
-            if let Some((_, cached)) = &self.weather {
-                values.extend(cached.clone());
+            match self.weather.value() {
+                Some(Ok((temperature, code))) => {
+                    values.insert("weather".into(), format!("{temperature:.0}°C"));
+                    values.insert("weather.temperature".into(), format!("{temperature:.1}"));
+                    values.insert("weather.code".into(), code.to_string());
+                    values.insert("weather.source".into(), "Open-Meteo.com (CC BY 4.0)".into());
+                }
+                Some(Err(error)) => {
+                    values.insert("weather.error".into(), error.clone());
+                }
+                None => {}
             }
         }
-        values
     }
 }
 
@@ -591,6 +676,10 @@ mod tests {
         config
     }
 
+    fn cached<T: Send + 'static>(result: Result<T, String>) -> BackgroundSample<T> {
+        BackgroundSample { completed: Some((Instant::now(), result)), pending: None }
+    }
+
     #[test]
     fn default_templates_keep_all_displayed_provider_families() {
         let demand = ProviderDemand::from_config(&Config::default());
@@ -654,12 +743,12 @@ mod tests {
         providers.previous_cpu = Some((100, 20));
         providers.media_values.insert("media".into(), "stale".into());
         providers.media_retry = Instant::now() + Duration::from_secs(30);
-        providers.weather = Some((Instant::now(), Values::new()));
+        providers.weather = cached(Ok((20.0, 1)));
         providers.set_config(&with_format("fixed"));
         assert!(providers.previous_cpu.is_none());
         assert!(providers.media_values.is_empty());
         assert!(providers.media_request.is_none() && providers.media_properties.is_none());
-        assert!(providers.weather.is_none());
+        assert!(providers.weather.value().is_none());
         assert!(providers.sample().is_empty());
         providers.set_config(&Config::default());
         assert!(providers.previous_cpu.is_none());
@@ -677,7 +766,7 @@ mod tests {
         providers.set_config(&config);
         // The valid cached result exercises the real exec sampling branch without
         // starting a shell or requiring access to any desktop application.
-        providers.exec.insert("test".into(), (command, Instant::now(), Ok("fixture".into())));
+        providers.exec.insert("test".into(), cached(Ok("fixture".into())));
         assert_eq!(providers.sample(), Values::from([("test".into(), "fixture".into())]));
     }
 
@@ -689,9 +778,7 @@ mod tests {
         let command = "fixture command is never launched".to_owned();
         config.bar.widgets[0].exec = Some(command.clone());
         providers.set_config(&config);
-        providers
-            .exec
-            .insert("memory".into(), (command, Instant::now(), Err("fixture failure".into())));
+        providers.exec.insert("memory".into(), cached(Err("fixture failure".into())));
         let values = providers.sample();
         assert!(values.get("memory").is_some_and(|value| value.ends_with('%')));
         assert_eq!(values.get("memory.error").map(String::as_str), Some("fixture failure"));
@@ -707,12 +794,38 @@ mod tests {
         config.weather =
             Some(WeatherConfig { latitude: 0.0, longitude: 0.0, interval_seconds: 900 });
         providers.set_config(&config);
-        providers
-            .exec
-            .insert("weather".into(), (command, Instant::now(), Ok("command output".into())));
-        providers.weather =
-            Some((Instant::now(), Values::from([("weather".into(), "20 C".into())])));
-        assert_eq!(providers.sample(), Values::from([("weather".into(), "20 C".into())]));
+        providers.exec.insert("weather".into(), cached(Ok("command output".into())));
+        providers.weather = cached(Ok((20.0, 1)));
+        assert_eq!(providers.sample().get("weather").map(String::as_str), Some("20°C"));
+    }
+
+    #[test]
+    fn pending_external_samples_do_not_delay_local_values_and_stale_replies_are_discarded() {
+        let mut providers = Providers::new();
+        let mut config = with_format("{clock} {weather} {test}");
+        config.bar.widgets[0].exec = Some("old command".into());
+        config.weather =
+            Some(WeatherConfig { latitude: 0.0, longitude: 0.0, interval_seconds: 900 });
+        providers.set_config(&config);
+        let (exec_sender, exec_receiver) = mpsc::channel();
+        let (weather_sender, weather_receiver) = mpsc::channel();
+        providers.exec.insert(
+            "test".into(),
+            BackgroundSample { completed: None, pending: Some((true, exec_receiver)) },
+        );
+        providers.weather.pending = Some((true, weather_receiver));
+        let values = providers.sample();
+        assert!(values.contains_key("clock.time"));
+        assert!(!values.contains_key("test") && !values.contains_key("weather"));
+
+        config.bar.widgets[0].exec = None;
+        config.weather = None;
+        providers.set_config(&config);
+        exec_sender.send((Instant::now(), Ok("stale".into()))).unwrap();
+        weather_sender.send((Instant::now(), Ok((20.0, 1)))).unwrap();
+        let values = providers.sample();
+        assert!(!values.contains_key("test") && !values.contains_key("weather"));
+        assert!(providers.exec.is_empty() && providers.weather.pending.is_none());
     }
 
     #[test]
