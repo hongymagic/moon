@@ -170,10 +170,10 @@ zero-delay first frame or isolate the preload's timing effect from the capture
 settle. The other PNGs include transient status/toast messages and are not
 final-state visual baselines.
 
-The frontend passed 80 browser checks before the attribution/preload additions.
-The later focused weather checks passed 5/5, and the font/preload/attribution
-checks passed 3/3; formatting, TypeScript checking and the checked-in bundle build
-also passed. These overlapping focused runs are not an additional full-suite run.
+After the attribution and preload additions, the complete frontend suite passed
+82/82 checks. Formatting, TypeScript checking, the checked-in bundle build, both
+portable and Windows all-target Clippy checks, and 158 portable Rust tests also
+passed. The separate native carousel lifecycle suite passed 4/4.
 
 The one-time Windows request follows the documented foreground/UI-thread
 requirements of [Geolocator.RequestAccessAsync](https://learn.microsoft.com/en-us/uwp/api/windows.devices.geolocation.geolocator.requestaccessasync?view=winrt-26100).
@@ -185,6 +185,28 @@ The picker uses the same licensed Symbols Nerd Font as Moon's bar rather than
 assuming private-use codepoints are interchangeable with a system font; see
 [Microsoft's icon-font guidance](https://learn.microsoft.com/en-us/windows/apps/design/iconography/segoe-fluent-icons-font).
 The early font fetch uses the standard [HTML preload mechanism](https://html.spec.whatwg.org/multipage/links.html#link-type-preload).
+
+## Usability package and approval outcome
+
+Source commit `ad07642` is packaged in
+`C:\Users\dhong\Downloads\Moon-0.1.0-2026-11-15-usability`.
+The strict release has 35 payload files and a verified ZIP with SHA-256
+`A24903B3167BC2F6374F058F5797B36FCEBFD90E9CD95E71EDCF4AB092C0C69E`.
+The unsigned UIAccess input is
+`34B41CBFC5FF878EA130C2F6834A45ED688C2BD2A1755F9F8FB933B650C6C220`;
+Settings is the native-verified `D46551D…B0A1DE90` image above.
+
+Upgrade operation `d4b39145b4c54905abd920da651ab208` reached the real Windows
+approval prompt at 04:37 UTC. Windows returned cancellation; the product recorded
+`cancelled`, and the independent coordinator retained its failure receipt.
+The new package was **not installed**. A fresh read-only audit at 04:40 UTC
+confirmed the existing PID 42956 still manages the same four windows without a
+daemon error, using unchanged personal configuration SHA-256
+`055E3A6AC39BE61B9740810E21AAB6F44F8F19168356862D8EE5A9B3A175B832`.
+No alternate desktop manager was launched. The installed startup toggle and
+128-shortcut stress run remain pending approval of this package; their prepared
+harnesses are not evidence of execution. Receipts are retained beneath
+`target/usability-20261115` and `Downloads\Moon-validation\usability-upgrade-worker-20261115`.
 
 ## Acceptance boundary
 
