@@ -260,6 +260,347 @@ pub fn internal_command() -> std::io::Result<std::process::Command> {
     Ok(command)
 }
 
+/// ShellExecute cannot inherit the explicit stdio selected on Command. Only
+/// our private child entrypoint consumes this mode, before config/startup work.
+#[derive(Clone, Copy, Debug)]
+pub enum InternalStdio {
+    Log,
+    Null,
+}
+impl InternalStdio {
+    fn argument(self) -> &'static str {
+        match self {
+            Self::Log => "log",
+            Self::Null => "null",
+        }
+    }
+}
+
+enum ChildHandle {
+    Direct(std::process::Child),
+    Broker { process: Process, id: u32 },
+}
+pub struct InternalChild(ChildHandle);
+impl InternalChild {
+    pub fn id(&self) -> u32 {
+        match &self.0 {
+            ChildHandle::Direct(child) => child.id(),
+            ChildHandle::Broker { id, .. } => *id,
+        }
+    }
+    pub fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        match &mut self.0 {
+            ChildHandle::Direct(child) => child.try_wait(),
+            ChildHandle::Broker { process, .. } => {
+                if process.is_running().map_err(std::io::Error::other)? {
+                    return Ok(None);
+                }
+                use std::os::windows::process::ExitStatusExt;
+                let mut code = 0;
+                unsafe {
+                    windows::Win32::System::Threading::GetExitCodeProcess(process.0, &mut code)
+                        .map_err(std::io::Error::other)?;
+                }
+                // Wait state, not STILL_ACTIVE(259), determines whether it exited.
+                Ok(Some(std::process::ExitStatus::from_raw(code)))
+            }
+        }
+    }
+    pub fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        match &mut self.0 {
+            ChildHandle::Direct(child) => child.wait(),
+            ChildHandle::Broker { process, .. } => {
+                if unsafe { WaitForSingleObject(process.0, INFINITE) }
+                    != windows::Win32::Foundation::WAIT_OBJECT_0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                self.try_wait()?.ok_or_else(|| std::io::Error::other("Child did not exit"))
+            }
+        }
+    }
+    pub fn kill(&mut self) -> std::io::Result<()> {
+        match &mut self.0 {
+            ChildHandle::Direct(child) => child.kill(),
+            ChildHandle::Broker { process, .. } => {
+                if !process.is_running().map_err(std::io::Error::other)? {
+                    return Ok(());
+                }
+                if let Err(error) =
+                    unsafe { windows::Win32::System::Threading::TerminateProcess(process.0, 1) }
+                    && process.is_running().map_err(std::io::Error::other)?
+                {
+                    return Err(std::io::Error::other(error));
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+fn shell_parameters(arguments: &[std::ffi::OsString]) -> std::io::Result<Vec<u16>> {
+    use std::os::windows::ffi::OsStrExt;
+    let mut result = Vec::new();
+    for (index, argument) in arguments.iter().enumerate() {
+        if index != 0 {
+            result.push(32);
+        }
+        result.push(34);
+        let mut slashes = 0;
+        for unit in argument.encode_wide() {
+            match unit {
+                0 => return Err(std::io::Error::other("Internal argument contains a NUL")),
+                92 => slashes += 1,
+                34 => {
+                    result.extend(std::iter::repeat_n(92, slashes * 2 + 1));
+                    result.push(34);
+                    slashes = 0;
+                }
+                _ => {
+                    result.extend(std::iter::repeat_n(92, slashes));
+                    slashes = 0;
+                    result.push(unit);
+                }
+            }
+        }
+        result.extend(std::iter::repeat_n(92, slashes * 2));
+        result.push(34);
+    }
+    result.push(0);
+    Ok(result)
+}
+
+fn spawn_brokered(file: &Path, arguments: &[std::ffi::OsString]) -> std::io::Result<InternalChild> {
+    use windows::Win32::UI::{
+        Shell::{
+            SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
+            ShellExecuteExW,
+        },
+        WindowsAndMessaging::SW_HIDE,
+    };
+    let _apartment = crate::platform::Apartment::new().map_err(std::io::Error::other)?;
+    let file = wide(file.as_os_str());
+    let parameters = shell_parameters(arguments)?;
+    if file.len() + parameters.len() + 3 > 32767 {
+        return Err(std::io::Error::other("Internal command exceeds the Windows argument limit"));
+    }
+    let mut launch = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI,
+        lpVerb: windows::core::w!("open"),
+        lpFile: PCWSTR(file.as_ptr()),
+        lpParameters: PCWSTR(parameters.as_ptr()),
+        nShow: SW_HIDE.0,
+        ..Default::default()
+    };
+    unsafe { ShellExecuteExW(&mut launch) }.map_err(std::io::Error::other)?;
+    if launch.hProcess.is_invalid() {
+        return Err(std::io::Error::other("Windows did not return the internal child process"));
+    }
+    // Take ownership before any fallible PID lookup; never reopen by a recycled PID.
+    let process = Process(launch.hProcess);
+    let id = unsafe { windows::Win32::System::Threading::GetProcessId(process.0) };
+    if id == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(InternalChild(ChildHandle::Broker { process, id }))
+}
+
+/// Same-image children only. Ordinary launches retain Command's exact stdio,
+/// flags and inheritance behavior. UIAccess must go through the Windows broker.
+pub fn spawn_internal(
+    command: &mut std::process::Command,
+    stdio: InternalStdio,
+) -> std::io::Result<InternalChild> {
+    let image = std::env::current_exe()?;
+    if command.get_program() != image.as_os_str() {
+        return Err(std::io::Error::other("Internal children must execute the current image"));
+    }
+    let token =
+        crate::platform::token_capabilities(std::process::id()).map_err(std::io::Error::other)?;
+    if !token.ui_access {
+        return command.spawn().map(|child| InternalChild(ChildHandle::Direct(child)));
+    }
+    if command.get_current_dir().is_some() || command.get_envs().next().is_some() {
+        return Err(std::io::Error::other(
+            "Brokered internal children cannot override environment or directory",
+        ));
+    }
+    let mut arguments: Vec<_> = command.get_args().map(std::ffi::OsStr::to_owned).collect();
+    arguments.extend(["--internal-stdio".into(), stdio.argument().into()]);
+    spawn_brokered(&image, &arguments)
+}
+
+/// Owns replacements for the standard handles until main has printed any final
+/// error. Rust 1.99's Windows stdio reads GetStdHandle on each read/write.
+pub struct InternalStdioGuard {
+    files: [std::fs::File; 3],
+    previous: [HANDLE; 3],
+    installed: usize,
+}
+impl Drop for InternalStdioGuard {
+    fn drop(&mut self) {
+        use std::io::Write;
+        use windows::Win32::System::Console::{
+            STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle,
+        };
+        let _ = std::io::stdout().flush();
+        let _ = std::io::stderr().flush();
+        for (index, stream) in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE]
+            .into_iter()
+            .enumerate()
+            .take(self.installed)
+        {
+            unsafe {
+                let _ = SetStdHandle(stream, self.previous[index]);
+            }
+        }
+    }
+}
+pub fn redirect_internal_stdio(log: Option<&Path>) -> std::io::Result<InternalStdioGuard> {
+    use std::{fs::OpenOptions, os::windows::io::AsRawHandle};
+    use windows::Win32::System::Console::{
+        GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle,
+    };
+    let input = OpenOptions::new().read(true).open("NUL")?;
+    let output = if let Some(path) = log {
+        if let Some(directory) = path.parent() {
+            std::fs::create_dir_all(directory)?;
+        }
+        OpenOptions::new().create(true).append(true).open(path)?
+    } else {
+        OpenOptions::new().write(true).open("NUL")?
+    };
+    let error = output.try_clone()?;
+    let mut guard = InternalStdioGuard {
+        files: [input, output, error],
+        previous: [HANDLE::default(); 3],
+        installed: 0,
+    };
+    for (index, stream) in
+        [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE].into_iter().enumerate()
+    {
+        unsafe {
+            guard.previous[index] = GetStdHandle(stream).unwrap_or_default();
+            SetStdHandle(stream, HANDLE(guard.files[index].as_raw_handle()))
+                .map_err(std::io::Error::other)?;
+        }
+        guard.installed += 1;
+    }
+    Ok(guard)
+}
+
+#[cfg(test)]
+mod internal_child_tests {
+    use super::*;
+    use std::{
+        ffi::{OsStr, OsString},
+        os::windows::ffi::OsStringExt,
+    };
+
+    #[test]
+    fn shell_arguments_roundtrip_spaces_quotes_unicode_and_trailing_slashes() {
+        use windows::Win32::{
+            Foundation::{HLOCAL, LocalFree},
+            UI::Shell::CommandLineToArgvW,
+        };
+        let expected: Vec<OsString> = [
+            "",
+            "start",
+            "--config",
+            "C:\\a folder\\moon.toml",
+            "quote\"and\\\"slash",
+            "C:\\trailing\\",
+            "日本語 & $literal",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+        let mut line = wide(OsStr::new("fixture.exe"));
+        line.pop();
+        line.push(32);
+        line.extend(shell_parameters(&expected).unwrap());
+        let mut count = 0;
+        let parsed = unsafe { CommandLineToArgvW(PCWSTR(line.as_ptr()), &mut count) };
+        assert!(!parsed.is_null());
+        let actual: Vec<OsString> = (1..count)
+            .map(|i| unsafe { OsString::from_wide((*parsed.add(i as usize)).as_wide()) })
+            .collect();
+        unsafe {
+            let _ = LocalFree(Some(HLOCAL(parsed.cast())));
+        }
+        assert_eq!(actual, expected);
+        assert!(shell_parameters(&[OsString::from_wide(&[65, 0, 66])]).is_err());
+    }
+
+    struct OwnedTestChild(InternalChild);
+    impl Drop for OwnedTestChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    fn await_exit(child: &mut InternalChild) -> std::process::ExitStatus {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                return status;
+            }
+            assert!(std::time::Instant::now() < deadline, "owned child did not exit");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn brokered_live_child_can_be_killed_and_waited_without_reopening_its_pid() {
+        let image = Path::new(&std::env::var_os("SystemRoot").unwrap())
+            .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        let mut child = OwnedTestChild(
+            spawn_brokered(
+                &image,
+                &[
+                    "-NoProfile".into(),
+                    "-NonInteractive".into(),
+                    "-Command".into(),
+                    "Start-Sleep -Seconds 30".into(),
+                ],
+            )
+            .unwrap(),
+        );
+        assert_ne!(child.0.id(), 0);
+        assert!(child.0.try_wait().unwrap().is_none());
+        child.0.kill().unwrap();
+        assert_eq!(await_exit(&mut child.0).code(), Some(1));
+        assert_eq!(child.0.wait().unwrap().code(), Some(1));
+    }
+
+    #[test]
+    fn brokered_child_retains_lifetime_and_exit_259_is_not_running() {
+        // cmd.exe has its own command-string quoting rules; this fixture needs
+        // ordinary argv parsing, like Moon, and an explicit full-width exit code.
+        let image = Path::new(&std::env::var_os("SystemRoot").unwrap())
+            .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        let mut child = OwnedTestChild(
+            spawn_brokered(
+                &image,
+                &[
+                    "-NoProfile".into(),
+                    "-NonInteractive".into(),
+                    "-Command".into(),
+                    "exit 259".into(),
+                ],
+            )
+            .unwrap(),
+        );
+        let id = child.0.id();
+        assert_ne!(id, 0);
+        assert_eq!(await_exit(&mut child.0).code(), Some(259));
+        assert_eq!(child.0.wait().unwrap().code(), Some(259));
+        assert_eq!(child.0.try_wait().unwrap().unwrap().code(), Some(259));
+        child.0.kill().unwrap(); // An exited owned child is already terminated.
+    }
+}
+
 pub fn session_id() -> Result<u32> {
     let mut session = 0;
     unsafe {

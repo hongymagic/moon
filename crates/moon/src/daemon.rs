@@ -160,11 +160,8 @@ pub fn background(options: Options) -> Result<()> {
         }
         let stdout = output.try_clone().context("duplicate Moon log for background stdout")?;
         let stderr = output.try_clone().context("duplicate Moon log for background stderr")?;
-        command
-            .stdin(Stdio::null())
-            .stdout(stdout)
-            .stderr(stderr)
-            .spawn()
+        command.stdin(Stdio::null()).stdout(stdout).stderr(stderr);
+        runtime::spawn_internal(&mut command, runtime::InternalStdio::Log)
             .context("spawn background Moon process")
     })();
     let mut child = record_background_launch(&mut output, launch)?;
@@ -280,13 +277,14 @@ pub fn run(options: Options) -> Result<()> {
     }
     record.world = serde_json::to_value(&world)?;
     // A successor may publish ownership only once its replacement watcher exists.
-    let mut watchdog = runtime::internal_command()?
+    let mut watchdog_command = runtime::internal_command()?;
+    watchdog_command
         .args(["watchdog", &process::id().to_string(), &birth.to_string()])
         .arg(&path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
+        .stderr(Stdio::null());
+    let mut watchdog = runtime::spawn_internal(&mut watchdog_command, runtime::InternalStdio::Null)
         .context("start recovery watchdog")?;
     record.save(&path)?;
     let journal_writer = journal::JournalWriter::start(path.clone())?;
@@ -448,8 +446,8 @@ pub fn run(options: Options) -> Result<()> {
         let mut restart = runtime::internal_command()?;
         restart.args(["start", "--resume", "--wait-parent", &process::id().to_string()]);
         add_options(&mut restart, &daemon.options);
-        match restart.stdin(Stdio::null()).stdout(Stdio::inherit()).stderr(Stdio::inherit()).spawn()
-        {
+        restart.stdin(Stdio::null()).stdout(Stdio::inherit()).stderr(Stdio::inherit());
+        match runtime::spawn_internal(&mut restart, runtime::InternalStdio::Log) {
             Ok(mut child) => {
                 daemon.journal.successor = Some(child.id());
                 let writer = daemon.journal_writer.as_ref().expect("writer exists until shutdown");

@@ -17,6 +17,7 @@ pub struct Options {
     pub takeover: bool,
     pub resume: bool,
     pub background: bool,
+    pub internal_stdio: Option<String>,
     pub wait_parent: Option<u32>,
 }
 
@@ -28,14 +29,29 @@ impl Options {
 }
 
 fn main() {
-    if let Err(error) = run() {
+    #[cfg(windows)]
+    let mut child_stdio = None;
+    let result = (|| {
+        let (options, words) = parse_args(std::env::args().skip(1).collect())?;
+        #[cfg(windows)]
+        if let Some(mode) = &options.internal_stdio {
+            let path = journal::data_dir().join("moon.log");
+            child_stdio = Some(
+                moon_win::runtime::redirect_internal_stdio(
+                    (mode == "log").then_some(path.as_path()),
+                )
+                .context("configure internal Moon standard streams")?,
+            );
+        }
+        run(options, words)
+    })();
+    if let Err(error) = result {
         eprintln!("moon: {error:#}");
         std::process::exit(1);
     }
 }
 
-fn run() -> Result<()> {
-    let (options, words) = parse_args(std::env::args().skip(1).collect())?;
+fn run(options: Options, words: Vec<String>) -> Result<()> {
     let first = words.first().map(String::as_str).unwrap_or("start");
     match first {
         "help" | "--help" | "-h" => print_help(),
@@ -116,12 +132,25 @@ fn parse_args(arguments: Vec<String>) -> Result<(Options, Vec<String>)> {
             "--takeover" => options.takeover = true,
             "--resume" => options.resume = true,
             "--background" => options.background = true,
+            "--internal-stdio" => {
+                let value = args.next().context("--internal-stdio requires log or null")?;
+                if !matches!(value.as_str(), "log" | "null") || options.internal_stdio.is_some() {
+                    bail!("Invalid internal standard-stream mode");
+                }
+                options.internal_stdio = Some(value);
+            }
             "--wait-parent" => {
                 options.wait_parent =
                     Some(args.next().context("--wait-parent requires a PID")?.parse()?)
             }
             _ => words.push(argument),
         }
+    }
+    if options.internal_stdio.is_some()
+        && (options.background
+            || !matches!(words.first().map(String::as_str), Some("start" | "watchdog")))
+    {
+        bail!("Internal standard streams are only valid for direct Moon children");
     }
     Ok((options, words))
 }
@@ -314,6 +343,56 @@ Emergency recovery: Ctrl+Alt+Shift+F12.",
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn internal_stdio_preserves_child_arguments_and_requires_a_direct_child_role() {
+        for mode in ["log", "null"] {
+            let (options, words) = parse_args(
+                [
+                    "start",
+                    "--resume",
+                    "--wait-parent",
+                    "123",
+                    "--config",
+                    "a folder/moon.toml",
+                    "--internal-stdio",
+                    mode,
+                ]
+                .map(str::to_owned)
+                .to_vec(),
+            )
+            .unwrap();
+            assert_eq!(options.internal_stdio.as_deref(), Some(mode));
+            assert!(options.resume);
+            assert_eq!(options.wait_parent, Some(123));
+            assert_eq!(options.config, Some(std::path::absolute("a folder/moon.toml").unwrap()));
+            assert_eq!(words, ["start"]);
+            let (options, words) = parse_args(
+                ["watchdog", "123", "456", "--internal-stdio", mode].map(str::to_owned).to_vec(),
+            )
+            .unwrap();
+            assert_eq!(options.internal_stdio.as_deref(), Some(mode));
+            assert_eq!(words, ["watchdog", "123", "456"]);
+        }
+        for args in [
+            vec!["start", "--internal-stdio"],
+            vec!["start", "--internal-stdio", "inherit"],
+            vec!["start", "--internal-stdio", "log", "--internal-stdio", "null"],
+            vec!["start", "--background", "--internal-stdio", "log"],
+            vec!["query", "world", "--internal-stdio", "log"],
+            vec!["--internal-stdio", "null"],
+        ] {
+            assert!(parse_args(args.into_iter().map(str::to_owned).collect()).is_err());
+        }
+        let (options, words) = parse_args(
+            ["exec", "app.exe", "--internal-stdio", "application-option"]
+                .map(str::to_owned)
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(options.internal_stdio.is_none());
+        assert_eq!(words, ["exec", "app.exe", "--internal-stdio", "application-option"]);
+    }
+
     #[test]
     fn window_cli_uses_exact_catalog_tokens_and_only_typed_actions() {
         let catalog = serde_json::json!({"generation":"20:134391580679147114","revision":"9007199254740993","windows":[{"id":"42","process_id":"11","process_birth":"134391580679147115"}]});
