@@ -5,6 +5,64 @@ It was reviewed on 15 November 2026 (Sydney). Implemented event handling and pas
 simulated tests do not establish that the corresponding physical Windows event
 has been exercised.
 
+## Signed installation observed, 15 November 2026
+
+The newest installation is source commit `9079c6e`, operation
+`ada1303b353f424ab46a341454d5f384`. Its UIAccess input is
+`04DBD64C98B2EC7E113641050968B81E978529D79F4DB2ED074DFF0945F2F88E`;
+the installed, signed Moon image is
+`DB793217696E0EDE4ADB44A48973DAD18FD0861B7C18455A4DC42D88B56683B2`.
+Settings input is `5C817B710BC5925969E1939C754F1ADA36E704B4952F9A2040D7F5E4E156EDA6`.
+Moon started from `C:\Program Files\moon\moon.exe` as PID 10064, native birth
+134391876924100214. Its actual token has UIAccess, is not elevated, and reports
+integrity RID 12288. Older sections below retain their historical build status.
+
+The live S8 checks passed: the installed signature is valid, the owned startup
+task uses Limited run level, an ordinary medium-integrity client connects, an
+application launched through Moon remains medium-integrity without UIAccess or
+elevation, and a low-integrity client is refused. The signed self-launch fix is
+covered by three passing native child-process tests and two release-mode private
+stdio checks. These checks do not prove control of an actual elevated application.
+
+The first strict coordinator postcheck failed after installation; that receipt
+remains a failure. A later authenticated readback matches the entire original
+layout fingerprint, all four application identities, visible native frames,
+visibility and foreground 263988. Configuration path, explicit selection and
+file hash `055E3A6A…B832` are unchanged. Preservation of the recent-workspace value
+is unproved: it changed from index 8 to 1, and the later observation includes 17
+additional command transactions and 917 keyboard callbacks. The later readback
+also records a focus-refusal error; it is not an error-free runtime acceptance.
+No layout repair or rollback is inferred from the later matching state.
+
+Evidence is preserved under `Downloads\Moon-validation` in
+`runtimefix-install-closed-20261115/{before,failure,handover-ada1303b353f424ab46a341454d5f384}.json`
+and `runtimefix-installed-readback-v3-20261115/current.json`; the S8 report is
+included in the latter. Signed installation and the listed S8 checks are observed,
+while actual elevated-application control, remaining physical resilience,
+performance budgets, clean-machine validation and the seven-day installed
+sole-manager soak remain open. No historical performance result is promoted to
+an acceptance pass for this installed image.
+
+A real installed lifecycle restart at 03:49 UTC produced PID 42956 (native birth
+134391881647308150) from the same signed image. The original test helper failed
+after restart while comparing a PowerShell ordered dictionary and then repeated
+that error while writing its report. Its saved baseline and failure remain
+unchanged. A separate read-only audit verified both predecessor lifetimes had
+ended, the current signed UIAccess successor and its sole same-image child, and
+the successor's ownership of the recovery journal. All four native frames,
+semantic layout, configuration, foreground and current recency exactly match the
+pre-restart baseline; the successor reports no error. Child command-line arguments
+were not observable from the ordinary verifier, so watchdog-role evidence is
+limited to its image, parent, lifetime and journal relationship.
+
+At 03:54 UTC the installed daemon passed a targeted focus round trip: Terminal on
+workspace 2, then Codex on workspace 10. The carousel was observed active and
+retired. Exact layout, native frames and visibility, foreground, configuration and
+recency were restored without a daemon error. This verifies the exercised focus
+path; it does not diagnose the earlier latched warning or measure animation frame
+time. Receipts are `runtimefix-restart-completion-20261115/result.json` and
+`runtimefix-installed-focus-20261115/result.json` under `Downloads\Moon-validation`.
+
 ## Combined review and polish on Windows, 15 November 2026
 
 Commit `b2c9fc9` combines the completed repository review (`75e5468`, an exact
