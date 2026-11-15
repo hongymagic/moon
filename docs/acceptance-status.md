@@ -5,9 +5,53 @@ It was reviewed on 15 November 2026 (Sydney). Implemented event handling and pas
 simulated tests do not establish that the corresponding physical Windows event
 has been exercised.
 
-## Signed installation observed, 15 November 2026
+## Current signed upgrade observed, 15 November 2026
 
-The newest installation is source commit `9079c6e`, operation
+Source `ad07642` was installed successfully by operation
+`ece5416c88324ee1a21a4bf82d632eab` at **08:18:27 UTC**. Product status is
+`succeeded`, installer exit code is 0, and the independent coordinator passed.
+The new installed daemon is PID **35052**, native birth **134392043063996486**,
+with UIAccess enabled, elevation disabled, integrity RID 12288 and no last error.
+Its signed SHA-256 is
+`D3ABC1DE88325EDAF72983AB1BB34C44451627202C40E96F93271FE986A1168F`;
+the signed Settings SHA-256 is
+`55C97E722E6E2A3DEDE5577AC2F6EE6B37ACDE44DF7E7C7863CF369A48237632`.
+Both installed executable payloads independently match the frozen package inputs
+after accounting for their signatures.
+
+The check verified unchanged semantic layout, selected configuration and
+installation identity, four managed windows, and exit of the old PID 42956
+lifetime. Startup remained enabled. Task owner/group and every previous access
+entry were preserved; the sole added entry grants the installation owner read,
+write and execute (`0x1201BF`), without delete or permission/ownership-changing
+rights. An ordinary worker subsequently disabled and restored the startup task
+at 08:23:45 UTC without changing configuration or the healthy daemon lifetime.
+At 08:33:02 UTC the installed ordinary-token Settings companion also passed all
+five native usability checks. Guarded clicks changed startup enabled → disabled
+→ enabled, with matching UI state and independent COM task readback. Personal
+configuration and live layout were unchanged, original foreground 393448 returned,
+and the owned Settings window closed without cleanup errors. PID 35052 remained
+healthy; this later baseline contained five managed windows. Only the owned
+fixture document was edited by the weather/icon/bar/rule checks. This does not
+exercise sign-out/sign-in or reboot behavior.
+
+Receipts are under `Downloads\Moon-validation` in
+`usability-upgrade-ready-worker-20261115` and
+`usability-installed-startup-backend-20261115`, and
+`usability-installed-settings-click-20261115`. The earlier 04:37 UTC canceled
+attempt remains preserved and is not relabeled as a success. The upgrade's
+layout fingerprint does not independently prove native frames/process births
+or recent-workspace preservation. Earlier UIA Toggle and SetFocus attempts did
+not perform the requested switch action; their harness failures remain recorded
+and are not product-defect or keyboard-accessibility evidence. The guarded-click
+run above establishes the native switch behavior. The high-integrity shortcut
+prompt was canceled at 08:31:09 UTC before its child or test body ran. That
+128-shortcut burst remains unexecuted pending fresh readiness; preparation and
+compilation are not execution evidence. See [the detailed record](desktop-polish-validation.md#usability-package-and-approval-outcome).
+
+## Earlier signed installation observed, 15 November 2026
+
+The earlier installation is source commit `9079c6e`, operation
 `ada1303b353f424ab46a341454d5f384`. Its UIAccess input is
 `04DBD64C98B2EC7E113641050968B81E978529D79F4DB2ED074DFF0945F2F88E`;
 the installed, signed Moon image is
@@ -498,8 +542,8 @@ identity; they are not promoted to measurements of the SID-fix binary.
 | M2: config and workspaces | All 46 active GlazeWM chords have equivalent moon defaults; none are missing. Real rule fixtures, command parsing, live reload, cloak, restart, public IPC extension and parser fuzzers pass. Sixteen ordinary native regressions include terminated-process liveness, bounded IPC, atomic-replacement sharing, modifier state and border ownership. All 52 defaults route exact command payloads through the live hook without executing daemon effects. Five portable writer tests cover durable barriers, coalescing, error handling and shutdown. A source/data-flow review and 231 saved evidence files found no raw keyboard-event logging or pressed-state dumps; [scope and limits](validation-platform.md#input-logging-evidence) are recorded. | Exercise every binding's resulting behavior with moon as the sole manager. |
 | M3: bar | Pure scene tests, provider probes, native rendering, centered pills, custom theme and default glyphs pass. | Record side-by-side visual parity and the full-process idle/performance measurements. |
 | M4: borders | Pure ring geometry and physical 125% rendering pass; floating native tint is implemented. | Complete physical 100% and 150% scaling and multi-monitor visual checks. |
-| M5: installation | The 15 November combined candidate is packaged and its ordinary build is running. The latest signed-install attempt ended with Windows approval cancellation (1223), recorded `rolled_back_portable`, and preserved the same healthy daemon and all four windows. The current attempt is recorded above; [earlier attempt evidence](installation.md#live-installation-attempts-and-sid-fix) remains separate. | Complete signed installation and runtime verification, then actual elevated-window and running upgrade/rollback checks. Installation authorization exists; Windows consent is still required. |
-| S8: privilege boundary | Medium-integrity IPC succeeds; low-integrity IPC is rejected. | With the installed signed binary, exercise elevated foreground hotkeys/placement and confirm launched applications are medium integrity without UIAccess. |
+| M5: installation | Signed installation and the `ad07642` running upgrade succeeded. The current upgrade preserved its semantic layout/configuration and startup preference, replaced the old daemon lifetime, and passed ordinary backend and actual Settings-click disable/restore startup checks. All five installed native Settings usability checks passed. Earlier cancellations remain failures of their own attempts. | Complete independent native-state preservation/rollback, clean-machine and remaining physical checks, then the installed seven-day sole-manager soak. The high-integrity shortcut-burst approval was canceled before execution and remains pending. |
+| S8: privilege boundary | The earlier installed runtime-fix candidate passed valid signature, Limited startup task, medium IPC, low-integrity refusal and medium/no-UIAccess external launch checks. The current upgrade reports a valid signed UIAccess daemon with elevation disabled. | Exercise actual elevated foreground hotkeys/placement and retain current-build boundary evidence; the high-integrity burst fixture is not yet executed. |
 | M5: clean first run | No-config loading and native sandbox adoption pass. | Run the copied executable on a clean Hyper-V Windows VM with no config and confirm tiling. |
 | M5: seven-day soak | No seven-day observation has elapsed. | Seven consecutive days as the sole manager, no lost windows, recorded uptime and papercuts, no fallback to GlazeWM. |
 

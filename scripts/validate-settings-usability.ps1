@@ -80,6 +80,55 @@ public static class MoonUsabilityNative {
         } finally {CloseHandle(token);}
     }
 
+    [StructLayout(LayoutKind.Sequential)] struct MouseInput {public int X,Y;public uint Data,Flags,Time;public UIntPtr Extra;}
+    [StructLayout(LayoutKind.Sequential)] struct KeyInput {public ushort Vk,Scan;public uint Flags,Time;public UIntPtr Extra;}
+    [StructLayout(LayoutKind.Explicit)] struct InputData {[FieldOffset(0)] public MouseInput Mouse;[FieldOffset(0)] public KeyInput Key;}
+    [StructLayout(LayoutKind.Sequential)] struct Input {public uint Type;public InputData Data;}
+    [DllImport("user32.dll",SetLastError=true)] static extern uint SendInput(uint count,Input[] inputs,int size);
+    [DllImport("user32.dll")] static extern short GetAsyncKeyState(int key);
+    public static int InputSize(){return Marshal.SizeOf(typeof(Input));}
+    [StructLayout(LayoutKind.Sequential)] public struct Point {public int X,Y;}
+    [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(Point point);
+    [DllImport("user32.dll")] static extern bool GetCursorPos(out Point point);
+    [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr window,uint flags);
+    [DllImport("user32.dll")] static extern int GetSystemMetrics(int index);
+    [DllImport("user32.dll",SetLastError=true)] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+    static bool OwnInteractiveWindow(IntPtr window,uint process){
+        uint owner;GetWindowThreadProcessId(window,out owner);
+        return owner==process && GetForegroundWindow()==window && InputDesktopAvailable();
+    }
+    public static uint ClickOwnedPoint(IntPtr expectedWindow,uint expectedProcess,int x,int y){
+        var previous=SetThreadDpiAwarenessContext(new IntPtr(-4));
+        if(previous==IntPtr.Zero)throw Error();
+        try{
+            if(!OwnInteractiveWindow(expectedWindow,expectedProcess))throw new InvalidOperationException("Owned ordinary Settings lost foreground; no input sent.");
+            foreach(var key in new[]{0x01,0x02,0x04,0x05,0x06,0x10,0x11,0x12,0xA0,0xA1,0xA2,0xA3,0xA4,0xA5,0x5B,0x5C,0x20})
+                if((GetAsyncKeyState(key)&0x8000)!=0)throw new InvalidOperationException("A mouse button, modifier or Space is held; no input sent.");
+            var hit=WindowFromPoint(new Point{X=x,Y=y});
+            if(hit==IntPtr.Zero || GetAncestor(hit,2)!=expectedWindow)throw new InvalidOperationException("The switch point is not inside the owned Settings HWND; no input sent.");
+            int left=GetSystemMetrics(76),top=GetSystemMetrics(77),width=GetSystemMetrics(78),height=GetSystemMetrics(79);
+            if(width<=0 || height<=0 || x<left || y<top || (long)x>=((long)left+width) || (long)y>=((long)top+height))throw new InvalidOperationException("The physical switch point is outside the virtual screen.");
+            int nx=(int)Math.Min(65535,(((long)x-left)*65536+32768)/width);
+            int ny=(int)Math.Min(65535,(((long)y-top)*65536+32768)/height);
+            var tag=UIntPtr.Size==8 ? new UIntPtr(0x4D4F4F4E5354494EUL) : new UIntPtr(0x5354494EU);
+            var down=new Input{Type=0,Data=new InputData{Mouse=new MouseInput{X=nx,Y=ny,Flags=0xC003,Extra=tag}}};
+            var up=new Input{Type=0,Data=new InputData{Mouse=new MouseInput{X=nx,Y=ny,Flags=0xC005,Extra=tag}}};
+            if(!OwnInteractiveWindow(expectedWindow,expectedProcess) || GetAncestor(WindowFromPoint(new Point{X=x,Y=y}),2)!=expectedWindow)throw new InvalidOperationException("Settings ownership or hit target changed; no input sent.");
+            // One pair includes the physical move, down and up. Never retry activation.
+            uint sent=SendInput(2,new[]{down,up},InputSize());
+            if(sent!=2){
+                uint released=0;
+                Point cursor;
+                if(sent==1 && OwnInteractiveWindow(expectedWindow,expectedProcess) && GetCursorPos(out cursor)
+                    && cursor.X==x && cursor.Y==y && GetAncestor(WindowFromPoint(cursor),2)==expectedWindow){
+                    var release=new Input{Type=0,Data=new InputData{Mouse=new MouseInput{Flags=4,Extra=tag}}};
+                    released=SendInput(1,new[]{release},InputSize());
+                }
+                throw new InvalidOperationException("Click input was incomplete (events="+sent+", guarded-own-up="+released+"); activation was not retried.");
+            }
+            return sent;
+        }finally{SetThreadDpiAwarenessContext(previous);}
+    }
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr window);
     [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr window);
@@ -101,7 +150,7 @@ public static class MoonUsabilityNative {
     [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr window,IntPtr dc,uint flags);
 }
 '@
-if($CompileOnly){[pscustomobject]@{compiled=$true;native_ui_executed=$false};return}
+if($CompileOnly){[pscustomobject]@{compiled=$true;native_ui_executed=$false;input_size=[MoonUsabilityNative]::InputSize()};return}
 if(!$Binary -or !$ExpectedSha256 -or !$OutputDirectory -or !$ProtectedConfig){throw 'Binary, ExpectedSha256, fresh OutputDirectory and ProtectedConfig are required.'}
 $Binary=(Resolve-Path -LiteralPath $Binary).Path
 $ProtectedConfig=(Resolve-Path -LiteralPath $ProtectedConfig).Path
@@ -128,6 +177,7 @@ widgets = [{id="logo",align="left",format="Moon",click="cheatsheet"},{id="clock"
 [IO.File]::WriteAllText($config,$original,[Text.UTF8Encoding]::new($false))
 $process=$null;$identity=$null;$token=$null;$failure=$null;$startup=$null;$weather=$null
 $startupOriginal=$null;$startupPin=$null;$startupDaemon=$null;$startupLastRequest=$null;$startupRestored=$false
+$startupTransitions=[Collections.Generic.List[object]]::new()
 $checks=[Collections.Generic.List[string]]::new();$cleanup=[Collections.Generic.List[string]]::new();$trees=[Collections.Generic.List[object]]::new()
 $foregroundBefore=[MoonUsabilityNative]::GetForegroundWindow().ToInt64()
 function Wait-For([scriptblock]$Condition,[string]$Description,[int]$Seconds=15){
@@ -230,7 +280,7 @@ function Save-Tree {
  $walker=[Windows.Automation.TreeWalker]::ControlViewWalker
  while($queue.Count -and $nodes.Count -lt 240){
   $entry=$queue.Dequeue();$item=$entry.element;$state=$item.Current
-  $nodes.Add([pscustomobject]@{depth=$entry.depth;name=$state.Name.Substring(0,[Math]::Min(120,$state.Name.Length));type=$state.ControlType.ProgrammaticName;enabled=$state.IsEnabled;offscreen=$state.IsOffscreen;patterns=@($item.GetSupportedPatterns()|ForEach-Object {$_.ProgrammaticName})})
+  $nodes.Add([pscustomobject]@{depth=$entry.depth;name=$state.Name.Substring(0,[Math]::Min(120,$state.Name.Length));type=$state.ControlType.ProgrammaticName;enabled=$state.IsEnabled;offscreen=$state.IsOffscreen;focused=$state.HasKeyboardFocus;focusable=$state.IsKeyboardFocusable;bounds=if($state.BoundingRectangle.IsEmpty){$null}else{[pscustomobject]@{x=$state.BoundingRectangle.X;y=$state.BoundingRectangle.Y;width=$state.BoundingRectangle.Width;height=$state.BoundingRectangle.Height}};patterns=@($item.GetSupportedPatterns()|ForEach-Object {$_.ProgrammaticName})})
   if($entry.depth -lt 12){$child=$walker.GetFirstChild($item);while($child -and $queue.Count -lt 240){$queue.Enqueue([pscustomobject]@{element=$child;depth=$entry.depth+1});$child=$walker.GetNextSibling($child)}}
  }
  $trees.Add([pscustomobject]@{bounded=$true;controls=$nodes.ToArray()})
@@ -254,14 +304,26 @@ function Toggle-Startup([bool]$Expected) {
  if(!$switch -or !$switch.Current.IsEnabled){throw 'The confirmed startup switch is unavailable.'}
  $pattern=[Windows.Automation.TogglePattern]$switch.GetCurrentPattern([Windows.Automation.TogglePattern]::Pattern)
  if(($pattern.Current.ToggleState -eq [Windows.Automation.ToggleState]::On) -ne $status.enabled){throw 'UI and independently read startup state disagree.'}
+ # The observed UIA Toggle/SetFocus paths did not produce an activation. Use one
+ # actual click only after verifying the exact element at its physical point.
+ $point=$switch.GetClickablePoint()
+ $point=[System.Windows.Point]::new([Math]::Floor($point.X),[Math]::Floor($point.Y))
+ $current=Find-Control 'Launch Moon when I sign in' ([Windows.Automation.TogglePattern]::Pattern)
+ if(!$current -or ![Windows.Automation.Automation]::Compare($current,$switch) -or
+    !$switch.Current.IsEnabled -or $switch.Current.IsOffscreen -or
+    !$switch.Current.BoundingRectangle.Contains($point)){throw 'Startup switch identity or clickable bounds changed; no click sent.'}
+ Assert-Action
+ $hit=[Windows.Automation.AutomationElement]::FromPoint($point)
+ if(!$hit -or ![Windows.Automation.Automation]::Compare($hit,$switch)){throw 'UIA hit test does not identify the exact startup switch; no click sent.'}
  $script:startupLastRequest=[DateTime]::UtcNow
- $pattern.Toggle()
+ $inserted=[MoonUsabilityNative]::ClickOwnedPoint((Main-Handle),[uint32]$process.Id,[int]$point.X,[int]$point.Y)
  Wait-For {
   $control=Find-Control 'Launch Moon when I sign in' ([Windows.Automation.TogglePattern]::Pattern)
   $confirmed=Assert-StartupPin
   $control -and $control.Current.IsEnabled -and $confirmed.enabled -eq $Expected -and
    (([Windows.Automation.TogglePattern]$control.GetCurrentPattern([Windows.Automation.TogglePattern]::Pattern)).Current.ToggleState -eq [Windows.Automation.ToggleState]::On) -eq $Expected
  } 'Native startup toggle confirmed by UI and independently validated task'
+ $startupTransitions.Add([pscustomobject]@{before_enabled=[bool]$status.enabled;after_enabled=$Expected;activation='guarded-click';inserted_events=$inserted;hit_control_verified=$true;point=[pscustomobject]@{x=$point.X;y=$point.Y};task_readback_verified=$true})
  Assert-NotSaved
 }
 function Restore-Startup {
@@ -389,9 +451,9 @@ $protectedUnchanged=$false
 try{$protectedUnchanged=(Get-FileHash -LiteralPath $ProtectedConfig -Algorithm SHA256).Hash -ceq $protectedHash}catch{$cleanup.Add($_.Exception.Message);if(!$failure){$failure=$_}}
 $report=[pscustomobject]@{
  passed=($null -eq $failure);binary=$Binary;sha256=$ExpectedSha256.ToUpperInvariant();config=$config
- checks=$checks.ToArray();startup=$startup;weather=$weather;token=$token;protected_config=$ProtectedConfig;protected_sha256=$protectedHash
+ checks=$checks.ToArray();startup=$startup;startup_transitions=$startupTransitions.ToArray();weather=$weather;token=$token;protected_config=$ProtectedConfig;protected_sha256=$protectedHash
  personal_config_unchanged=$protectedUnchanged
- daemon_lifecycle_requested=$false;startup_toggle_requested=[bool]$VerifyStartupToggle;startup_restored=$startupRestored;windows_location_requested=$false
+ daemon_lifecycle_requested=$false;startup_pointer_input_attempted=($null -ne $startupLastRequest);cursor_restoration_attempted=$false;startup_toggle_requested=[bool]$VerifyStartupToggle;startup_restored=$startupRestored;windows_location_requested=$false
  foreground_before=$foregroundBefore;foreground_after=[MoonUsabilityNative]::GetForegroundWindow().ToInt64()
  cleanup_errors=$cleanup.ToArray();error=if($failure){$failure.Exception.Message}else{$null}
 }

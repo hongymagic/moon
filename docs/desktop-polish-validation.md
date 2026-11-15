@@ -67,9 +67,9 @@ Evidence is retained under `target/polish-20261115-enhancements/`, the browser
 reports, and Windows `Downloads/Moon-validation/desktop-polish-*` receipts.
 Earlier evidence remains attached to its original immutable image hashes.
 
-## Signed Windows installation
+## Initial signed Windows installation
 
-The installed candidate includes commit `9079c6e`, which fixes internal background,
+The first installed candidate includes commit `9079c6e`, which fixes internal background,
 watchdog and restart launches for UIAccess through the Windows shell broker.
 The installer config-validation fix is in `15f8b16`. Ordinary launches retain
 their existing behavior. The focused checks passed: 16 portable daemon/CLI tests,
@@ -199,14 +199,86 @@ Settings is the native-verified `D46551D…B0A1DE90` image above.
 Upgrade operation `d4b39145b4c54905abd920da651ab208` reached the real Windows
 approval prompt at 04:37 UTC. Windows returned cancellation; the product recorded
 `cancelled`, and the independent coordinator retained its failure receipt.
-The new package was **not installed**. A fresh read-only audit at 04:40 UTC
+The new package was **not installed by that attempt**. A fresh read-only audit at 04:40 UTC
 confirmed the existing PID 42956 still manages the same four windows without a
 daemon error, using unchanged personal configuration SHA-256
 `055E3A6AC39BE61B9740810E21AAB6F44F8F19168356862D8EE5A9B3A175B832`.
-No alternate desktop manager was launched. The installed startup toggle and
-128-shortcut stress run remain pending approval of this package; their prepared
-harnesses are not evidence of execution. Receipts are retained beneath
+No alternate desktop manager was launched. At that point the installed startup
+toggle and 128-shortcut stress run were still pending; their prepared harnesses
+were not evidence of execution. Receipts are retained beneath
 `target/usability-20261115` and `Downloads\Moon-validation\usability-upgrade-worker-20261115`.
+
+The unchanged package was subsequently installed successfully. Operation
+`ece5416c88324ee1a21a4bf82d632eab` completed at **08:18:27 UTC** on 15 November,
+with installer exit code 0, product status `succeeded`, and a passing independent
+coordinator result. Source is `ad07642`. The new daemon is PID **35052**, native
+birth **134392043063996486**, running from `C:\Program Files\moon\moon.exe` with
+UIAccess enabled, elevation disabled and integrity RID 12288 in session 1.
+It reports four managed windows, no last error, and no suspended session.
+
+| Installed signed image | SHA-256 |
+|---|---|
+| Moon | `D3ABC1DE88325EDAF72983AB1BB34C44451627202C40E96F93271FE986A1168F` |
+| Settings | `55C97E722E6E2A3DEDE5577AC2F6EE6B37ACDE44DF7E7C7863CF369A48237632` |
+
+An independent file comparison matched each signed executable to the package's
+unsigned input after accounting only for the PE checksum, certificate-directory
+entry and appended signature. The installed support scripts match the package
+text followed by their Authenticode blocks. The coordinator verified the daemon's
+valid signature, unchanged semantic layout and selected configuration, unchanged
+installation identity, and exit of the old PID 42956 lifetime. Its baseline config
+hash was `055E3A6A…5B832`; this is an upgrade-time comparison, not a claim that later
+user edits cannot change the file. The layout comparison covers planned geometry,
+membership and focus; it does not independently compare native window/process
+births, actual frames or recent-workspace history.
+
+Startup remained enabled. The task's owner, group and all previous access entries
+were retained; the only added entry grants the installation owner `0x1201BF`
+(read, write and execute), without granting delete, permission-changing or
+ownership-changing rights. No other principal received a new grant. Evidence is
+`Downloads/Moon-validation/usability-upgrade-ready-worker-20261115/`
+`{before,installer-process,installer-status,result,completion}.json`.
+
+At **08:23:45 UTC**, an ordinary worker (integrity 8192, no elevation or UIAccess)
+used the signed installed helper to read the startup preference, disable it, then
+restore it to enabled. All three states were confirmed. PID 35052 remained the
+same authenticated daemon with no error, and configuration bytes were unchanged
+across that check. Its receipt is
+`Downloads/Moon-validation/usability-installed-startup-backend-20261115/result.json`.
+This proves the installed backend works without elevation. It does not exercise
+sign-out/sign-in or reboot behavior.
+
+The installed Settings image then passed all five native usability checks,
+completing at **08:33:02 UTC**. The startup switch was activated by two guarded
+clicks on its verified control: enabled → disabled → enabled. Both the visible
+UI state and independent Task Scheduler COM readback confirmed each transition.
+The same run passed the live Sydney lookup/explicit selection, bundled icon,
+bar-order and structured floating-rule checks using its owned fixture document.
+The coordinating agent inspected the installed icon-picker screenshot and
+confirmed all 12 glyphs rendered correctly.
+Settings ran at ordinary integrity 8192 without elevation or UIAccess, closed
+without cleanup errors, and returned foreground to HWND 393448.
+
+The coordinator verified unchanged personal configuration and live layout across
+the run; only the test's owned configuration was edited. Its personal baseline
+hash was `3BF5AA31799578B17DA42C992EE2C827D9E9F4D7866C711E604BF28ACE79625A`.
+PID 35052 remained healthy with no last error and five managed windows at this
+later observation. Receipts are
+`Downloads/Moon-validation/usability-installed-settings-click-20261115/`
+`{result,completion}.json` and `settings-fixture/report.json`.
+
+Earlier validation attempts remain recorded. Calling UIA Toggle did not activate
+the WebView switch; the subsequent keyboard approach stopped because UIA
+SetFocus did not establish the required control focus, before sending input.
+These were harness/provider limitations, not established product defects. The
+successful guarded-click run does not claim that either UIA pattern works or
+that keyboard accessibility was verified by those failed attempts.
+
+Windows canceled the separate high-integrity shortcut-test approval at
+**08:31:09 UTC**, before the elevated child or test body ran. Its receipt is
+`Downloads/Moon-validation/usability-installed-workspace-burst-high-20261115/completion.json`.
+The revised 128-shortcut burst remains unexecuted pending fresh user readiness;
+neither the canceled prompt nor the Settings checks establish that result.
 
 ## Acceptance boundary
 
