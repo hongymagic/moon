@@ -578,90 +578,19 @@ unsafe fn network(values: &mut Values) {
     }
 }
 
-/// The endpoint is fixed; coordinates are validated by Config. Redirects retain
-/// WinHTTP's TLS verification and no credentials/cookies are supplied.
 fn fetch_weather(config: &WeatherConfig) -> std::result::Result<(f64, i64), String> {
-    use windows::{
-        Win32::Networking::WinHttp::*,
-        core::{PCWSTR, w},
-    };
-    struct Internet(*mut std::ffi::c_void);
-    impl Internet {
-        fn new(handle: *mut std::ffi::c_void) -> std::result::Result<Self, String> {
-            if handle.is_null() {
-                Err(windows::core::Error::from_thread().to_string())
-            } else {
-                Ok(Self(handle))
-            }
-        }
-    }
-    impl Drop for Internet {
-        fn drop(&mut self) {
-            unsafe {
-                let _ = WinHttpCloseHandle(self.0);
-            }
-        }
-    }
-    unsafe {
-        let session = Internet::new(WinHttpOpen(
-            w!("moon/0.1 weather"),
-            WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-            PCWSTR::null(),
-            PCWSTR::null(),
-            0,
-        ))?;
-        WinHttpSetTimeouts(session.0, 3000, 3000, 3000, 3000).map_err(|e| e.to_string())?;
-        let connect = Internet::new(WinHttpConnect(session.0, w!("api.open-meteo.com"), 443, 0))?;
-        let path: Vec<u16> = format!("/v1/forecast?latitude={}&longitude={}&current=temperature_2m,weather_code&forecast_days=1", config.latitude, config.longitude).encode_utf16().chain(Some(0)).collect();
-        let request = Internet::new(WinHttpOpenRequest(
-            connect.0,
-            w!("GET"),
-            PCWSTR(path.as_ptr()),
-            PCWSTR::null(),
-            PCWSTR::null(),
-            std::ptr::null(),
-            WINHTTP_FLAG_SECURE,
-        ))?;
-        WinHttpSendRequest(request.0, None, None, 0, 0, 0).map_err(|e| e.to_string())?;
-        WinHttpReceiveResponse(request.0, std::ptr::null_mut()).map_err(|e| e.to_string())?;
-        let mut status = 0u32;
-        let mut size = size_of::<u32>() as u32;
-        WinHttpQueryHeaders(
-            request.0,
-            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-            PCWSTR::null(),
-            Some((&mut status as *mut u32).cast()),
-            &mut size,
-            std::ptr::null_mut(),
-        )
-        .map_err(|e| e.to_string())?;
-        if status != 200 {
-            return Err(format!("weather HTTP {status}"));
-        }
-        let mut body = Vec::new();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            let mut buffer = [0u8; 4096];
-            let mut read = 0u32;
-            WinHttpReadData(request.0, buffer.as_mut_ptr().cast(), buffer.len() as u32, &mut read)
-                .map_err(|e| e.to_string())?;
-            if read == 0 {
-                break;
-            }
-            if body.len() + read as usize > 262_144 || Instant::now() > deadline {
-                return Err("weather response exceeds size/time limit".into());
-            }
-            body.extend_from_slice(&buffer[..read as usize]);
-        }
-        let json: serde_json::Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
-        let current = &json["current"];
-        let temperature = current["temperature_2m"]
-            .as_f64()
-            .filter(|v| v.is_finite())
-            .ok_or("weather temperature missing")?;
-        let code = current["weather_code"].as_i64().ok_or("weather code missing")?;
-        Ok((temperature, code))
-    }
+    let path = format!(
+        "/v1/forecast?latitude={}&longitude={}&current=temperature_2m,weather_code&forecast_days=1",
+        config.latitude, config.longitude
+    );
+    let json = crate::http::meteo_json("api.open-meteo.com", &path)?;
+    let current = &json["current"];
+    let temperature = current["temperature_2m"]
+        .as_f64()
+        .filter(|value| value.is_finite())
+        .ok_or("weather temperature missing")?;
+    let code = current["weather_code"].as_i64().ok_or("weather code missing")?;
+    Ok((temperature, code))
 }
 
 #[cfg(test)]
@@ -791,8 +720,12 @@ mod tests {
         config.bar.widgets[0].id = "weather".into();
         let command = "fixture command is never launched".to_owned();
         config.bar.widgets[0].exec = Some(command.clone());
-        config.weather =
-            Some(WeatherConfig { latitude: 0.0, longitude: 0.0, interval_seconds: 900 });
+        config.weather = Some(WeatherConfig {
+            location: None,
+            latitude: 0.0,
+            longitude: 0.0,
+            interval_seconds: 900,
+        });
         providers.set_config(&config);
         providers.exec.insert("weather".into(), cached(Ok("command output".into())));
         providers.weather = cached(Ok((20.0, 1)));
@@ -804,8 +737,12 @@ mod tests {
         let mut providers = Providers::new();
         let mut config = with_format("{clock} {weather} {test}");
         config.bar.widgets[0].exec = Some("old command".into());
-        config.weather =
-            Some(WeatherConfig { latitude: 0.0, longitude: 0.0, interval_seconds: 900 });
+        config.weather = Some(WeatherConfig {
+            location: None,
+            latitude: 0.0,
+            longitude: 0.0,
+            interval_seconds: 900,
+        });
         providers.set_config(&config);
         let (exec_sender, exec_receiver) = mpsc::channel();
         let (weather_sender, weather_receiver) = mpsc::channel();

@@ -92,6 +92,7 @@ if ($Mode -eq 'Uninstall') {
     $ui.Primary.IsDefault=$false;$ui.Secondary.IsDefault=$true
 } elseif ($installed) {
     $ui.Heading.Text='A fresh start for Moon.';$ui.Introduction.Text='Update or repair Moon while keeping your windows and personal settings in place.'
+    $ui.Promise.Text='Keeps your startup preference and personal settings.'
     $sourceVersion=if(Test-Path -LiteralPath $Binary){[Diagnostics.FileVersionInfo]::GetVersionInfo($Binary).ProductVersion}else{$null}
     $currentPath=Join-Path (Get-MoonInstallDirectory) 'moon.exe'
     $currentVersion=if(Test-Path -LiteralPath $currentPath -PathType Leaf){[Diagnostics.FileVersionInfo]::GetVersionInfo($currentPath).ProductVersion}else{$null}

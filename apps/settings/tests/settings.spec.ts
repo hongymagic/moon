@@ -12,6 +12,16 @@ type Message = {
   };
 };
 type Host = {
+  startup: { available: boolean; enabled: boolean; message: string };
+  startupGate?: Promise<void>;
+  locationGate?: Promise<void>;
+  location: { latitude: number; longitude: number; label: string };
+  locations: {
+    id: string;
+    latitude: number;
+    longitude: number;
+    label: string;
+  }[];
   desktop: ReturnType<typeof desktopFixture>;
   library: ReturnType<typeof libraryFixture>;
   methodErrors: Record<string, { code: string; message: string; help: string }>;
@@ -164,6 +174,30 @@ async function open(
   } = {},
 ): Promise<Host> {
   const host: Host = {
+    startup: {
+      available: true,
+      enabled: true,
+      message: "Moon launches when you sign in.",
+    },
+    location: {
+      latitude: -33.87,
+      longitude: 151.21,
+      label: "Current location",
+    },
+    locations: [
+      {
+        id: "1",
+        latitude: -33.87,
+        longitude: 151.21,
+        label: "Sydney, New South Wales, Australia",
+      },
+      {
+        id: "2",
+        latitude: 46.14,
+        longitude: -60.18,
+        label: "Sydney, Nova Scotia, Canada",
+      },
+    ],
     desktop: desktopFixture(),
     library: libraryFixture(),
     methodErrors: {},
@@ -250,6 +284,22 @@ async function open(
         ok: false,
         error: host.methodErrors[message.method],
       };
+    if (message.method === "startup-status")
+      return { id: message.id, ok: true, result: host.startup };
+    if (message.method === "startup-set") {
+      await host.startupGate;
+      host.startup = {
+        ...host.startup,
+        enabled: message.params.enabled as boolean,
+      };
+      return { id: message.id, ok: true, result: host.startup };
+    }
+    if (message.method === "location-current") {
+      await host.locationGate;
+      return { id: message.id, ok: true, result: host.location };
+    }
+    if (message.method === "location-search")
+      return { id: message.id, ok: true, result: { results: host.locations } };
     if (message.method === "library-import-file") {
       await host.fileGate;
       return {
@@ -414,17 +464,27 @@ async function open(
   await page.route("http://moon.settings/**", async (route) => {
     const path = new URL(route.request().url()).pathname;
     const file = path === "/" ? "index.html" : path.slice(1);
-    if (!["index.html", "app.js", "styles.css", "moon.svg"].includes(file)) {
+    if (
+      ![
+        "index.html",
+        "app.js",
+        "styles.css",
+        "moon.svg",
+        "moon-symbols.ttf",
+      ].includes(file)
+    ) {
       await route.abort();
       return;
     }
-    const type = file.endsWith(".js")
-      ? "text/javascript"
-      : file.endsWith(".css")
-        ? "text/css"
-        : file.endsWith(".svg")
-          ? "image/svg+xml"
-          : "text/html";
+    const type = file.endsWith(".ttf")
+      ? "font/ttf"
+      : file.endsWith(".js")
+        ? "text/javascript"
+        : file.endsWith(".css")
+          ? "text/css"
+          : file.endsWith(".svg")
+            ? "image/svg+xml"
+            : "text/html";
     await route.fulfill({
       status: 200,
       contentType: type,
@@ -480,7 +540,11 @@ test("startup: ready follows the loaded interface and is not a host request", as
   expect(notices).toHaveLength(1);
   expect(notices[0]).toMatchObject({ id: 0, heading: "General" });
   expect(notices[0]!.buttons).toContain("Save changes");
-  expect(host.calls.map((call) => call.method)).toEqual(["load", "overview"]);
+  expect(host.calls.map((call) => call.method)).toEqual([
+    "load",
+    "overview",
+    "startup-status",
+  ]);
   await navigate(page, "Appearance");
   expect(await readyNotifications(page)).toHaveLength(1);
 });
@@ -549,7 +613,11 @@ test("sequential rule edits retain commands and every matcher in the submitted p
 }) => {
   const host = await open(page, { rules: [structuredClone(personalRule)] });
   await navigate(page, "Rules");
+  await page.getByText("Advanced commands", { exact: true }).click();
   await change(page, "Commands · one per line", "move-to-workspace 2");
+  await page
+    .getByText("Match 1 · when these conditions match", { exact: true })
+    .click();
   await change(page, "process value", "ChangedFixture");
   await change(page, "class value", "OwnedWindow");
   await page.getByRole("button", { name: "Save changes", exact: true }).click();
@@ -584,8 +652,14 @@ test("workspace rename and icon survive reordering", async ({ page }) => {
   const cards = page.locator(".list-card");
   await cards.nth(0).getByLabel("Name", { exact: true }).fill("Code");
   await cards.nth(0).getByLabel("Name", { exact: true }).press("Tab");
-  await cards.nth(0).getByLabel("Icon", { exact: true }).fill("C");
-  await cards.nth(0).getByLabel("Icon", { exact: true }).press("Tab");
+  await cards
+    .nth(0)
+    .getByRole("textbox", { name: /^Icon for workspace / })
+    .fill("C");
+  await cards
+    .nth(0)
+    .getByRole("textbox", { name: /^Icon for workspace / })
+    .press("Tab");
   await cards
     .nth(0)
     .getByRole("button", { name: /^Move down:/ })
@@ -593,9 +667,9 @@ test("workspace rename and icon survive reordering", async ({ page }) => {
   await expect(cards.nth(1).getByLabel("Name", { exact: true })).toHaveValue(
     "Code",
   );
-  await expect(cards.nth(1).getByLabel("Icon", { exact: true })).toHaveValue(
-    "C",
-  );
+  await expect(
+    cards.nth(1).getByRole("textbox", { name: /^Icon for workspace / }),
+  ).toHaveValue("C");
   await page.getByRole("button", { name: "Save changes", exact: true }).click();
   await expect.poll(() => saveCalls(host).length).toBe(1);
   expect(saveCalls(host)[0]?.params.edits).toEqual([
@@ -615,14 +689,19 @@ test("clearing an optional workspace field and disabling weather request removal
     weather: { latitude: 10, longitude: 20, "interval-seconds": 900 },
   });
   await navigate(page, "Workspaces");
-  await change(page, "Icon", "");
-  await navigate(page, "Advanced");
+  await change(page, "Icon for workspace Work", "");
+  await navigate(page, "Bar");
+  await page
+    .getByText("Coordinates and update interval", { exact: true })
+    .click();
   await change(page, "Latitude", "91");
   await expect(page.getByLabel("Latitude", { exact: true })).toHaveAttribute(
     "aria-invalid",
     "true",
   );
-  await page.getByRole("button", { name: "Turn off", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Turn weather off", exact: true })
+    .click();
   await expect(page.getByRole("button", { name: "Review errors" })).toHaveCount(
     0,
   );
@@ -992,7 +1071,10 @@ test("valid decimal appearance and weather settings can be saved", async ({
   await navigate(page, "Appearance");
   await change(page, "Text size", "13.2");
   await change(page, "Opacity", "0.99");
-  await navigate(page, "Advanced");
+  await navigate(page, "Bar");
+  await page
+    .getByText("Coordinates and update interval", { exact: true })
+    .click();
   await change(page, "Latitude", "33.123456");
   await change(page, "Update interval", "100000");
   await page.getByRole("button", { name: "Save changes", exact: true }).click();
@@ -1084,6 +1166,7 @@ for (const width of [320, 370, 740]) {
     for (const name of [
       "General",
       "Appearance",
+      "Bar",
       "Workspaces",
       "Shortcuts",
       "Rules",
@@ -1861,7 +1944,7 @@ test("Rule creation previews current matches and stages one undoable personal ru
   ).toBeVisible();
   await page.getByRole("button", { name: "Undo last change" }).click();
   await expect(
-    page.getByText("1 personal rules", { exact: true }),
+    page.getByText("1 personal rule", { exact: true }),
   ).toBeVisible();
   expect(
     host.calls.filter((c) => ["save", "window-action"].includes(c.method)),
@@ -2682,4 +2765,398 @@ test("A clean standalone Overview reserves the full client height for its canvas
     .fill("27");
   await page.getByRole("button", { name: "Overview", exact: true }).click();
   await expect(page.locator(".savebar")).toBeVisible();
+});
+
+test("startup preference changes immediately without saving or discarding the desktop draft", async ({
+  page,
+}) => {
+  const host = await open(page);
+  await change(page, "Inner gap", "24");
+  let release!: () => void;
+  host.startupGate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const startup = page.getByRole("switch", {
+    name: "Launch Moon when I sign in",
+  });
+  await expect(startup).toBeChecked();
+  await startup.uncheck();
+  await expect(startup).toBeDisabled();
+  expect(
+    host.calls.filter((call) => call.method === "startup-set"),
+  ).toHaveLength(1);
+  expect(saveCalls(host)).toHaveLength(0);
+  release();
+  await expect(startup).toBeEnabled();
+  await expect(startup).not.toBeChecked();
+  await expect(page.getByLabel("Inner gap", { exact: true })).toHaveValue("24");
+  await page.getByRole("button", { name: "Save changes", exact: true }).click();
+  await expect.poll(() => saveCalls(host).length).toBe(1);
+  expect(saveCalls(host)[0]!.params.edits).toEqual([
+    { op: "set", path: ["gaps", "inner"], value: 24 },
+  ]);
+  expect(host.calls.some((call) => call.method.startsWith("location-"))).toBe(
+    false,
+  );
+});
+
+test("startup errors and unavailable installation keep the confirmed switch state", async ({
+  page,
+}) => {
+  const host = await open(page);
+  host.methodErrors["startup-set"] = {
+    code: "unavailable",
+    message: "Owned startup task could not be changed.",
+    help: "Repair Moon Setup.",
+  };
+  const startup = page.getByRole("switch", {
+    name: "Launch Moon when I sign in",
+  });
+  await startup.click();
+  await expect(page.getByRole("alert")).toContainText("Owned startup task");
+  await expect(startup).toBeChecked();
+  host.startup = {
+    available: false,
+    enabled: true,
+    message: "Install Moon to manage launch on sign-in.",
+  };
+  await page.getByRole("button", { name: "Retry startup status" }).click();
+  await expect(startup).toBeDisabled();
+  await expect(page.getByText(host.startup.message)).toBeVisible();
+  expect(saveCalls(host)).toHaveLength(0);
+});
+
+test("weather uses explicit Windows permission then city disambiguation without zero coordinates or automatic writes", async ({
+  page,
+}) => {
+  const host = await open(page);
+  await navigate(page, "Bar");
+  expect(
+    host.calls.filter((call) => call.method.startsWith("location-")),
+  ).toHaveLength(0);
+  await expect(page.getByText("Weather is off", { exact: true })).toBeVisible();
+  host.methodErrors["location-current"] = {
+    code: "denied",
+    message: "Windows location access is off.",
+    help: "Choose a city or open Windows location settings.",
+  };
+  await page
+    .getByRole("button", { name: "Use current location", exact: true })
+    .click();
+  await expect(page.getByRole("alert")).toContainText(
+    "Windows location access is off",
+  );
+  await expect(
+    page.getByRole("button", { name: "Save changes", exact: true }),
+  ).toBeDisabled();
+  await page.getByRole("button", { name: "Windows location settings" }).click();
+  expect(
+    host.calls.some((call) => call.method === "location-open-settings"),
+  ).toBe(true);
+  await page.getByRole("searchbox", { name: "City or town" }).fill("Sydney");
+  await page.getByRole("button", { name: "Find city", exact: true }).click();
+  await expect(
+    page.getByRole("button", {
+      name: "Sydney, Nova Scotia, Canada",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Sydney, Nova Scotia, Canada", exact: true })
+    .scrollIntoViewIfNeeded();
+  await page.screenshot({
+    path: "../../target/settings-new-controls/weather-search.png",
+  });
+  await expect(
+    page.getByRole("button", { name: "Save changes", exact: true }),
+  ).toBeDisabled();
+  await page
+    .getByRole("button", {
+      name: "Sydney, New South Wales, Australia",
+      exact: true,
+    })
+    .click();
+  expect(saveCalls(host)).toHaveLength(0);
+  await page.getByRole("button", { name: "Save changes", exact: true }).click();
+  await expect.poll(() => saveCalls(host).length).toBe(1);
+  expect(saveCalls(host)[0]!.params.edits).toEqual([
+    {
+      op: "set",
+      path: ["weather"],
+      value: {
+        latitude: -33.87,
+        longitude: 151.21,
+        location: "Sydney, New South Wales, Australia",
+        "interval-seconds": 900,
+      },
+    },
+  ]);
+});
+
+test("current location updates the existing draft in one undo step and keeps its refresh preference", async ({
+  page,
+}) => {
+  const weather = { latitude: 50, longitude: 10, "interval-seconds": 1800 };
+  const host = await open(page, { weather });
+  await navigate(page, "Bar");
+  await expect(
+    page.getByRole("heading", { name: "Custom location", exact: true }),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Use current location", exact: true })
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "Current location", exact: true }),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Undo last change", exact: true })
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "Custom location", exact: true }),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Use current location", exact: true })
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "Current location", exact: true }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Save changes", exact: true }).click();
+  await expect.poll(() => saveCalls(host).length).toBe(1);
+  expect(saveCalls(host)[0]!.params.edits).toEqual([
+    {
+      op: "set",
+      path: ["weather"],
+      value: {
+        ...weather,
+        latitude: host.location.latitude,
+        longitude: host.location.longitude,
+        location: host.location.label,
+      },
+    },
+  ]);
+});
+
+test("a delayed location result cannot overwrite a newer weather choice", async ({
+  page,
+}) => {
+  const host = await open(page, {
+    weather: { latitude: 50, longitude: 10, "interval-seconds": 900 },
+  });
+  await navigate(page, "Bar");
+  let release!: () => void;
+  host.locationGate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page
+    .getByRole("button", { name: "Use current location", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Turn weather off", exact: true })
+    .click();
+  release();
+  await expect(page.getByRole("alert")).toContainText("weather draft changed");
+  await expect(page.getByText("Weather is off", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Save changes", exact: true }).click();
+  await expect.poll(() => saveCalls(host).length).toBe(1);
+  expect(saveCalls(host)[0]!.params.edits).toEqual([
+    { op: "reset", path: ["weather"] },
+  ]);
+});
+
+test("workspace icon picker loads the bundled font and preserves unrelated workspace settings", async ({
+  page,
+}) => {
+  const workspace = {
+    name: "Work",
+    icon: "\uf0b1",
+    monitor: "Desk",
+    color: "terracotta",
+    gaps: { inner: 12, outer: 20 },
+  };
+  const host = await open(page, {
+    workspaces: [workspace, { name: "Personal" }],
+  });
+  await navigate(page, "Workspaces");
+  const input = page.getByLabel("Icon for workspace Work", { exact: true });
+  await expect(input).toHaveValue("\uf0b1");
+  await page
+    .getByRole("button", { name: "Choose icon", exact: true })
+    .first()
+    .click();
+  const glyph = page.getByRole("button", { name: "Code", exact: true });
+  await expect(glyph).toBeVisible();
+  expect(
+    await page.evaluate(async () => {
+      await document.fonts.load('24px "Moon Symbols"', "\uf121");
+      return [...document.fonts].some(
+        (font) => font.family === "Moon Symbols" && font.status === "loaded",
+      );
+    }),
+  ).toBe(true);
+  await page.screenshot({
+    path: "../../target/settings-new-controls/icon-picker.png",
+  });
+  await glyph.click();
+  await expect(input).toHaveValue("\uf121");
+  await expect(
+    page.getByLabel("Icon for workspace Work preview", { exact: true }),
+  ).toHaveText("\uf121");
+  await page.getByRole("button", { name: "Save changes", exact: true }).click();
+  await expect.poll(() => saveCalls(host).length).toBe(1);
+  expect(saveCalls(host)[0]!.params.edits).toEqual([
+    { op: "set", path: ["workspaces", 0, "icon"], value: "\uf121" },
+  ]);
+});
+
+test("common app rules use behavior and workspace choices while custom rules remain untouched", async ({
+  page,
+}) => {
+  const custom = {
+    commands: ["set-floating", "move-to-workspace 1"],
+    matches: [{ title: { regex: "special.*" }, class: { equals: "Custom" } }],
+  };
+  const host = await open(page, {
+    workspaces: [{ name: "1" }, { name: "Writing room" }],
+    rules: [personalRule, custom],
+  });
+  await navigate(page, "Rules");
+  await page.getByLabel("App name", { exact: true }).fill("Code");
+  await page
+    .getByLabel("App behavior", { exact: true })
+    .first()
+    .selectOption("workspace");
+  await page
+    .getByLabel("Destination workspace", { exact: true })
+    .first()
+    .selectOption("Writing room");
+  await page.getByRole("button", { name: "Save changes", exact: true }).click();
+  await expect.poll(() => saveCalls(host).length).toBe(1);
+  expect(saveCalls(host)[0]!.params.edits).toEqual([
+    {
+      op: "set",
+      path: ["rules"],
+      value: [
+        {
+          commands: ['move-to-workspace "Writing room"'],
+          matches: [{ process: { equals: "Code" } }],
+        },
+        custom,
+      ],
+    },
+  ]);
+});
+
+test("bar cards preserve custom commands and styling across order and alignment edits", async ({
+  page,
+}) => {
+  const custom = {
+    id: "custom",
+    format: "{custom}",
+    align: "left",
+    exec: "echo safe",
+    click: "my-alias",
+    background: "surface0",
+    icon: "\uf121",
+    "icon-color": "terracotta",
+    "interval-seconds": 30,
+    "max-width": 444,
+  };
+  const clock = {
+    id: "clock",
+    format: "{clock}",
+    align: "right",
+    "interval-seconds": 5,
+    "max-width": 300,
+  };
+  const host = await open(page, {
+    bar: { ...defaults.bar, widgets: [custom, clock] },
+  });
+  await navigate(page, "Bar");
+  await page.locator(".widget-summary").first().click();
+  await page
+    .getByLabel("Position of Custom text", { exact: true })
+    .selectOption("center");
+  await page
+    .getByRole("button", { name: "Move later: Custom text", exact: true })
+    .click();
+  await expect(page.locator(".widget-summary strong")).toHaveText([
+    "Clock",
+    "Custom text",
+  ]);
+  await expect(page.locator(".widget-summary").nth(1)).toBeFocused();
+  await page.getByRole("button", { name: "Save changes", exact: true }).click();
+  await expect.poll(() => saveCalls(host).length).toBe(1);
+  expect(saveCalls(host)[0]!.params.edits).toEqual([
+    {
+      op: "set",
+      path: ["bar", "widgets"],
+      value: [clock, { ...custom, align: "center" }],
+    },
+  ]);
+});
+
+for (const width of [320, 740])
+  test(`new controls fit ${width}px with expanded cards and visible save actions`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 740 });
+    await open(page, { rules: [personalRule] });
+    for (const theme of ["light", "dark"] as const) {
+      await page.emulateMedia({ colorScheme: theme });
+      for (const name of ["General", "Bar", "Workspaces", "Rules"]) {
+        await navigate(page, name);
+        if (name === "Bar")
+          await page.locator(".widget-summary").first().click();
+        expect(
+          await page.evaluate(
+            () => document.documentElement.scrollWidth <= innerWidth,
+          ),
+        ).toBe(true);
+        await page.screenshot({
+          path: `../../target/settings-new-controls/${name.toLowerCase()}-${theme}-${width}.png`,
+        });
+      }
+    }
+  });
+
+test("weather source credits open only fixed native attribution destinations without editing the draft", async ({
+  page,
+}) => {
+  const host = await open(page);
+  await navigate(page, "Bar");
+  await expect(page.getByText("Weather data:", { exact: false })).toContainText(
+    "CC BY 4.0",
+  );
+  expect(
+    host.calls.filter((call) => call.method === "location-attribution"),
+  ).toHaveLength(0);
+  await page.getByRole("button", { name: "Open-Meteo", exact: true }).click();
+  await page.getByRole("button", { name: "GeoNames", exact: true }).click();
+  expect(
+    host.calls
+      .filter((call) => call.method === "location-attribution")
+      .map((call) => call.params),
+  ).toEqual([{ provider: "open-meteo" }, { provider: "geonames" }]);
+  expect(saveCalls(host)).toHaveLength(0);
+  await expect(
+    page.getByRole("button", { name: "Save changes", exact: true }),
+  ).toBeDisabled();
+});
+
+test("bundled icon bytes preload on General before opening the first picker", async ({
+  page,
+}) => {
+  const font = page.waitForResponse(
+    (response) => new URL(response.url()).pathname === "/moon-symbols.ttf",
+  );
+  await open(page);
+  await expect(
+    page.getByRole("heading", { name: "General", exact: true }),
+  ).toBeVisible();
+  const response = await font;
+  expect(response.status()).toBe(200);
+  expect(response.request().resourceType()).toBe("font");
+  expect(await response.body()).toEqual(
+    await readFile(new URL("../dist/moon-symbols.ttf", import.meta.url)),
+  );
 });

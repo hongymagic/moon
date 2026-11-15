@@ -305,6 +305,13 @@
           "format": "double",
           "type": "number"
         },
+        "location": {
+          "description": "Friendly city name, or the label for a one-time Windows location lookup.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "longitude": {
           "format": "double",
           "type": "number"

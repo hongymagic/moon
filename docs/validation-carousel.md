@@ -23,10 +23,90 @@ retargets, releases offscreen thumbnail relationships, and limits each monitor t
 A hidden-owned-popup regression covers cancellation, monitor removal, preference
 change, expiry, stale sources, a subsequent presentation and final destruction.
 The updated interactive probe now expects a rapid reversal to retarget and settle.
-Those Windows regressions have **not been executed** for this refinement; the
-historical nine-case result below describes the prior cancellation behavior.
+The four Windows carousel unit tests passed on 15 November, including hidden
+overlay cleanup. The lifecycle fixture was then made independent of Explorer by
+registering an owned hidden source, without changing production behavior. That
+final test binary (`96A547E863CEA07686B399972B2A4F8FDA6B7E38979E338C5C8BE6D5A8DC13C7`)
+also passed all four tests in the coordinating agent's native rerun at 04:35 UTC;
+its build is recorded in `target/carousel-background-interruption-checks.json`.
+The historical nine-case interactive result below describes the prior
+cancellation behavior, not a new native rapid-retarget or keyboard-burst
+acceptance result.
 
 ## DWM source lifecycle
+
+### Desktop background correction, 15 November 2026
+
+The reported wallpaper/icon flash had a direct code cause: occupied-workspace
+transitions painted a solid theme colour over the entire work area, while
+empty-to-empty transitions skipped presentation. The revised canvas registers a
+stationary live shell-desktop thumbnail before its moving application thumbnails.
+Its source rectangle is cropped to the monitor's work area, including monitors
+with negative origins. Missing sources, invalid dimensions or incomplete coverage
+refuse preparation before showing the canvas. A changed shell lifetime cancels
+an active presentation.
+No desktop settings, foreign window styles or screen captures are used by the
+production implementation.
+
+The owned `desktop_backdrop_probe` executable
+`E0D865F65937127C6D243AD6970FB2D6A59D899B8AE145D937B1921D5820EA15`
+was run by the coordinating agent on the current Windows 11 host. Its report at
+`C:\Users\dhong\Downloads\Moon-validation\usability-20261115\desktop-backdrop\report.json`
+records a 3840×2160 shell source, matching native bounds, unchanged foreground and
+no changes to other windows. The captured owned popup was visually inspected:
+both the actual wallpaper and all six desktop icons were present. This establishes
+the source content on this host; it does not imply that successful DWM registration
+alone proves nonblank pixels on every Explorer version. The opt-in `--carousel`
+probe checks stationary gap pixels and moving application pixels through the
+production presentation path; that additional validation is recorded separately.
+
+The first three production-path probe reports remain under
+`usability-20261115\desktop-carousel`, `desktop-carousel-v2` and
+`desktop-carousel-v3`. None establishes completion of the 200 ms transition:
+the first and third retired before enough active samples, while the second's
+individual screen-pixel reads stalled its own message loop for 0.864–2.648 seconds.
+All sampled gap pixels matched, which is useful content evidence but not a
+successful timing result. The revised probe uses one screen-to-memory copy per
+sample, reads all 48 gap points and app-colour points from that buffer, records
+cursor positions and source validity at retirement, and requires at least three
+active samples and the full presentation duration. It preserves the product's
+mouse-cancellation behavior and labels observed pointer interruption separately
+from a pixel mismatch. Zero active samples produce no affirmative pixel result.
+
+The revised probe `3F72F328B811ABE7AE3A5001CAC92CB6BCA55D48DBD7E5D19EA32ADCB7E97AEE`
+passed all three cases in
+`C:\Users\dhong\Downloads\Moon-validation\usability-20261115\desktop-carousel-v4\report.json`.
+It used a 960×540 viewport on the 3840×2160 desktop, two owned coloured windows,
+and the actual production carousel and shell-cloak paths.
+
+| Transition | Active pixel samples | Samples containing moving app pixels | Observed retirement |
+|---|---:|---:|---:|
+| Occupied → occupied | 6 | 6 | 244.459 ms |
+| Occupied → empty | 5 | 3 | 230.302 ms |
+| Empty → occupied | 5 | 5 | 229.872 ms |
+
+All 48 stationary gap pixels matched the desktop reference in every active sample
+and after each transition. All recorded cursor positions and the foreground were
+unchanged; both sources remained on the current native desktop. The three saved
+mid-transition images were also inspected: coloured app pages move across the
+same stationary car wallpaper, including the area exposed by an outgoing page.
+The separate full-desktop source image above establishes icon content on this
+host; the centre-viewport animation images do not contain the desktop icons.
+
+The retirement times include message-pump scheduling and synchronous bulk pixel
+readback, which took 25.7–36.2 ms per active sample. They demonstrate completion
+and repeated composed-pixel correctness with the production 200 ms duration;
+they are not a production frame-time, input-latency or full-4K memory benchmark.
+The fixture does not write configuration or send daemon commands. The outer
+coordinator separately observed four managed windows and no daemon error; this
+probe does not claim a configuration-hash comparison it did not perform.
+
+Microsoft documents both the shell desktop handle and a desktop-source DWM
+thumbnail example. The implementation uses the handle API instead of locating
+the example's `Progman` class by name. See
+[GetShellWindow](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getshellwindow),
+[DWM thumbnail overview](https://learn.microsoft.com/en-us/windows/win32/dwm/thumbnail-ovw),
+and [thumbnail source/destination rectangles](https://learn.microsoft.com/en-us/windows/win32/api/dwmapi/ns-dwmapi-dwm_thumbnail_properties).
 
 `crates/moon-win/examples/thumbnail_probe.rs` used a separate ordinary Win32/GDI
 source process and three owned destination styles. Each phase changed the source

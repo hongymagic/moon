@@ -103,12 +103,18 @@ async function request<T>(method: string, params: unknown = {}): Promise<T> {
       "save",
       "library-import-file",
       "library-export-file",
+      "location-current",
     ].includes(method)
       ? undefined
-      : setTimeout(() => {
-          pending.delete(id);
-          reject(new Error("Moon is taking longer than expected. Try again."));
-        }, 20000);
+      : setTimeout(
+          () => {
+            pending.delete(id);
+            reject(
+              new Error("Moon is taking longer than expected. Try again."),
+            );
+          },
+          method === "location-search" ? 30000 : 20000,
+        );
     pending.set(id, { resolve: (value) => resolve(value as T), reject, timer });
     try {
       window.ipc!.postMessage(message);
@@ -165,6 +171,7 @@ const icons: Record<string, string> = {
   General: "M5 6h14M5 12h14M5 18h14M9 3v6M15 9v6M10 15v6",
   Appearance:
     "M12 3a9 9 0 1 0 9 9c0-2-2-2-4-2h-2a2 2 0 0 1-2-2V5c0-1-1-2-1-2ZM7 9h.01M7 14h.01M11 17h.01",
+  Bar: "M3 5h18v5H3zM6 7.5h2M11 7.5h2M16 7.5h2M3 14h18v6H3z",
   Workspaces: "M3 4h8v7H3zM14 4h7v7h-7zM3 14h8v7H3zM14 14h7v7h-7z",
   Shortcuts:
     "M3 6h18v13H3zM6 10h.01M10 10h.01M14 10h.01M18 10h.01M6 14h.01M9 16h8M18 14h.01",
@@ -201,6 +208,7 @@ const descriptions: Record<string, string> = {
     "Make room for the way you work. Set how windows move, focus, and fit together.",
   Appearance:
     "A quieter desktop, made yours. Fine-tune the bar, borders, and color.",
+  Bar: "Make the desktop bar yours. Choose the information, order, and actions you use every day.",
   Workspaces:
     "Give each part of your day a place. Names, icons, and monitor assignments stay together.",
   Shortcuts:
@@ -2722,6 +2730,7 @@ function renderHealth(): void {
 
 function renderGeneral(): void {
   renderOverview();
+  renderStartup();
   const layout = section("Workspace motion");
   field(
     layout,
@@ -2973,6 +2982,694 @@ function renderAppearance(): void {
   content.append(actions);
   updatePreview();
 }
+// Use the same licensed symbol font as the native bar. Its private-use glyphs
+// are not interchangeable with Segoe Fluent Icons or arbitrary system fonts.
+const workspaceSymbols = [
+  ["Home", "\uf015"],
+  ["Work", "\uf0b1"],
+  ["Code", "\uf121"],
+  ["Terminal", "\uf120"],
+  ["Browser", "\uf0ac"],
+  ["Reading", "\uf02d"],
+  ["Music", "\uf001"],
+  ["Chat", "\uf086"],
+  ["Games", "\uf11b"],
+  ["Photos", "\uf03e"],
+  ["Files", "\uf07b"],
+  ["Mail", "\uf0e0"],
+] as const;
+function selectControl(
+  label: string,
+  value: string,
+  choices: readonly (readonly [string, string])[],
+  changed: (value: string) => void,
+): HTMLLabelElement {
+  const wrap = el("label", "", label);
+  const input = el("select");
+  input.setAttribute("aria-label", label);
+  for (const [id, title] of choices) {
+    const option = el("option", "", title);
+    option.value = id;
+    input.append(option);
+  }
+  if (!choices.some(([id]) => id === value)) {
+    const option = el("option", "", value || "Custom");
+    option.value = value;
+    input.append(option);
+  }
+  input.value = value;
+  input.addEventListener("change", () => changed(input.value));
+  wrap.append(input);
+  return wrap;
+}
+function symbolControl(
+  label: string,
+  value: string,
+  changed: (value: string) => void,
+): HTMLElement {
+  const wrap = el("div", "symbol-control");
+  const preview = el("span", "symbol-preview moon-symbol", value || "—");
+  preview.setAttribute("aria-label", `${label} preview`);
+  const input = simple(
+    label,
+    value,
+    (next) => {
+      preview.textContent = next || "—";
+      changed(next);
+    },
+    { placeholder: "No icon" },
+  );
+  input.querySelector("input")!.classList.add("moon-symbol");
+  const choose = button(
+    "Choose icon",
+    () =>
+      editorDialog(
+        label.startsWith("Icon for workspace")
+          ? "Choose a workspace icon"
+          : "Choose a bar icon",
+        (dialog, close) => {
+          dialog.append(
+            el(
+              "p",
+              "note",
+              "These symbols are included with Moon and also appear in your desktop bar.",
+            ),
+          );
+          const choices = el("div", "symbol-grid");
+          choices.setAttribute("role", "group");
+          choices.setAttribute("aria-label", "Included icons");
+          const commit = (next: string) => {
+            input.querySelector("input")!.value = next;
+            preview.textContent = next || "—";
+            changed(next);
+            close();
+          };
+          for (const [name, glyph] of workspaceSymbols) {
+            const item = button("", () => commit(glyph), "symbol-choice");
+            item.setAttribute("aria-label", name);
+            item.setAttribute(
+              "aria-pressed",
+              String(input.querySelector("input")!.value === glyph),
+            );
+            const symbol = el("span", "moon-symbol", glyph);
+            symbol.setAttribute("aria-hidden", "true");
+            item.append(symbol, el("span", "", name));
+            choices.append(item);
+          }
+          dialog.append(
+            choices,
+            el(
+              "p",
+              "note",
+              "You can also type text or an emoji in the icon field. Other custom symbols depend on their font.",
+            ),
+          );
+          const actions = el("div", "actions");
+          actions.append(
+            button("Cancel", close),
+            button("No icon", () => commit("")),
+          );
+          dialog.append(actions);
+        },
+      ),
+    "quiet",
+  );
+  wrap.append(preview, input, choose);
+  return wrap;
+}
+type StartupState = { available: boolean; enabled: boolean; message: string };
+let startupState: StartupState | undefined;
+let startupBusy = false;
+let startupRequested: boolean | undefined;
+let startupError = "";
+async function refreshStartup(): Promise<void> {
+  if (startupBusy) return;
+  startupBusy = true;
+  paintStartup();
+  try {
+    startupState = await request<StartupState>("startup-status");
+    startupError = "";
+  } catch (error) {
+    startupError = error instanceof Error ? error.message : String(error);
+  } finally {
+    startupBusy = false;
+    paintStartup();
+  }
+}
+function paintStartup(): void {
+  const card = document.querySelector<HTMLElement>("#startup-control");
+  if (!card) return;
+  card.replaceChildren();
+  const row = el("div", "row");
+  const copy = el("div", "copy");
+  const id = "launch-at-signin";
+  const label = el("label", "", "Launch Moon when I sign in");
+  label.htmlFor = id;
+  copy.append(
+    label,
+    el(
+      "div",
+      "description",
+      startupState?.message ||
+        (startupBusy
+          ? "Checking your installed startup preference…"
+          : "Startup preference is unavailable."),
+    ),
+  );
+  const control = el("div", "control");
+  const input = el("input");
+  input.type = "checkbox";
+  input.id = id;
+  input.setAttribute("role", "switch");
+  input.checked = startupRequested ?? startupState?.enabled ?? false;
+  input.disabled = startupBusy || !startupState?.available;
+  input.addEventListener("change", () => {
+    const enabled = input.checked;
+    void (async () => {
+      if (startupBusy) return;
+      startupBusy = true;
+      startupRequested = enabled;
+      startupError = "";
+      paintStartup();
+      try {
+        startupState = await request<StartupState>("startup-set", { enabled });
+      } catch (error) {
+        startupError = error instanceof Error ? error.message : String(error);
+      } finally {
+        startupBusy = false;
+        startupRequested = undefined;
+        paintStartup();
+        document.querySelector<HTMLInputElement>("#launch-at-signin")?.focus();
+      }
+    })();
+  });
+  control.append(input);
+  row.append(copy, control);
+  card.append(row);
+  card.append(
+    el(
+      "p",
+      "note startup-note",
+      "This Windows preference changes immediately. Your unsaved desktop settings stay in the draft.",
+    ),
+  );
+  if (startupError) {
+    const error = el("div", "notice error", startupError);
+    error.setAttribute("role", "alert");
+    card.append(error, button("Retry startup status", refreshStartup, "quiet"));
+  }
+}
+function renderStartup(): void {
+  const card = section("When you sign in");
+  card.id = "startup-control";
+  paintStartup();
+  if (!startupState && !startupError && !startupBusy) void refreshStartup();
+}
+type LocationChoice = {
+  id?: string;
+  label: string;
+  latitude: number;
+  longitude: number;
+};
+let locationBusy = false;
+let locationQuery = "";
+let locationResults: LocationChoice[] = [];
+let locationError = "";
+let locationSearched = false;
+function chooseWeatherLocation(location: LocationChoice): void {
+  if (
+    !Number.isFinite(location.latitude) ||
+    !Number.isFinite(location.longitude) ||
+    Math.abs(location.latitude) > 90 ||
+    Math.abs(location.longitude) > 180
+  )
+    throw new Error(
+      "That location did not include valid coordinates. Choose another result.",
+    );
+  stage(["weather"], {
+    ...object(draft.weather),
+    latitude: location.latitude,
+    longitude: location.longitude,
+    location: location.label,
+    "interval-seconds": object(draft.weather)["interval-seconds"] ?? 900,
+  });
+  locationResults = [];
+  locationError = "";
+  locationSearched = false;
+  renderPage();
+  toast(`Weather location set to ${location.label} in your draft.`);
+}
+async function findWeatherLocation(current: boolean): Promise<void> {
+  if (locationBusy) return;
+  if (!current && !locationQuery.trim()) {
+    locationError = "Enter a city or town name.";
+    paintWeather();
+    return;
+  }
+  const previousWeather = JSON.stringify(draft.weather);
+  const previousSource = loaded.snapshot.source;
+  locationBusy = true;
+  locationError = "";
+  locationResults = [];
+  locationSearched = false;
+  paintWeather();
+  try {
+    if (current) {
+      const location = await request<LocationChoice>("location-current");
+      if (
+        busy ||
+        previousSource !== loaded.snapshot.source ||
+        previousWeather !== JSON.stringify(draft.weather)
+      )
+        throw new Error(
+          "Your weather draft changed while finding your location. Choose your location again.",
+        );
+      chooseWeatherLocation(location);
+    } else {
+      const result = await request<{ results: LocationChoice[] }>(
+        "location-search",
+        { query: locationQuery.trim() },
+      );
+      locationResults = result.results;
+      locationSearched = true;
+    }
+  } catch (error) {
+    locationError = error instanceof Error ? error.message : String(error);
+  } finally {
+    locationBusy = false;
+    paintWeather();
+  }
+}
+function paintWeather(): void {
+  const card = document.querySelector<HTMLElement>("#weather-control");
+  if (!card) return;
+  card.replaceChildren();
+  const weather = object(draft.weather);
+  const heading = el("div", "list-head");
+  heading.append(
+    el(
+      "h3",
+      "",
+      draft.weather
+        ? String(weather.location || "Custom location")
+        : "Weather is off",
+    ),
+  );
+  if (draft.weather)
+    heading.append(
+      button(
+        "Turn weather off",
+        () => {
+          stage(["weather"], null);
+          renderPage();
+        },
+        "quiet",
+      ),
+    );
+  card.append(
+    heading,
+    el(
+      "p",
+      "note",
+      "Choose a location for the weather shown in your bar. Location requests only happen when you choose an option below. Save changes to apply it.",
+    ),
+  );
+  const actions = el("div", "actions");
+  const current = button(
+    locationBusy ? "Finding location…" : "Use current location",
+    () => findWeatherLocation(true),
+  );
+  current.disabled = locationBusy;
+  actions.append(
+    current,
+    button(
+      "Windows location settings",
+      () => request("location-open-settings"),
+      "quiet",
+    ),
+  );
+  card.append(actions);
+  const form = el("form", "location-search");
+  const search = el("input");
+  search.type = "search";
+  search.placeholder = "City or town";
+  search.setAttribute("aria-label", "City or town");
+  search.value = locationQuery;
+  search.disabled = locationBusy;
+  search.addEventListener("input", () => {
+    locationQuery = search.value;
+  });
+  const submit = el("button", "", "Find city");
+  submit.type = "submit";
+  submit.disabled = locationBusy;
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void findWeatherLocation(false);
+  });
+  form.append(search, submit);
+  card.append(form);
+  if (locationError) {
+    const error = el("div", "notice error", locationError);
+    error.setAttribute("role", "alert");
+    card.append(error);
+  }
+  const results = el("div", "location-results");
+  results.setAttribute("aria-live", "polite");
+  if (locationSearched && !locationResults.length)
+    results.append(
+      el(
+        "p",
+        "note",
+        "No matching places. Try a nearby city or include the country.",
+      ),
+    );
+  for (const location of locationResults)
+    results.append(
+      button(
+        location.label,
+        () => chooseWeatherLocation(location),
+        "location-choice",
+      ),
+    );
+  card.append(results);
+  const credit = el("p", "note source-credit");
+  credit.append("Weather data: ");
+  const weatherSource = button("Open-Meteo", () =>
+    request("location-attribution", { provider: "open-meteo" }),
+  );
+  weatherSource.title =
+    "Weather data and CC BY 4.0 licence (opens your browser)";
+  const placesSource = button("GeoNames", () =>
+    request("location-attribution", { provider: "geonames" }),
+  );
+  placesSource.title = "Place names and attribution (opens your browser)";
+  credit.append(weatherSource, " (CC BY 4.0) · Places: ", placesSource, ".");
+  card.append(credit);
+  if (draft.weather) {
+    const advanced = el("details");
+    advanced.append(el("summary", "", "Coordinates and update interval"));
+    field(
+      advanced,
+      "Latitude",
+      "Custom coordinates for the selected location.",
+      ["weather", "latitude"],
+      { type: "number", min: -90, max: 90, step: "any" },
+    );
+    field(
+      advanced,
+      "Longitude",
+      "Custom coordinates for the selected location.",
+      ["weather", "longitude"],
+      { type: "number", min: -180, max: 180, step: "any" },
+    );
+    advanced
+      .querySelectorAll<HTMLInputElement>('input[type="number"]')
+      .forEach((input) =>
+        input.addEventListener("input", () => {
+          if (input.checkValidity()) {
+            applyDraft(["weather", "location"], null);
+            heading.querySelector("h3")!.textContent = "Custom location";
+          }
+        }),
+      );
+    field(
+      advanced,
+      "Update interval",
+      "Seconds between forecasts (at least 60).",
+      ["weather", "interval-seconds"],
+      { type: "number", min: 60, max: 0xffffffff },
+    );
+    card.append(advanced);
+  }
+}
+function renderWeather(): void {
+  const card = section("Weather location");
+  card.id = "weather-control";
+  paintWeather();
+}
+const barKinds = [
+  ["logo", "Moon", "☾"],
+  ["workspaces", "Workspaces", "{workspaces}"],
+  ["clock", "Clock", "{clock}"],
+  ["title", "Window title", "{title}"],
+  ["state", "Current mode", "{paused}{mode}{direction}"],
+  ["media", "Media", "{media}"],
+  ["keyboard", "Keyboard", "{keyboard}"],
+  ["network", "Network", "{network}"],
+  ["memory", "Memory", "{memory}"],
+  ["cpu", "CPU", "{cpu}"],
+  ["battery", "Battery", "{battery}"],
+  ["volume", "Volume", "{volume}"],
+  ["weather", "Weather", "{weather}"],
+  ["custom", "Custom text", "Moon"],
+] as const;
+const barActions = [
+  ["", "No action"],
+  ["overview", "Open window overview"],
+  ["cheatsheet", "Open shortcut help"],
+  ["settings", "Open Settings"],
+  ["pause", "Pause or resume Moon"],
+  ["toggle-direction", "Change split direction"],
+] as const;
+function renderBar(): void {
+  content.append(
+    el(
+      "p",
+      "note",
+      "Arrange what appears on your desktop bar. All changes stay in the draft until you save.",
+    ),
+  );
+  const toolbar = el("div", "toolbar");
+  const existingWidgets = array(get(draft, ["bar", "widgets"]));
+  const availableKinds = barKinds.filter(
+    ([id]) =>
+      id === "custom" ||
+      !existingWidgets.some((item) => object(item).id === id),
+  );
+  let addKind: string = availableKinds[0]![0];
+  toolbar.append(
+    selectControl(
+      "New bar item",
+      addKind,
+      availableKinds.map(([id, name]) => [id, name]),
+      (value) => {
+        addKind = value;
+      },
+    ),
+    button("Add bar item", () => {
+      const list = clone(array(get(draft, ["bar", "widgets"])));
+      const preset = barKinds.find(([id]) => id === addKind)!;
+      let id: string = preset[0];
+      let suffix = 2;
+      while (list.some((item) => object(item).id === id))
+        id = `${preset[0]}-${suffix++}`;
+      const existingDefault = array(
+        object(loaded.snapshot.defaults.bar).widgets,
+      ).find((item) => object(item).id === preset[0]);
+      list.push({
+        ...object(existingDefault),
+        id,
+        format: preset[2],
+        align: "right",
+        "interval-seconds": 5,
+        "max-width": 300,
+      });
+      stage(["bar", "widgets"], list);
+      renderPage();
+    }),
+  );
+  content.append(toolbar);
+  const values = array(get(draft, ["bar", "widgets"]));
+  if (!values.length)
+    content.append(
+      el("div", "card empty", "No bar items. Add an item to build your bar."),
+    );
+  values.forEach((item, index) => {
+    const value = object(item);
+    const card = el("details", "card widget-card");
+    const name =
+      barKinds.find(([id]) => id === value.id)?.[1] ?? String(value.id);
+    const summary = el("summary", "widget-summary");
+    summary.append(
+      el("span", "moon-symbol", String(value.icon || "")),
+      el("strong", "", name),
+      el("span", "description", String(value.align || "left")),
+    );
+    card.append(summary);
+    const body = el("div", "widget-body");
+    const actions = el("div", "actions");
+    for (const [title, offset] of [
+      ["Move earlier", -1],
+      ["Move later", 1],
+    ] as const) {
+      const move = button(title, () => {
+        const next = clone(array(get(draft, ["bar", "widgets"])));
+        [next[index], next[index + offset]] = [
+          next[index + offset]!,
+          next[index]!,
+        ];
+        stage(["bar", "widgets"], next);
+        renderPage();
+        const moved =
+          document.querySelectorAll<HTMLDetailsElement>(".widget-card")[
+            index + offset
+          ];
+        if (moved) {
+          moved.open = true;
+          moved.querySelector<HTMLElement>("summary")?.focus();
+        }
+      });
+      move.setAttribute("aria-label", `${title}: ${name}`);
+      move.disabled = index + offset < 0 || index + offset >= values.length;
+      actions.append(move);
+    }
+    actions.append(
+      button(
+        `Remove ${name}`,
+        () => {
+          stage(
+            ["bar", "widgets"],
+            array(get(draft, ["bar", "widgets"])).filter((_, i) => i !== index),
+          );
+          renderPage();
+        },
+        "quiet danger",
+      ),
+    );
+    body.append(actions);
+    const fields = el("div", "fields");
+    const update = (key: string, next: Json) =>
+      stage(["bar", "widgets", index, key], next);
+    fields.append(
+      selectControl(
+        `Position of ${name}`,
+        String(value.align || "left"),
+        [
+          ["left", "Left"],
+          ["center", "Center"],
+          ["right", "Right"],
+        ],
+        (v) => update("align", v),
+      ),
+      simple(`Text format for ${name}`, value.format ?? "", (v) =>
+        update("format", v),
+      ),
+    );
+    const click = String(value.click || "");
+    fields.append(
+      selectControl(
+        `When ${name} is clicked`,
+        barActions.some(([id]) => id === click) ? click : "custom",
+        [...barActions, ["custom", "Custom command"]],
+        (v) => {
+          if (v !== "custom") update("click", v || null);
+          custom.hidden = v !== "custom";
+        },
+      ),
+    );
+    const custom = simple(
+      `Custom click command for ${name}`,
+      click,
+      (v) => update("click", v || null),
+      { wide: true },
+    );
+    custom.hidden = barActions.some(([id]) => id === click);
+    fields.append(custom);
+    body.append(
+      fields,
+      el(
+        "p",
+        "note",
+        "Formats can include values such as {clock}, {title}, {cpu}, or {weather}. Optional providers stay hidden when no value is available.",
+      ),
+    );
+    body.append(
+      symbolControl(`Icon for ${name}`, String(value.icon || ""), (v) =>
+        update("icon", v || null),
+      ),
+    );
+    const style = el("div", "fields");
+    for (const [key, label] of [
+      ["color", "Text color"],
+      ["background", "Background"],
+      ["icon-color", "Icon color"],
+    ])
+      style.append(
+        simple(
+          `${label} for ${name}`,
+          value[key!] ?? "",
+          (v) => update(key!, v || null),
+          { placeholder: "Default or palette color" },
+        ),
+      );
+    body.append(style);
+    const advanced = el("details");
+    advanced.append(el("summary", "", "More item settings"));
+    field(
+      advanced,
+      `Maximum width of ${name}`,
+      "Logical pixels before text is shortened.",
+      ["bar", "widgets", index, "max-width"],
+      { type: "number", min: 1, max: 4096 },
+    );
+    field(
+      advanced,
+      `Refresh interval for ${name}`,
+      "Seconds between custom command updates.",
+      ["bar", "widgets", index, "interval-seconds"],
+      { type: "number", min: 1, max: 0xffffffff },
+    );
+    advanced.append(
+      simple(`Item ID for ${name}`, value.id!, (v) => update("id", v)),
+      simple(
+        `Custom output command for ${name}`,
+        value.exec ?? "",
+        (v) => update("exec", v || null),
+        { multiline: true },
+      ),
+      el(
+        "p",
+        "note",
+        "Custom commands run programs on your PC. Only use commands you trust.",
+      ),
+    );
+    body.append(advanced);
+    card.append(body);
+    content.append(card);
+  });
+  renderWeather();
+  const advanced = section("Advanced bar configuration");
+  jsonEditor(
+    advanced,
+    "Bar widgets JSON",
+    "For configurations that need a raw editor. Existing custom fields are kept when you use the controls above.",
+    ["bar", "widgets"],
+  );
+}
+function commonRuleAction(commands: Json[]): {
+  action: string;
+  workspace: string;
+} {
+  if (commands.length !== 1) return { action: "custom", workspace: "" };
+  const command = String(commands[0]);
+  if (["set-floating", "set-tiling", "ignore"].includes(command))
+    return { action: command, workspace: "" };
+  const match = /^move-to-workspace\s+("(?:[^"\\]|\\.)*"|[^\s"']+)$/.exec(
+    command,
+  );
+  if (match) {
+    try {
+      return {
+        action: "workspace",
+        workspace: match[1]!.startsWith('"')
+          ? JSON.parse(match[1]!)
+          : match[1]!,
+      };
+    } catch {}
+  }
+  return { action: "custom", workspace: "" };
+}
+
 function renderWorkspaces(): void {
   renderLibrary("profile");
   const values = array(draft.workspaces);
@@ -2981,7 +3678,7 @@ function renderWorkspaces(): void {
     el(
       "p",
       "note",
-      `${values.length} workspaces · Order follows the desktop bar.`,
+      `${values.length} ${values.length === 1 ? "workspace" : "workspaces"} · Order follows the desktop bar.`,
     ),
     button("Add workspace", () => {
       let name = values.length + 1;
@@ -3042,9 +3739,7 @@ function renderWorkspaces(): void {
     const set = (key: string, v: Json) => stage(["workspaces", index, key], v);
     fields.append(
       simple("Name", value.name!, (v) => set("name", v)),
-      simple("Icon", value.icon ?? "", (v) => set("icon", v || null), {
-        placeholder: "Optional symbol",
-      }),
+
       simple("Color", value.color ?? "", (v) => set("color", v || null), {
         placeholder: "Palette name or #d17a4f",
       }),
@@ -3052,7 +3747,15 @@ function renderWorkspaces(): void {
         placeholder: "Automatic",
       }),
     );
-    card.append(head, fields);
+    card.append(
+      head,
+      symbolControl(
+        `Icon for workspace ${String(value.name)}`,
+        String(value.icon || ""),
+        (v) => set("icon", v || null),
+      ),
+      fields,
+    );
     content.append(card);
   });
   resetButton(content, "Restore default workspaces", ["workspaces"]);
@@ -3169,7 +3872,11 @@ function renderRules(): void {
   const rules = personalRules();
   const toolbar = el("div", "toolbar");
   toolbar.append(
-    el("p", "note", `${rules.length} personal rules`),
+    el(
+      "p",
+      "note",
+      `${rules.length} personal ${rules.length === 1 ? "rule" : "rules"}`,
+    ),
     button("Add rule", () => {
       stage(
         ["rules"],
@@ -3216,9 +3923,64 @@ function renderRules(): void {
       const next = clone(personalRules());
       next[index] = { ...object(next[index]), ...changed };
       stage(["rules"], next);
+      const commandInput = card.querySelector<HTMLTextAreaElement>("textarea");
+      if (changed.commands && commandInput)
+        commandInput.value = array(changed.commands).join("\n");
     };
     const fields = el("div", "fields");
+    const behavior = commonRuleAction(array(rule.commands));
+    const workspaceNames = array(draft.workspaces).map((value) =>
+      String(object(value).name),
+    );
+    let destination = behavior.workspace || workspaceNames[0] || "1";
+    const advanced = el("details");
+    advanced.open = behavior.action === "custom";
+    advanced.append(
+      el("summary", "", "Advanced commands"),
+      el(
+        "p",
+        "note",
+        "Custom command sequences are preserved. Changing the behavior above replaces only this rule’s commands.",
+      ),
+    );
     fields.append(
+      selectControl(
+        "App behavior",
+        behavior.action,
+        [
+          ["workspace", "Place in a workspace"],
+          ["set-floating", "Keep floating"],
+          ["set-tiling", "Keep tiled"],
+          ["ignore", "Leave unmanaged"],
+          ["custom", "Custom commands"],
+        ],
+        (value) => {
+          destinationField.hidden = value !== "workspace";
+          advanced.open = value === "custom";
+          if (value !== "custom")
+            update({
+              commands: [
+                value === "workspace"
+                  ? `move-to-workspace ${JSON.stringify(destination)}`
+                  : value,
+              ],
+            });
+        },
+      ),
+    );
+    const destinationField = selectControl(
+      "Destination workspace",
+      destination,
+      workspaceNames.map((name) => [name, `Workspace ${name}`]),
+      (value) => {
+        destination = value;
+        update({ commands: [`move-to-workspace ${JSON.stringify(value)}`] });
+      },
+    );
+    destinationField.hidden = behavior.action !== "workspace";
+    fields.append(destinationField);
+    card.append(fields);
+    advanced.append(
       simple(
         "Commands · one per line",
         array(rule.commands).join("\n"),
@@ -3232,11 +3994,45 @@ function renderRules(): void {
         { wide: true, multiline: true, placeholder: "move-to-workspace 2" },
       ),
     );
-    card.append(fields);
+    card.append(advanced);
     array(rule.matches).forEach((entry, matchIndex) => {
       const match = object(entry);
       const group = el("details");
-      group.open = true;
+      const appOnly =
+        Object.keys(match).length === 1 &&
+        Object.keys(object(match.process)).length === 1 &&
+        typeof object(match.process).equals === "string";
+      group.open = !appOnly;
+      let primaryApp: HTMLLabelElement | undefined;
+      if (appOnly) {
+        const app = simple(
+          "App name",
+          object(match.process).equals!,
+          (value) => {
+            const matches = clone(
+              array(object(personalRules()[index]).matches),
+            );
+            matches[matchIndex] = {
+              ...object(matches[matchIndex]),
+              process: {
+                ...object(object(matches[matchIndex]).process),
+                equals: value,
+              },
+            };
+            update({ matches });
+          },
+          { placeholder: "e.g. Code or Arc" },
+        );
+        primaryApp = app;
+        card.append(
+          app,
+          el(
+            "p",
+            "note",
+            "Use the app’s process name without .exe. Matching ignores ASCII letter case. For window titles, classes or patterns, expand the conditions below.",
+          ),
+        );
+      }
       group.append(
         el(
           "summary",
@@ -3291,6 +4087,34 @@ function renderRules(): void {
         label.append(select);
         matchFields.append(label, textInput);
       }
+      group.addEventListener("toggle", () => {
+        const current = object(
+          array(object(personalRules()[index]).matches)[matchIndex],
+        );
+        if (primaryApp) {
+          primaryApp.hidden =
+            group.open || typeof object(current.process).equals !== "string";
+          primaryApp.querySelector("input")!.value = String(
+            object(current.process).equals || "",
+          );
+        }
+        if (group.open) {
+          for (const [position, key] of [
+            "process",
+            "class",
+            "title",
+          ].entries()) {
+            const matcher = object(current[key]);
+            const mode =
+              Object.keys(matcher).find((name) => matcher[name] !== null) ||
+              "equals";
+            matchFields.querySelectorAll("select")[position]!.value = mode;
+            matchFields.querySelectorAll("input")[position]!.value = String(
+              matcher[mode] || "",
+            );
+          }
+        }
+      });
       group.append(
         matchFields,
         button(
@@ -3424,54 +4248,12 @@ function renderAdvanced(): void {
     );
     colors.append(details);
   }
-  const weather = section("Weather location");
-  const enabled = el("div", "row");
-  enabled.append(
-    el(
-      "div",
-      "copy",
-      draft.weather ? "Weather is configured" : "Weather is off",
-    ),
+  const everyday = section("Everyday controls");
+  everyday.append(
+    button("Arrange bar items and weather", () => switchPage("Bar")),
+    button("Workspace names and icons", () => switchPage("Workspaces")),
+    button("App placement rules", () => switchPage("Rules")),
   );
-  enabled.append(
-    button(
-      draft.weather ? "Turn off" : "Set location",
-      () => {
-        stage(
-          ["weather"],
-          draft.weather
-            ? null
-            : { latitude: 0, longitude: 0, "interval-seconds": 900 },
-        );
-        renderPage();
-      },
-      "quiet",
-    ),
-  );
-  weather.append(enabled);
-  if (draft.weather) {
-    field(
-      weather,
-      "Latitude",
-      "Enter a coordinate for your location.",
-      ["weather", "latitude"],
-      { type: "number", min: -90, max: 90, step: "any" },
-    );
-    field(
-      weather,
-      "Longitude",
-      "Used only to request the weather forecast.",
-      ["weather", "longitude"],
-      { type: "number", min: -180, max: 180, step: "any" },
-    );
-    field(
-      weather,
-      "Update interval",
-      "Seconds between weather requests.",
-      ["weather", "interval-seconds"],
-      { type: "number", min: 60, max: 0xffffffff },
-    );
-  }
   const advanced = section("Structured settings");
   content.append(
     el(
@@ -3625,8 +4407,14 @@ const searchIndex: [string, string, string][] = [
     "App rules",
     "process class title match regex floating workspace ignore",
   ],
+  ["General", "Launch on sign-in", "startup login automatic launch start"],
+  ["Bar", "Bar items", "widgets clock format align actions order weather"],
   ["Advanced", "Bar text & colors", "font palette foreground background"],
-  ["Advanced", "Weather", "latitude longitude location forecast interval"],
+  [
+    "Bar",
+    "Weather",
+    "city town current latitude longitude location forecast interval",
+  ],
   [
     "Advanced",
     "Structured settings",
@@ -3688,6 +4476,7 @@ function renderPage(): void {
     Overview: renderDesktop,
     General: renderGeneral,
     Appearance: renderAppearance,
+    Bar: renderBar,
     Workspaces: renderWorkspaces,
     Shortcuts: renderShortcuts,
     Rules: renderRules,
@@ -3747,6 +4536,7 @@ async function boot(): Promise<void> {
   }
 }
 function refreshVisibleHelp(): void {
+  if (active === "General" && settingsAvailable) void refreshStartup();
   if (!readySent || search) return;
   if (active === "Overview" && desktopPanel?.isConnected) void refreshDesktop();
   if (active === "Shortcuts" && shortcutPanel?.isConnected)

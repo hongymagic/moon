@@ -7,11 +7,15 @@ mod application;
 #[cfg(windows)]
 mod clipboard;
 #[cfg(any(windows, test))]
+mod launch_on_startup;
+#[cfg(any(windows, test))]
 mod library;
 #[cfg(any(windows, test))]
 mod library_bridge;
 #[cfg(windows)]
 mod library_files;
+#[cfg(any(windows, test))]
+mod location;
 #[cfg(windows)]
 mod native;
 #[cfg(any(windows, test))]

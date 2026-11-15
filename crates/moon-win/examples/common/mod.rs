@@ -2,14 +2,25 @@ use std::path::Path;
 use windows::Win32::{Foundation::*, Graphics::Gdi::*};
 
 pub fn capture(rect: RECT, path: &Path) -> windows::core::Result<u32> {
+    let pixels = read_pixels(rect)?;
+    write_bitmap(rect, &pixels, path)?;
+    let width = (rect.right - rect.left) as usize;
+    let height = (rect.bottom - rect.top) as usize;
+    Ok(colorref(&pixels, width, width / 2, height / 2))
+}
+
+/// One GPU readback; callers can inspect many pixels without GetPixel stalls.
+pub fn read_pixels(rect: RECT) -> windows::core::Result<Vec<u8>> {
     unsafe {
+        let width = rect.right - rect.left;
+        let height = rect.bottom - rect.top;
+        if width <= 0 || height <= 0 {
+            return Err(windows::core::Error::from_hresult(E_INVALIDARG));
+        }
         let dc = GetDC(None);
         if dc.is_invalid() {
             return Err(windows::core::Error::from_thread());
         }
-        let width = rect.right - rect.left;
-        let height = rect.bottom - rect.top;
-        let pixel = GetPixel(dc, rect.left + width / 2, rect.top + height / 2).0;
         let memory = CreateCompatibleDC(Some(dc));
         let bitmap = CreateCompatibleBitmap(dc, width, height);
         let old = SelectObject(memory, bitmap.into());
@@ -39,22 +50,34 @@ pub fn capture(rect: RECT, path: &Path) -> windows::core::Result<u32> {
         if lines != height {
             return Err(windows::core::Error::from_thread());
         }
-        let mut bytes = Vec::with_capacity(54 + pixels.len());
-        bytes.extend(b"BM");
-        bytes.extend((54 + pixels.len() as u32).to_le_bytes());
-        bytes.extend(0u32.to_le_bytes());
-        bytes.extend(54u32.to_le_bytes());
-        bytes.extend(40u32.to_le_bytes());
-        bytes.extend(width.to_le_bytes());
-        bytes.extend((-height).to_le_bytes());
-        bytes.extend(1u16.to_le_bytes());
-        bytes.extend(32u16.to_le_bytes());
-        bytes.extend(0u32.to_le_bytes());
-        bytes.extend((pixels.len() as u32).to_le_bytes());
-        bytes.extend([0u8; 16]);
-        bytes.extend(pixels);
-        std::fs::write(path, bytes)
-            .map_err(|error| windows::core::Error::new(E_FAIL, error.to_string()))?;
-        Ok(pixel)
+        Ok(pixels)
     }
+}
+
+pub fn colorref(pixels: &[u8], width: usize, x: usize, y: usize) -> u32 {
+    let offset = (y * width + x) * 4;
+    u32::from(pixels[offset + 2])
+        | (u32::from(pixels[offset + 1]) << 8)
+        | (u32::from(pixels[offset]) << 16)
+}
+
+pub fn write_bitmap(rect: RECT, pixels: &[u8], path: &Path) -> windows::core::Result<()> {
+    let width = rect.right - rect.left;
+    let height = rect.bottom - rect.top;
+    let mut bytes = Vec::with_capacity(54 + pixels.len());
+    bytes.extend(b"BM");
+    bytes.extend((54 + pixels.len() as u32).to_le_bytes());
+    bytes.extend(0u32.to_le_bytes());
+    bytes.extend(54u32.to_le_bytes());
+    bytes.extend(40u32.to_le_bytes());
+    bytes.extend(width.to_le_bytes());
+    bytes.extend((-height).to_le_bytes());
+    bytes.extend(1u16.to_le_bytes());
+    bytes.extend(32u16.to_le_bytes());
+    bytes.extend(0u32.to_le_bytes());
+    bytes.extend((pixels.len() as u32).to_le_bytes());
+    bytes.extend([0u8; 16]);
+    bytes.extend(pixels);
+    std::fs::write(path, bytes)
+        .map_err(|error| windows::core::Error::new(E_FAIL, error.to_string()))
 }

@@ -116,6 +116,76 @@ path; it does not diagnose the earlier latched warning or measure animation fram
 time. Receipts are `runtimefix-restart-completion-20261115/result.json` and
 `runtimefix-installed-focus-20261115/result.json` under `Downloads\Moon-validation`.
 
+## Settings usability follow-up — 15 November 2026
+
+The ordinary Settings image
+`A540262E44804321220B8D501C1021DEC199FEBB568D87FD3435E399D21B6270`
+passed five native checks using `scripts/validate-settings-usability.ps1` and a
+new private TOML document. The companion ran at medium integrity (8192), without
+elevation or UIAccess. The coordinator separately confirmed that the personal
+configuration and live layout were unchanged; the owned Settings process closed
+without cleanup errors and foreground returned to the original window.
+
+- The sign-in preference was present and honestly unavailable for the older
+  installed helper. The test did not toggle it. The optional guarded
+  `-VerifyStartupToggle` check awaits installation of the updated helper.
+- A real Open-Meteo lookup returned **Sydney, New South Wales, Australia**.
+  Explicit selection and Save persisted latitude `-33.86785`, longitude
+  `151.20732` and the display label in the fixture. Merely searching did not
+  save anything. Windows location permission was not requested.
+- The workspace picker selected and saved the exact bundled Code glyph
+  (`U+F121`). This establishes selection and persistence, not pixel rendering.
+- Moving the Moon bar item changed the saved order to Clock, Moon, Custom text
+  while retaining the custom command, styling and width.
+- Choosing **Keep floating** saved `set-floating` while retaining the original
+  app matcher. The common path used structured controls rather than command text.
+
+The receipt and four native PNGs are in
+`Downloads/Moon-validation/usability-settings-v4-worker-20261115/settings-fixture/`;
+the parent `result.json` records the independent live configuration/layout check.
+The earlier stopped attempts remain preserved: the validation client had to use
+actual UIA associations and Toggle/ExpandCollapse patterns for stateful controls.
+One early cleanup was blocked by the open icon dialog; cleanup now cancels only
+that exact owned dialog before requesting a normal close.
+
+Visual review of the native PNGs found readable weather, bar and rule controls,
+but the immediate first icon-picker capture had blank glyph areas. Its labels and
+successful codepoint save alone did not prove visible icons. The bundled local
+font now preloads from the document head, and the native capture waits 500 ms
+after the picker becomes accessible. Browser checks confirm the font is fetched
+on General before the first picker and its bytes match the bundled font.
+
+The rebuilt ordinary Settings image
+`D46551D3366DBDEC0D6C81C9B191F18E02FD16E178F20D508E3FCE30B0A1DE90`
+then passed all five native checks again, with no cleanup errors and unchanged
+personal configuration and live layout. Direct inspection of the new native
+`icon-picker.png` confirms all 12 distinct glyphs are clearly visible, including
+Code, Terminal and the icons in the bottom row; none are blank or replacement
+squares. Its SHA-256 is
+`A044F66B4CAFAAECCC023C8C0E1068A4EF2F572A660951F50D39A2096A50B6F3`.
+Final receipts and PNGs are under
+`Downloads/Moon-validation/usability-settings-v5-worker-20261115/`.
+This verifies the observed settled native rendering; it does not claim a
+zero-delay first frame or isolate the preload's timing effect from the capture
+settle. The other PNGs include transient status/toast messages and are not
+final-state visual baselines.
+
+The frontend passed 80 browser checks before the attribution/preload additions.
+The later focused weather checks passed 5/5, and the font/preload/attribution
+checks passed 3/3; formatting, TypeScript checking and the checked-in bundle build
+also passed. These overlapping focused runs are not an additional full-suite run.
+
+The one-time Windows request follows the documented foreground/UI-thread
+requirements of [Geolocator.RequestAccessAsync](https://learn.microsoft.com/en-us/uwp/api/windows.devices.geolocation.geolocator.requestaccessasync?view=winrt-26100).
+City choices include region/country to disambiguate results; the source credits
+link to [Open-Meteo's licence](https://open-meteo.com/en/licence) and
+[GeoNames](https://www.geonames.org/), as described by the
+[geocoding API](https://open-meteo.com/en/docs/geocoding-api).
+The picker uses the same licensed Symbols Nerd Font as Moon's bar rather than
+assuming private-use codepoints are interchangeable with a system font; see
+[Microsoft's icon-font guidance](https://learn.microsoft.com/en-us/windows/apps/design/iconography/segoe-fluent-icons-font).
+The early font fetch uses the standard [HTML preload mechanism](https://html.spec.whatwg.org/multipage/links.html#link-type-preload).
+
 ## Acceptance boundary
 
 These results establish signed/UIAccess installation. They do not establish

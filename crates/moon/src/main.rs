@@ -6,6 +6,8 @@ use std::{fs, path::PathBuf};
 mod daemon;
 #[cfg(any(windows, test))]
 mod journal;
+#[cfg(any(windows, test))]
+mod workspace_shortcuts;
 
 #[derive(Clone, Debug, Default)]
 pub struct Options {

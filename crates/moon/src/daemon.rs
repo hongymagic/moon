@@ -2,6 +2,7 @@ use crate::{
     Options, config_path,
     journal::{self, Journal, OriginalWindow},
     load_config,
+    workspace_shortcuts::{self, Shortcut, WorkspaceShortcuts},
 };
 use anyhow::{Context, Result, bail};
 use moon_core::{
@@ -57,6 +58,7 @@ struct Daemon {
     refusals: BTreeMap<WindowId, u8>,
     placement_started: BTreeMap<WindowId, Instant>,
     pending_input: VecDeque<Instant>,
+    workspace_shortcuts: WorkspaceShortcuts,
     key_latencies: VecDeque<u64>,
     dispatch_latencies: VecDeque<u64>,
     ready_us: u128,
@@ -344,6 +346,7 @@ pub fn run(options: Options) -> Result<()> {
         refusals: BTreeMap::new(),
         placement_started: BTreeMap::new(),
         pending_input: VecDeque::new(),
+        workspace_shortcuts: WorkspaceShortcuts::default(),
         key_latencies: VecDeque::new(),
         dispatch_latencies: VecDeque::new(),
         ready_us: 0,
@@ -362,46 +365,78 @@ pub fn run(options: Options) -> Result<()> {
             daemon.world.monitors.len()
         );
         let mut maintenance = Instant::now();
+        let mut intake_backlog = false;
         while !daemon.quit {
-            if !runtime::pump(if daemon.carousel.is_active() { 16 } else { 1000 })
-                || runtime::shutdown_requested()
-            {
+            let wait_ms = if intake_backlog {
+                0
+            } else {
+                let idle = if daemon.carousel.is_active() { 16 } else { 1000 };
+                daemon
+                    .workspace_shortcuts
+                    .wait_ms(Instant::now())
+                    .map_or(idle, |wait| wait.min(idle))
+            };
+            if !runtime::pump(wait_ms) || runtime::shutdown_requested() {
                 break;
             }
             let mut changed = BTreeMap::new();
+            let mut received_count = 0;
+            let mut workspace_received = false;
             for input in rx.try_iter().take(4096) {
+                received_count += 1;
                 match input {
                     Intake::Platform(PlatformEvent::Window { kind, id }) => {
                         changed.insert((id, kind), ());
                     }
                     Intake::Platform(PlatformEvent::Commands { commands, received }) => {
-                        daemon.flush_windows(&mut changed);
-                        if daemon.pending_input.len() == 256 {
-                            daemon.pending_input.pop_front();
-                        }
-                        daemon.pending_input.push_back(received);
-                        daemon.dispatch_latencies.push_back(
-                            received.elapsed().as_micros().min(u128::from(u64::MAX)) as u64,
-                        );
-                        if daemon.dispatch_latencies.len() > 256 {
-                            daemon.dispatch_latencies.pop_front();
-                        }
-                        if let Err(error) = daemon.run_commands(commands.to_vec(), true) {
-                            daemon.report(error);
+                        let shortcut = Shortcut { commands, received };
+                        if workspace_shortcuts::is_absolute_workspace(
+                            &daemon.world.config,
+                            &shortcut.commands,
+                        ) {
+                            if !daemon.session_suspended && !daemon.world.paused {
+                                daemon.workspace_shortcuts.submit(shortcut);
+                                if !workspace_received {
+                                    // Start promptly; later targets in this drain
+                                    // replace one another before the next deadline.
+                                    daemon.flush_workspace_shortcut(&mut changed, false);
+                                }
+                                workspace_received = true;
+                            }
+                        } else {
+                            daemon.flush_workspace_shortcut(&mut changed, true);
+                            daemon.flush_windows(&mut changed);
+                            daemon.dispatch_shortcut(shortcut);
                         }
                     }
                     Intake::Platform(PlatformEvent::EmergencyRestore) => {
+                        daemon.workspace_shortcuts.clear();
                         daemon.quit = true;
+                        break;
                     }
                     Intake::Platform(PlatformEvent::HookError(error)) => {
                         daemon.error = Some(error);
                     }
                     Intake::Platform(PlatformEvent::System(event)) => {
+                        if matches!(
+                            event,
+                            SystemEvent::SessionLocked
+                                | SystemEvent::Suspended
+                                | SystemEvent::SessionEnding
+                        ) {
+                            daemon.workspace_shortcuts.clear();
+                        }
                         if let Err(error) = daemon.system_event(event) {
                             daemon.report(error);
                         }
+                        if daemon.session_suspended || daemon.quit {
+                            daemon.workspace_shortcuts.clear();
+                        }
                     }
                     Intake::Platform(PlatformEvent::PointerMoved) => {
+                        if daemon.world.config.focus_follows_cursor {
+                            daemon.flush_workspace_shortcut(&mut changed, true);
+                        }
                         let point = daemon.hooks.take_pointer();
                         if !daemon.session_suspended
                             && daemon.world.config.focus_follows_cursor
@@ -415,6 +450,7 @@ pub fn run(options: Options) -> Result<()> {
                         }
                     }
                     Intake::Request(request) => {
+                        daemon.flush_workspace_shortcut(&mut changed, true);
                         daemon.flush_windows(&mut changed);
                         daemon.request(request);
                     }
@@ -423,17 +459,28 @@ pub fn run(options: Options) -> Result<()> {
                     }
                 }
             }
+            intake_backlog = received_count == 4096;
+            if daemon.quit {
+                break;
+            }
             daemon.flush_windows(&mut changed);
+            // A full input batch skips sleeping, never a due workspace dispatch.
+            // Otherwise a sustained producer could postpone its final target.
+            daemon.flush_workspace_shortcut(&mut changed, false);
             if let Err(error) = daemon.carousel.tick() {
                 daemon.carousel.cancel();
                 daemon.report(error.into());
             }
             daemon.measure_placement();
             let clicks = daemon.surfaces.as_ref().map(Surfaces::drain_commands).unwrap_or_default();
-            if let Err(error) = daemon.commands(clicks) {
-                daemon.report(error);
+            if !clicks.is_empty() {
+                daemon.flush_workspace_shortcut(&mut changed, true);
+                if let Err(error) = daemon.commands(clicks) {
+                    daemon.report(error);
+                }
             }
             if maintenance.elapsed() >= Duration::from_secs(1) {
+                daemon.flush_workspace_shortcut(&mut changed, true);
                 daemon.maintain()?;
                 maintenance = Instant::now();
             }
@@ -487,6 +534,39 @@ pub fn run(options: Options) -> Result<()> {
 }
 
 impl Daemon {
+    fn dispatch_shortcut(&mut self, shortcut: Shortcut) {
+        if self.pending_input.len() == 256 {
+            self.pending_input.pop_front();
+        }
+        self.pending_input.push_back(shortcut.received);
+        self.dispatch_latencies
+            .push_back(shortcut.received.elapsed().as_micros().min(u128::from(u64::MAX)) as u64);
+        if self.dispatch_latencies.len() > 256 {
+            self.dispatch_latencies.pop_front();
+        }
+        if let Err(error) = self.run_commands(shortcut.commands.to_vec(), true) {
+            self.report(error);
+        }
+    }
+    fn flush_workspace_shortcut(
+        &mut self,
+        changed: &mut BTreeMap<(WindowId, u32), ()>,
+        boundary: bool,
+    ) {
+        if self.session_suspended || self.world.paused || self.quit {
+            self.workspace_shortcuts.clear();
+            return;
+        }
+        let pending = if boundary {
+            self.workspace_shortcuts.flush()
+        } else {
+            self.workspace_shortcuts.take_due(Instant::now())
+        };
+        if let Some(shortcut) = pending {
+            self.flush_windows(changed);
+            self.dispatch_shortcut(shortcut);
+        }
+    }
     fn adopt_existing(&mut self) -> Result<()> {
         let started = Instant::now();
         let foreground = platform::foreground();

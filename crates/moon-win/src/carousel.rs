@@ -283,6 +283,9 @@ impl Thumbnail {
         if !valid(source) {
             return Err(windows::core::Error::from_hresult(E_INVALIDARG));
         }
+        Self::register(destination, source)
+    }
+    fn register(destination: HWND, source: WindowRef) -> Result<Self> {
         Ok(Self {
             handle: unsafe { DwmRegisterThumbnail(destination, platform::hwnd(source.id))? },
             source,
@@ -342,6 +345,113 @@ impl Thumbnail {
         unsafe { DwmUpdateThumbnailProperties(self.handle, &properties) }
     }
 }
+
+/// A stationary live desktop beneath the moving application thumbnails. The
+/// shell desktop is a documented DWM source; no screen bitmap or shell mutation
+/// is needed. Register it first so later application thumbnails cover it.
+struct DesktopBackground {
+    thumbnail: Thumbnail,
+    bounds: Rect,
+    #[cfg(test)]
+    fixture: Option<OwnedWindow>,
+}
+impl DesktopBackground {
+    fn new(destination: HWND, viewport: Rect) -> Result<Self> {
+        let window = unsafe { GetShellWindow() };
+        if window.is_invalid() || !unsafe { IsWindowVisible(window) }.as_bool() {
+            return Err(windows::core::Error::from_hresult(E_FAIL));
+        }
+        let source = WindowRef {
+            id: WindowId(window.0 as u64),
+            process_id: platform::process_id(WindowId(window.0 as u64)),
+        };
+        let mut bounds = RECT::default();
+        unsafe { GetWindowRect(window, &mut bounds)? };
+        let background = Self {
+            thumbnail: Thumbnail::register(destination, source)?,
+            bounds: Rect::from_edges(bounds.left, bounds.top, bounds.right, bounds.bottom),
+            #[cfg(test)]
+            fixture: None,
+        };
+        background.draw(viewport)?;
+        Ok(background)
+    }
+    fn valid(&self) -> bool {
+        let source = self.thumbnail.source;
+        #[cfg(test)]
+        if self.fixture.is_some() {
+            return platform::is_window(source.id)
+                && platform::process_id(source.id) == source.process_id;
+        }
+        (unsafe { GetShellWindow() }) == platform::hwnd(source.id)
+            && platform::process_id(source.id) == source.process_id
+            && unsafe { IsWindowVisible(platform::hwnd(source.id)) }.as_bool()
+    }
+    fn draw(&self, viewport: Rect) -> Result<()> {
+        if !self.valid() {
+            return Err(windows::core::Error::from_hresult(E_FAIL));
+        }
+        // The lifecycle unit owns an unshown source and a real DWM relationship.
+        // Pixel presentation is exercised separately by the interactive probe.
+        #[cfg(test)]
+        if self.fixture.is_some() {
+            return Ok(());
+        }
+        let mut current = RECT::default();
+        unsafe { GetWindowRect(platform::hwnd(self.thumbnail.source.id), &mut current)? };
+        if self.bounds != Rect::from_edges(current.left, current.top, current.right, current.bottom)
+        {
+            return Err(windows::core::Error::from_hresult(E_FAIL));
+        }
+        let dimensions = unsafe { DwmQueryThumbnailSourceSize(self.thumbnail.handle)? };
+        let source = desktop_crop(self.bounds, dimensions, viewport)
+            .ok_or_else(|| windows::core::Error::from_hresult(E_FAIL))?;
+        unsafe {
+            DwmUpdateThumbnailProperties(
+                self.thumbnail.handle,
+                &DWM_THUMBNAIL_PROPERTIES {
+                    dwFlags: DWM_TNP_RECTDESTINATION
+                        | DWM_TNP_RECTSOURCE
+                        | DWM_TNP_OPACITY
+                        | DWM_TNP_VISIBLE
+                        | DWM_TNP_SOURCECLIENTAREAONLY,
+                    rcDestination: RECT {
+                        left: 0,
+                        top: 0,
+                        right: viewport.width,
+                        bottom: viewport.height,
+                    },
+                    rcSource: source,
+                    opacity: 255,
+                    fVisible: true.into(),
+                    fSourceClientAreaOnly: false.into(),
+                },
+            )
+        }
+    }
+}
+
+fn desktop_crop(bounds: Rect, dimensions: SIZE, viewport: Rect) -> Option<RECT> {
+    if bounds.is_empty() || viewport.is_empty() || dimensions.cx <= 0 || dimensions.cy <= 0 {
+        return None;
+    }
+    let left = i64::from(viewport.x) - i64::from(bounds.x);
+    let top = i64::from(viewport.y) - i64::from(bounds.y);
+    let right = left + i64::from(viewport.width);
+    let bottom = top + i64::from(viewport.height);
+    if left < 0 || top < 0 || right > i64::from(bounds.width) || bottom > i64::from(bounds.height) {
+        return None;
+    }
+    let scale = |value, pixels, length| (value * i64::from(pixels) / i64::from(length)) as i32;
+    let crop = RECT {
+        left: scale(left, dimensions.cx, bounds.width),
+        top: scale(top, dimensions.cy, bounds.height),
+        right: scale(right, dimensions.cx, bounds.width),
+        bottom: scale(bottom, dimensions.cy, bounds.height),
+    };
+    (crop.right > crop.left && crop.bottom > crop.top).then_some(crop)
+}
+
 fn clip(destination: Rect, source: Rect, viewport: Rect) -> Option<(Rect, Rect)> {
     if destination.width <= 0 || destination.height <= 0 || source.width <= 0 || source.height <= 0
     {
@@ -386,6 +496,7 @@ impl PresentedPage {
 struct Overlay {
     // Thumbnail relationships are released before their destination window.
     pages: Vec<PresentedPage>,
+    background: DesktopBackground,
     window: OwnedWindow,
     spec: Transition,
     motion: WorkspaceMotion,
@@ -393,12 +504,15 @@ struct Overlay {
 impl Overlay {
     fn new(input: &Rc<Input>, spec: Transition) -> Result<Self> {
         let window = create_window(input, Some(spec.viewport), spec.background_rgb)?;
+        // Do not show a solid-colour substitute if the desktop cannot cover this
+        // viewport. prepare() then leaves the native workspace switch immediate.
+        let background = DesktopBackground::new(window.0, spec.viewport)?;
         let pages = vec![
             PresentedPage::new(window.0, spec.from_workspace, spec.from.clone())?,
             PresentedPage::new(window.0, spec.to_workspace, spec.to.clone())?,
         ];
         let motion = WorkspaceMotion::new(spec.from_workspace, spec.to_workspace, spec.direction);
-        Ok(Self { pages, window, spec, motion })
+        Ok(Self { pages, background, window, spec, motion })
     }
     fn can_retarget(&self, spec: &Transition) -> bool {
         self.spec.viewport == spec.viewport
@@ -453,6 +567,7 @@ impl Overlay {
         Ok(())
     }
     fn draw(&self, progress: f64) -> Result<()> {
+        self.background.draw(self.spec.viewport)?;
         for page in &self.pages {
             let Some(position) =
                 self.motion.pages.iter().find(|position| position.workspace == page.workspace)
@@ -470,7 +585,8 @@ impl Overlay {
         Ok(())
     }
     fn valid(&self) -> bool {
-        self.pages.iter().flat_map(|page| &page.windows).all(|page| valid(page.window))
+        self.background.valid()
+            && self.pages.iter().flat_map(|page| &page.windows).all(|page| valid(page.window))
     }
 }
 
@@ -698,9 +814,37 @@ impl Drop for Carousel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn hidden_overlay(input: &Rc<Input>, spec: Transition) -> Result<Overlay> {
+        let window = create_window(input, Some(spec.viewport), spec.background_rgb)?;
+        let source = create_window(input, Some(spec.viewport), 0)?;
+        let id = WindowId(source.0.0 as u64);
+        let background = DesktopBackground {
+            thumbnail: Thumbnail::register(
+                window.0,
+                WindowRef { id, process_id: std::process::id() },
+            )?,
+            bounds: spec.viewport,
+            fixture: Some(source),
+        };
+        let pages = vec![
+            PresentedPage::new(window.0, spec.from_workspace, spec.from.clone())?,
+            PresentedPage::new(window.0, spec.to_workspace, spec.to.clone())?,
+        ];
+        let motion = WorkspaceMotion::new(spec.from_workspace, spec.to_workspace, spec.direction);
+        Ok(Overlay { pages, background, window, spec, motion })
+    }
+
     #[test]
     fn hidden_owned_overlays_retire_after_cancel_preference_change_expiry_or_stale_source() {
-        for reason in ["cancel", "monitor-removed", "reduced-motion", "expiry", "stale-source"] {
+        for reason in [
+            "cancel",
+            "monitor-removed",
+            "reduced-motion",
+            "expiry",
+            "stale-source",
+            "shell-replaced",
+        ] {
             let mut carousel = Carousel::new().unwrap();
             let spec = Transition {
                 from_workspace: WorkspaceId(0),
@@ -712,8 +856,9 @@ mod tests {
                 background_rgb: 0,
             };
             // Hidden owned popups only: no input hooks, display changes or foreign windows.
-            let overlay = Overlay::new(&carousel.input, spec.clone()).unwrap();
+            let overlay = hidden_overlay(&carousel.input, spec.clone()).unwrap();
             let handle = overlay.window.0;
+            let background_handle = overlay.background.fixture.as_ref().unwrap().0;
             carousel.overlays.push(overlay);
             carousel.started = Some(Instant::now());
             match reason {
@@ -727,6 +872,10 @@ mod tests {
                     carousel.started = Some(Instant::now() - DURATION);
                     carousel.tick_with_motion_allowed(true).unwrap();
                 }
+                "shell-replaced" => {
+                    carousel.overlays[0].background.thumbnail.source.process_id = u32::MAX;
+                    carousel.tick_with_motion_allowed(true).unwrap();
+                }
                 _ => {
                     carousel.overlays[0].pages[0].windows.push(PageWindow {
                         window: WindowRef { id: WindowId(0), process_id: u32::MAX },
@@ -737,11 +886,12 @@ mod tests {
             }
             assert!(!carousel.is_active(), "{reason}");
             assert!(!unsafe { IsWindow(Some(handle)) }.as_bool(), "{reason}");
+            assert!(!unsafe { IsWindow(Some(background_handle)) }.as_bool(), "{reason}");
             assert!(carousel.started.is_none());
             assert!(!carousel.input.cancelled.get());
             assert!(carousel.input.viewports.borrow().is_empty());
             // Cancellation must not poison the next presentation.
-            let next = Overlay::new(&carousel.input, spec).unwrap();
+            let next = hidden_overlay(&carousel.input, spec).unwrap();
             let next_handle = next.window.0;
             carousel.overlays.push(next);
             carousel.started = Some(Instant::now());
@@ -751,6 +901,42 @@ mod tests {
             assert!(!unsafe { IsWindow(Some(next_handle)) }.as_bool());
             assert!(INPUT.with(|slot| slot.borrow().upgrade().is_none()));
         }
+    }
+
+    #[test]
+    fn desktop_background_crops_each_monitor_without_moving_its_wallpaper() {
+        let desktop = Rect::new(-1920, -200, 5760, 2360);
+        let size = SIZE { cx: 5760, cy: 2360 };
+        let left = desktop_crop(desktop, size, Rect::new(-1920, -160, 1920, 1000)).unwrap();
+        assert_eq!(left, RECT { left: 0, top: 40, right: 1920, bottom: 1040 });
+        let primary = desktop_crop(desktop, size, Rect::new(0, 50, 3840, 2110)).unwrap();
+        assert_eq!(primary, RECT { left: 1920, top: 250, right: 5760, bottom: 2360 });
+        // Thumbnail dimensions, not a DPI assumption, define source pixels.
+        let scaled = desktop_crop(
+            Rect::new(-100, -100, 800, 600),
+            SIZE { cx: 400, cy: 300 },
+            Rect::new(0, 0, 400, 400),
+        )
+        .unwrap();
+        assert_eq!(scaled, RECT { left: 50, top: 50, right: 250, bottom: 250 });
+    }
+
+    #[test]
+    fn desktop_background_refuses_missing_or_partial_coverage() {
+        let desktop = Rect::new(0, 0, 1920, 1080);
+        let size = SIZE { cx: 1920, cy: 1080 };
+        for viewport in [
+            Rect::new(-1, 0, 1920, 1080),
+            Rect::new(0, -1, 1920, 1080),
+            Rect::new(0, 0, 1921, 1080),
+            Rect::new(0, 0, 1920, 1081),
+            Rect::new(0, 0, 0, 1080),
+            Rect::new(i32::MAX, 0, i32::MAX, 1080),
+        ] {
+            assert!(desktop_crop(desktop, size, viewport).is_none(), "{viewport:?}");
+        }
+        assert!(desktop_crop(desktop, SIZE { cx: 0, cy: 1080 }, desktop).is_none());
+        assert!(desktop_crop(Rect::default(), size, desktop).is_none());
     }
 
     #[test]

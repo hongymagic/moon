@@ -99,6 +99,8 @@ if (!$version) {$version='0.1.0'}
 $oldTask=Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
 Assert-MoonOwnedTask $oldTask $state $target
 $oldTaskXml=if ($oldTask) {Export-ScheduledTask -TaskName $taskName} else {$null}
+$oldTaskSecurity=if ($oldTask) {Get-MoonTaskSecurity $state $target} else {$null}
+$startupEnabled=if ($oldTask) {Get-MoonTaskEnabled $state $target} else {$true}
 if (@(Get-Process -Name moon-settings -ErrorAction SilentlyContinue | Where-Object {$_.Path -and [string]::Equals($_.Path,(Join-Path $install 'moon-settings.exe'),[StringComparison]::OrdinalIgnoreCase)}).Count) {throw 'Close Moon Settings, then try updating Moon again.'}
 $daemon=if($portablePeer){Invoke-MoonRpc query stats -ExpectedPortablePeer $portablePeer -ExpectedPortableSha256 $PortableSha256}else{Get-MoonDaemon -Installed}
 if (!$portablePeer -and $daemon -and ![string]::Equals([IO.Path]::GetFullPath($daemon.executable),$target,[StringComparison]::OrdinalIgnoreCase)) {
@@ -212,9 +214,11 @@ try {
     $action=New-MoonTaskAction $target (Get-MoonLaunchArguments $state)
     $trigger=New-ScheduledTaskTrigger -AtLogOn -User $OwnerSid
     $principal=New-ScheduledTaskPrincipal -UserId $OwnerSid -LogonType Interactive -RunLevel Limited
-    $settings=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
+    $settings=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -Disable:(!$startupEnabled)
     Register-ScheduledTask -TaskName $taskName -Description "moon installation $installId; owner $OwnerSid" -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
     $taskChanged=$true
+    $taskSecurity=Get-MoonTaskSecurity $state $target
+    Set-MoonTaskSecurity $state $target (Get-MoonStartupTaskSecurity $taskSecurity $OwnerSid)
     Write-MoonSetupStatus $OperationId 'working' 'Restoring your window layout.'
     $state.installed_at=[DateTime]::UtcNow.ToString('o')
     Write-MoonInstallState $install $state
@@ -230,7 +234,8 @@ try {
         Start-MoonLimitedOnce $target (Get-MoonLaunchArguments $state -Resume) $state
     }
     elseif ($daemon) { Invoke-MoonRpc lifecycle -LifecycleAction restart -ExpectedPeer $oldPeer | Out-Null }
-    else { Start-ScheduledTask -TaskName $taskName }
+    elseif ($startupEnabled) { Start-ScheduledTask -TaskName $taskName }
+    else { Start-MoonLimitedOnce $target (Get-MoonLaunchArguments $state) $state }
     try {
         Wait-MoonCondition -Description 'the signed replacement daemon with UIAccess' -Condition {
             $running=Get-MoonDaemon -Installed
@@ -294,7 +299,10 @@ try {
         if (Test-Path -LiteralPath $backup) {Move-Item -LiteralPath $backup -Destination $target}
     }
     if ($taskChanged) {
-        if ($oldTaskXml) { Register-ScheduledTask -TaskName $taskName -Xml $oldTaskXml -Force | Out-Null }
+        if ($oldTaskXml) {
+            Register-ScheduledTask -TaskName $taskName -Xml $oldTaskXml -Force | Out-Null
+            Set-MoonTaskSecurity $previousState $target $oldTaskSecurity
+        }
         else {Unregister-ScheduledTask -TaskName $taskName -Confirm:$false}
     }
     if ($pathAdded) {Remove-MoonOwnedUserPath $state.user_path}

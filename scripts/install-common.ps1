@@ -752,6 +752,83 @@ function Assert-MoonOwnedTask($Task,$State,[string]$Target) {
     if ($principal -notmatch '^S-1-') { $principal=([Security.Principal.NTAccount]::new($principal)).Translate([Security.Principal.SecurityIdentifier]).Value }
     if ($principal -ne $State.owner_sid) { throw 'Unexpected startup task user.' }
 }
+# Task-specific access only. Keep the existing owner/group and every unrelated
+# ACE; never grant WRITE_DAC, WRITE_OWNER or access to other scheduled tasks.
+function Get-MoonStartupTaskSecurity([string]$Sddl,[string]$OwnerSid) {
+    $security=[Security.AccessControl.RawSecurityDescriptor]::new($Sddl)
+    if (!$security.DiscretionaryAcl) {throw 'The startup task must have an explicit access-control list.'}
+    $owner=[Security.Principal.SecurityIdentifier]::new($OwnerSid)
+    $rights=0x1201bf # FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE
+    $index=$security.DiscretionaryAcl.Count
+    for($i=0;$i -lt $security.DiscretionaryAcl.Count;$i++) {
+        $ace=$security.DiscretionaryAcl[$i]
+        if (([int]$ace.AceFlags -band [int][Security.AccessControl.AceFlags]::Inherited) -ne 0 -and $index -eq $security.DiscretionaryAcl.Count) {$index=$i}
+        if ($ace -is [Security.AccessControl.CommonAce] -and $ace.AceQualifier -eq [Security.AccessControl.AceQualifier]::AccessAllowed -and $ace.SecurityIdentifier -eq $owner -and ($ace.AccessMask -band $rights) -eq $rights) {return $Sddl}
+    }
+    $grant=[Security.AccessControl.CommonAce]::new([Security.AccessControl.AceFlags]::None,[Security.AccessControl.AceQualifier]::AccessAllowed,$rights,$owner,$false,$null)
+    $security.DiscretionaryAcl.InsertAce($index,$grant)
+    $security.GetSddlForm([Security.AccessControl.AccessControlSections]::All)
+}
+function Assert-MoonRegisteredTask($Registered,$State,[string]$Target) {
+    $definition=$Registered.Definition
+    $actions=@(for($i=1;$i -le $definition.Actions.Count;$i++) {
+        $action=$definition.Actions.Item($i)
+        if ($action.Type -ne 0) {throw 'The Moon startup task has a non-executable action.'}
+        [pscustomobject]@{Execute=$action.Path;Arguments=$action.Arguments}
+    })
+    $view=[pscustomobject]@{
+        Description=$definition.RegistrationInfo.Description
+        Principal=[pscustomobject]@{RunLevel=$(if($definition.Principal.RunLevel -eq 0){'Limited'}else{'Highest'});UserId=$definition.Principal.UserId}
+        Actions=$actions
+    }
+    Assert-MoonOwnedTask $view $State $Target
+}
+function Invoke-MoonRegisteredTask($State,[string]$Target,[scriptblock]$Action) {
+    $service=$null;$folder=$null;$registered=$null
+    try {
+        $service=New-Object -ComObject 'Schedule.Service'
+        $service.Connect()
+        $folder=$service.GetFolder('\')
+        $registered=$folder.GetTask($State.task_name)
+        Assert-MoonRegisteredTask $registered $State $Target
+        & $Action $registered
+    } finally {
+        foreach($item in @($registered,$folder,$service)) {if($item -and [Runtime.InteropServices.Marshal]::IsComObject($item)){[void][Runtime.InteropServices.Marshal]::ReleaseComObject($item)}}
+    }
+}
+function Get-MoonTaskSecurity($State,[string]$Target) {
+    Invoke-MoonRegisteredTask $State $Target {param($task) $task.GetSecurityDescriptor(7)}
+}
+function Set-MoonTaskSecurity($State,[string]$Target,[string]$Sddl) {
+    Invoke-MoonRegisteredTask $State $Target {param($task) $task.SetSecurityDescriptor($Sddl,16)}
+}
+function Get-MoonTaskEnabled($State,[string]$Target) {
+    Invoke-MoonRegisteredTask $State $Target {param($task) [bool]$task.Enabled}
+}
+function Set-MoonTaskEnabled($State,[string]$Target,[bool]$Enabled) {
+    Invoke-MoonRegisteredTask $State $Target {
+        param($task)
+        $task.Enabled=$Enabled
+        if ([bool]$task.Enabled -ne $Enabled) {throw 'Windows did not retain the requested startup preference.'}
+        Assert-MoonRegisteredTask $task $State $Target
+    }
+}
+function Get-MoonStartupStatus {
+    $directory=Get-MoonInstallDirectory
+    if (!(Test-Path -LiteralPath (Join-Path $directory 'installation.json') -PathType Leaf)) {
+        return [pscustomobject]@{available=$false;enabled=$false;message='Install Moon to choose whether it launches when you sign in.'}
+    }
+    $state=Read-MoonInstallState $directory
+    $enabled=Get-MoonTaskEnabled $state (Join-Path $directory 'moon.exe')
+    [pscustomobject]@{available=$true;enabled=[bool]$enabled;message=$(if($enabled){'Moon will launch when you sign in.'}else{'Moon will stay closed at sign-in. This does not stop the current session.'})}
+}
+function Set-MoonStartupEnabled([bool]$Enabled) {
+    $directory=Get-MoonInstallDirectory
+    $state=Read-MoonInstallState $directory
+    Set-MoonTaskEnabled $state (Join-Path $directory 'moon.exe') $Enabled
+    Get-MoonStartupStatus
+}
+
 function Get-MoonLayoutFingerprint {
     param($World,[object[]]$Placements,[switch]$Installed,[MoonInstallNative+ProcessIdentityInfo]$ExpectedPeer,[string]$DevelopmentPath,[MoonInstallNative+ProcessIdentityInfo]$ExpectedPortablePeer,[string]$ExpectedPortableSha256)
     if (!$PSBoundParameters.ContainsKey('World')) {$World=Invoke-MoonRpc query world -Installed:$Installed -ExpectedPeer $ExpectedPeer -DevelopmentPath $DevelopmentPath -ExpectedPortablePeer $ExpectedPortablePeer -ExpectedPortableSha256 $ExpectedPortableSha256}

@@ -166,6 +166,52 @@ fn handle(call: &Call, path: &std::path::Path) -> Result<Value, Value> {
             crate::library_bridge::handle(&call.method, &call.params, path)
         }
         "status" => Ok(runtime()),
+        "startup-status" => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Empty {}
+            let _: Empty = serde_json::from_value(call.params.clone()).map_err(failure)?;
+            crate::launch_on_startup::status().map_err(failure)
+        }
+        "startup-set" => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Startup {
+                enabled: bool,
+            }
+            let startup: Startup = serde_json::from_value(call.params.clone()).map_err(failure)?;
+            crate::launch_on_startup::set(startup.enabled).map_err(failure)
+        }
+        "location-search" => {
+            let search: crate::location::Search =
+                serde_json::from_value(call.params.clone()).map_err(failure)?;
+            crate::location::search(&search.query).map_err(failure)
+        }
+        "location-open-settings" => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Empty {}
+            let _: Empty = serde_json::from_value(call.params.clone()).map_err(failure)?;
+            moon_win::runtime::shell_execute("ms-settings:privacy-location", "")
+                .map_err(failure)?;
+            Ok(Value::Null)
+        }
+        "location-attribution" => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Attribution {
+                provider: String,
+            }
+            let attribution: Attribution =
+                serde_json::from_value(call.params.clone()).map_err(failure)?;
+            let url = match attribution.provider.as_str() {
+                "open-meteo" => "https://open-meteo.com/en/licence",
+                "geonames" => "https://www.geonames.org/",
+                _ => return Err(failure("Unknown location data provider.")),
+            };
+            moon_win::runtime::shell_execute(url, "").map_err(failure)?;
+            Ok(Value::Null)
+        }
         "shortcuts" | "overview" => {
             ipc_request("query", json!({"query":call.method})).map_err(failure)
         }
@@ -420,6 +466,7 @@ pub fn run() -> Result<(), String> {
                 "/" => ("text/html; charset=utf-8",include_bytes!("../../../apps/settings/dist/index.html")),
                 "/styles.css" => ("text/css; charset=utf-8",include_bytes!("../../../apps/settings/dist/styles.css")),
                 "/app.js" => ("text/javascript; charset=utf-8",include_bytes!("../../../apps/settings/dist/app.js")),
+                "/moon-symbols.ttf" => ("font/ttf",include_bytes!("../../moon-win/assets/SymbolsNerdFont-Regular.ttf")),
                 "/moon.svg" => ("image/svg+xml",include_bytes!("../../moon-win/assets/icons/moon.svg")),
                 _ => return Response::builder().status(404).body(Vec::new().into()).unwrap(),
             };
@@ -436,6 +483,8 @@ pub fn run() -> Result<(), String> {
     let mut initialized = false;
     let mut previews = crate::previews::Previews::default();
     let mut shown = false;
+    let mut location_pending = false;
+    let loop_proxy = loop_.create_proxy();
     let startup_deadline = Instant::now() + Duration::from_secs(30);
     loop_.run(move |event, _, flow| {
         // A failed script or WebView process must not leave an invisible host.
@@ -503,6 +552,33 @@ pub fn run() -> Result<(), String> {
                     };
                     let _ = webview.evaluate_script(&format!("window.moonReceive({reply});window.moonPreviewChanged?.()"));
                 }
+                else if call.method == "location-current" {
+                    #[derive(Deserialize)]
+                    #[serde(deny_unknown_fields)]
+                    struct Empty {}
+                    let valid = serde_json::from_value::<Empty>(call.params).map_err(|e| e.to_string());
+                    let active = unsafe { GetForegroundWindow() } == HWND(window.hwnd() as *mut _);
+                    let id = call.id;
+                    let result = valid.and_then(|_| {
+                        if location_pending { return Err("A location request is already in progress.".into()); }
+                        if !active { return Err("Bring Moon Settings to the front before requesting location.".into()); }
+                        let reply_proxy = loop_proxy.clone();
+                        crate::location::current(move |result| {
+                            let body = match result {
+                                Ok(value) => json!({"id":id,"ok":true,"result":value}),
+                                Err(error) => json!({"id":id,"ok":false,"error":failure(error)}),
+                            };
+                            let _ = reply_proxy.send_event(UserEvent::Reply { method: "location-current".into(), body });
+                        })
+                    });
+                    match result {
+                        Ok(()) => location_pending = true,
+                        Err(error) => {
+                            let reply = json!({"id":id,"ok":false,"error":failure(error)});
+                            let _ = webview.evaluate_script(&format!("window.moonReceive({reply})"));
+                        }
+                    }
+                }
                 else if call.method == "previews" {
                     let result = serde_json::from_value::<crate::preview_layout::Request>(call.params)
                         .map_err(|e| e.to_string())
@@ -538,6 +614,7 @@ pub fn run() -> Result<(), String> {
                 }
             }
             Event::UserEvent(UserEvent::Reply { method, body }) => {
+                if method == "location-current" { location_pending = false; }
                 if method == "desktop" {
                     if body["ok"] == true { previews.accept_catalog(&body["result"]); }
                     else { previews.clear(); }

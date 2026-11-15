@@ -8,3 +8,8 @@ await Promise.all(
 );
 
 await copyFile("../../crates/moon-win/assets/icons/moon.svg", "dist/moon.svg");
+
+await copyFile(
+  "../../crates/moon-win/assets/SymbolsNerdFont-Regular.ttf",
+  "dist/moon-symbols.ttf",
+);

@@ -59,6 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     if std::env::args().any(|arg| arg == "--weather") {
         config.weather = Some(moon_core::config::WeatherConfig {
+            location: None,
             latitude: 0.0,
             longitude: 0.0,
             interval_seconds: 900,
