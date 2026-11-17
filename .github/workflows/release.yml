@@ -55,7 +55,8 @@ jobs:
           MOON_RELEASE_VERSION: ${{ steps.plan.outputs.version }}
         run: |
           $build = "$PWD\target\x86_64-pc-windows-msvc\release"
-          .\scripts\package.ps1 -Version $env:MOON_RELEASE_VERSION -OutputDirectory "$PWD\dist" `
+          $rustNotices = Join-Path (rustc --print sysroot) 'share/doc/rust/COPYRIGHT-library.html'
+          .\scripts\package.ps1 -RustLibraryNotices $rustNotices -Version $env:MOON_RELEASE_VERSION -OutputDirectory "$PWD\dist" `
             -Binary "$build\moon.exe" -SettingsBinary "$build\moon-settings.exe" `
             -InventoryBinary "$build\examples\window_inventory.exe" -RecoveryBinary "$build\examples\recover_windows.exe"
       - name: Publish verified release assets

@@ -22,6 +22,7 @@ stores, or installs Moon. Run it using Windows PowerShell 5.1 or newer:
   -SettingsBinary C:\build\moon-settings.exe `
   -InventoryBinary C:\build\examples\window_inventory.exe `
   -RecoveryBinary C:\build\examples\recover_windows.exe `
+  -RustLibraryNotices (Join-Path (rustc --print sysroot) 'share/doc/rust/COPYRIGHT-library.html') `
   -Version 0.1.0 -OutputDirectory C:\releases
 ```
 
@@ -35,8 +36,9 @@ create a machine-trusted signing certificate.
 The complete folder and ZIP contain **Install Moon.cmd**, the setup/install/
 uninstall/common/handover/verification scripts, both application executables,
 the two recovery helpers, all current Markdown/JSON documentation, the Symbols
-font notice, and the standalone `examples/workspace-state.ps1` IPC extension.
-The Evergreen WebView2 runtime is a separately detected prerequisite; the
+font notices, and the standalone `examples/workspace-state.ps1` IPC extension.
+GitHub release bundles include the compiler’s standard-library notices under
+`licenses/Rust-library.html`. The Evergreen WebView2 runtime is a separately detected prerequisite; the
 WebView2 loader is statically linked by the pinned Rust dependency.
 
 Validation requires x64 PE application images, matching product/version/original

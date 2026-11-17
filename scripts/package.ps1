@@ -6,6 +6,7 @@ param(
     [Parameter(Mandatory,ParameterSetName='Binaries')][string]$SettingsBinary,
     [Parameter(Mandatory,ParameterSetName='Binaries')][string]$InventoryBinary,
     [Parameter(Mandatory,ParameterSetName='Binaries')][string]$RecoveryBinary,
+    [Parameter(ParameterSetName='Binaries')][string]$RustLibraryNotices,
     [Parameter(Mandatory,ParameterSetName='Staged')][string]$StageDirectory,
     [Parameter(Mandatory)][string]$OutputDirectory,
     [Parameter(Mandatory)][ValidatePattern('\A(?:[0-9]+\.[0-9]+\.[0-9]+|[0-9]{4}\.[0-9]{2}\.[0-9]{2}-(?:0|[1-9][0-9]*))\z')][string]$Version,
@@ -63,6 +64,11 @@ foreach($document in Get-ChildItem -LiteralPath (Join-Path $repository 'docs') -
 $sources['LICENSE']=Join-Path $repository 'LICENSE'
 $sources['licenses/Symbols-NOTICES.txt']=Join-Path $repository 'crates/moon-win/assets/Symbols-NOTICES.txt'
 $sources['licenses/Symbols-LICENSE.txt']=Join-Path $repository 'crates/moon-win/assets/Symbols-LICENSE.txt'
+$rustLicenseFile='licenses/Rust-library.html'
+if($PSCmdlet.ParameterSetName -eq 'Staged' -and (Test-Path -LiteralPath (Join-Path $StageDirectory $rustLicenseFile))) {
+    $RustLibraryNotices=Join-Path $StageDirectory $rustLicenseFile
+}
+if($RustLibraryNotices){$sources[$rustLicenseFile]=$RustLibraryNotices}
 $sources['moon.exe']=$Binary
 $sources['moon-settings.exe']=$SettingsBinary
 $sources['window_inventory.exe']=$InventoryBinary
