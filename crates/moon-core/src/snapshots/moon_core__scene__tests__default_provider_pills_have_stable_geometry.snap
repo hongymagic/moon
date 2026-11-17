@@ -26,6 +26,7 @@ Scene {
                     },
                     label: "Moon",
                     selected: false,
+                    center_content: false,
                     text: "☾",
                     foreground: "#d17a4f",
                     background: None,
@@ -43,6 +44,7 @@ Scene {
                     },
                     label: "Workspace 1 · Current",
                     selected: true,
+                    center_content: true,
                     text: "1",
                     foreground: "#08080a",
                     background: Some(
@@ -62,6 +64,7 @@ Scene {
                     },
                     label: "Workspace 2",
                     selected: false,
+                    center_content: true,
                     text: "2",
                     foreground: "#d17a4f",
                     background: Some(
@@ -81,6 +84,7 @@ Scene {
                     },
                     label: "Workspace 3",
                     selected: false,
+                    center_content: true,
                     text: "3",
                     foreground: "#d17a4f",
                     background: Some(
@@ -100,6 +104,7 @@ Scene {
                     },
                     label: "Workspace 4",
                     selected: false,
+                    center_content: true,
                     text: "4",
                     foreground: "#d17a4f",
                     background: Some(
@@ -119,6 +124,7 @@ Scene {
                     },
                     label: "Workspace 5",
                     selected: false,
+                    center_content: true,
                     text: "5",
                     foreground: "#d17a4f",
                     background: Some(
@@ -138,6 +144,7 @@ Scene {
                     },
                     label: "Workspace 6",
                     selected: false,
+                    center_content: true,
                     text: "6",
                     foreground: "#d17a4f",
                     background: Some(
@@ -157,6 +164,7 @@ Scene {
                     },
                     label: "Workspace 7",
                     selected: false,
+                    center_content: true,
                     text: "7",
                     foreground: "#d17a4f",
                     background: Some(
@@ -176,6 +184,7 @@ Scene {
                     },
                     label: "Workspace 8",
                     selected: false,
+                    center_content: true,
                     text: "8",
                     foreground: "#d17a4f",
                     background: Some(
@@ -195,6 +204,7 @@ Scene {
                     },
                     label: "Workspace 9",
                     selected: false,
+                    center_content: true,
                     text: "9",
                     foreground: "#d17a4f",
                     background: Some(
@@ -214,6 +224,7 @@ Scene {
                     },
                     label: "Workspace 10",
                     selected: false,
+                    center_content: true,
                     text: "10",
                     foreground: "#d17a4f",
                     background: Some(
@@ -233,6 +244,7 @@ Scene {
                     },
                     label: "Date and time: Wed 11 Nov 22:48",
                     selected: false,
+                    center_content: false,
                     text: "Wed 11 Nov 22:48",
                     foreground: "#f0ebe0",
                     background: Some(
@@ -250,6 +262,7 @@ Scene {
                     },
                     label: "Layout: horizontal",
                     selected: false,
+                    center_content: false,
                     text: "horizontal",
                     foreground: "#d17a4f",
                     background: Some(
@@ -269,6 +282,7 @@ Scene {
                     },
                     label: "Keyboard language: ENG",
                     selected: false,
+                    center_content: false,
                     text: "\u{f11c}",
                     foreground: "#141417",
                     background: Some(
@@ -286,6 +300,7 @@ Scene {
                     },
                     label: "Keyboard language: ENG",
                     selected: false,
+                    center_content: false,
                     text: "ENG",
                     foreground: "#f0ebe0",
                     background: Some(
@@ -303,6 +318,7 @@ Scene {
                     },
                     label: "Network: Wired",
                     selected: false,
+                    center_content: false,
                     text: "\u{f1eb}",
                     foreground: "#141417",
                     background: Some(
@@ -320,6 +336,7 @@ Scene {
                     },
                     label: "Network: Wired",
                     selected: false,
+                    center_content: false,
                     text: "Wired",
                     foreground: "#f0ebe0",
                     background: Some(
@@ -337,6 +354,7 @@ Scene {
                     },
                     label: "Memory usage: 42%",
                     selected: false,
+                    center_content: false,
                     text: "\u{efc5}",
                     foreground: "#141417",
                     background: Some(
@@ -354,6 +372,7 @@ Scene {
                     },
                     label: "Memory usage: 42%",
                     selected: false,
+                    center_content: false,
                     text: "42%",
                     foreground: "#f0ebe0",
                     background: Some(
@@ -371,6 +390,7 @@ Scene {
                     },
                     label: "Processor usage: 8%",
                     selected: false,
+                    center_content: false,
                     text: "\u{f4bc}",
                     foreground: "#141417",
                     background: Some(
@@ -388,6 +408,7 @@ Scene {
                     },
                     label: "Processor usage: 8%",
                     selected: false,
+                    center_content: false,
                     text: "8%",
                     foreground: "#f0ebe0",
                     background: Some(
@@ -405,6 +426,7 @@ Scene {
                     },
                     label: "Volume: 50%",
                     selected: false,
+                    center_content: false,
                     text: "\u{f028}",
                     foreground: "#141417",
                     background: Some(
@@ -422,6 +444,7 @@ Scene {
                     },
                     label: "Volume: 50%",
                     selected: false,
+                    center_content: false,
                     text: "50%",
                     foreground: "#f0ebe0",
                     background: Some(

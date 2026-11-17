@@ -995,6 +995,32 @@ fn text_format(
     Ok(cached.as_ref().expect("created text format").format.clone())
 }
 
+fn draw_bar_text(
+    context: &ID2D1DeviceContext,
+    layout: &IDWriteTextLayout,
+    bounds: Rect,
+    brush: &ID2D1SolidColorBrush,
+    center_content: bool,
+) -> Result<()> {
+    let mut origin = Vector2 { X: bounds.x as f32, Y: bounds.y as f32 };
+    unsafe {
+        if center_content {
+            // Signed overhangs include the shaped glyphs' side bearings, ascenders
+            // and descenders, including those from the bundled symbol font.
+            let ink = layout.GetOverhangMetrics()?;
+            origin.X += (ink.left - ink.right) / 2.0;
+            origin.Y += (ink.top - ink.bottom) / 2.0;
+            // Clip to the button's content box, independent of the shifted layout.
+            context.PushAxisAlignedClip(&d2_rect(bounds), D2D1_ANTIALIAS_MODE_ALIASED);
+            let _clip = Clip(context);
+            context.DrawTextLayout(origin, layout, brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
+        } else {
+            context.DrawTextLayout(origin, layout, brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        }
+    }
+    Ok(())
+}
+
 struct BorderBrush {
     colors: [String; 2],
     brush: ID2D1LinearGradientBrush,
@@ -1173,6 +1199,15 @@ impl Canvas {
                 return Err(error);
             }
             if border {
+                // The last ring disappears by destroying this monitor's underlay.
+                // Keep DWM from animating a snapshot of the retired border.
+                let disabled = BOOL::from(true);
+                let _ = DwmSetWindowAttribute(
+                    hwnd,
+                    DWMWA_TRANSITIONS_FORCEDISABLED,
+                    (&disabled as *const BOOL).cast(),
+                    size_of::<BOOL>() as u32,
+                );
                 let corner = DWMWCP_DONOTROUND;
                 let _ = DwmSetWindowAttribute(
                     hwnd,
@@ -1363,13 +1398,7 @@ impl Canvas {
         )?;
         unsafe {
             let brush = self.context.CreateSolidColorBrush(&parse_color(color, 1.0), None)?;
-            self.context.DrawTextLayout(
-                Vector2 { X: bounds.x as f32, Y: bounds.y as f32 },
-                &layout,
-                &brush,
-                D2D1_DRAW_TEXT_OPTIONS_CLIP,
-            );
-            Ok(())
+            draw_bar_text(&self.context, &layout, bounds, &brush, item.center_content)
         }
     }
 
@@ -1411,6 +1440,10 @@ impl Canvas {
             let scale = GetDpiForWindow(self.hwnd).max(96) as f32 / 96.0;
             for (index, item) in bar.items.iter().enumerate() {
                 let bounds = item.rect.translated(-bar.rect.x, -bar.rect.y);
+                if bounds.is_empty() {
+                    self.text_layouts.0[index] = None;
+                    continue;
+                }
                 let highlighted = preferences.contrast
                     && item.command.is_some()
                     && hovered.is_some_and(|hover| hover.intersects(&bounds));
@@ -1432,13 +1465,14 @@ impl Canvas {
                         &brush,
                     );
                 }
+                let inset = ((7.0 * scale).round() as i32).min((bounds.width - 1) / 2);
                 self.text(
                     graphics,
                     index,
                     item,
                     bounds.inset(moon_core::geometry::Edges {
-                        left: (7.0 * scale).round() as i32,
-                        right: (7.0 * scale).round() as i32,
+                        left: inset,
+                        right: inset,
                         top: 0,
                         bottom: 0,
                     }),
@@ -2299,6 +2333,108 @@ mod tests {
     use super::*;
 
     #[test]
+    fn workspace_glyph_pixels_are_centered_at_multiple_scales() -> Result<()> {
+        let _apartment = crate::platform::Apartment::new()?;
+        let graphics = Graphics::new(Rc::default())?;
+        let context = &graphics.context;
+        let size = D2D_SIZE_U { width: 128, height: 80 };
+        unsafe {
+            let bitmap = |options| {
+                context.CreateBitmap(
+                    size,
+                    None,
+                    0,
+                    &D2D1_BITMAP_PROPERTIES1 {
+                        pixelFormat: D2D1_PIXEL_FORMAT {
+                            format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                            alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+                        },
+                        bitmapOptions: options,
+                        dpiX: 96.0,
+                        dpiY: 96.0,
+                        ..Default::default()
+                    },
+                )
+            };
+            let target = bitmap(D2D1_BITMAP_OPTIONS_TARGET)?;
+            let readback = bitmap(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW)?;
+            let brush = context.CreateSolidColorBrush(&parse_color("#ffffff", 1.0), None)?;
+            let mut format = None;
+            for scale in [1.0f32, 1.25, 1.5, 2.0] {
+                for (text, width_dip) in [
+                    ("\u{f120}", 20.0),
+                    ("\u{f269}", 20.0),
+                    ("10", 26.0),
+                    ("g", 20.0),
+                    ("A long workspace name", 20.0),
+                ] {
+                    let font_size = 13.0 * scale;
+                    let bounds = Rect::new(
+                        11,
+                        7,
+                        (width_dip * scale).round() as i32,
+                        (28.0 * scale).round() as i32,
+                    );
+                    let layout = text_layout(
+                        &graphics,
+                        &mut format,
+                        &mut None,
+                        text,
+                        bounds,
+                        "Segoe UI",
+                        font_size,
+                    )?;
+                    context.SetTarget(&target);
+                    context.BeginDraw();
+                    context.Clear(None);
+                    draw_bar_text(context, &layout, bounds, &brush, true)?;
+                    context.EndDraw(None, None)?;
+                    context.SetTarget(None);
+                    readback.CopyFromBitmap(None, &target, None)?;
+                    let mapped = readback.Map(D2D1_MAP_OPTIONS_READ)?;
+                    let mut left = size.width as i32;
+                    let mut top = size.height as i32;
+                    let mut right = 0;
+                    let mut bottom = 0;
+                    // Each row contains BGRA pixels; ignore faint antialiasing fringes.
+                    for y in 0..size.height {
+                        let row = std::slice::from_raw_parts(
+                            mapped.bits.add((y * mapped.pitch) as usize).cast::<[u8; 4]>(),
+                            size.width as usize,
+                        );
+                        for (x, pixel) in row.iter().enumerate() {
+                            if pixel[3] >= 32 {
+                                left = left.min(x as i32);
+                                right = right.max(x as i32 + 1);
+                                top = top.min(y as i32);
+                                bottom = bottom.max(y as i32 + 1);
+                            }
+                        }
+                    }
+                    readback.Unmap()?;
+                    let horizontal = (left - bounds.x, bounds.right() - right);
+                    let vertical = (top - bounds.y, bounds.bottom() - bottom);
+                    assert!(left < right && top < bottom, "empty ink for {text} at scale {scale}");
+                    assert!(
+                        horizontal.0 >= 0
+                            && horizontal.1 >= 0
+                            && vertical.0 >= 0
+                            && vertical.1 >= 0,
+                        "ink escaped bounds for {text:?} at scale {scale}"
+                    );
+                    // Grayscale antialiasing and hinting can shift an outer edge by a pixel.
+                    assert!(
+                        (horizontal.0 - horizontal.1).abs() <= 2
+                            && (vertical.0 - vertical.1).abs() <= 2,
+                        "{text} scale {scale}: horizontal {horizontal:?}, vertical {vertical:?}"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn native_surface_factories_share_context_and_commit_without_a_window() {
         let _apartment = crate::platform::Apartment::new().unwrap();
         let diagnostics = Rc::default();
@@ -2605,6 +2741,7 @@ mod tests {
             rect: Rect::new(x, -194, width, 28),
             label: label.into(),
             selected: false,
+            center_content: false,
             text: "fixture".into(),
             foreground: "#ffffff".into(),
             background: None,

@@ -600,12 +600,66 @@ pub fn is_window(id: WindowId) -> bool {
 pub fn is_minimized(id: WindowId) -> bool {
     unsafe { IsIconic(hwnd(id)).as_bool() }
 }
+
+/// Apps can hide their top-level window or cloak it while they finish closing.
+/// Moon's workspace cloak is set by the shell and leaves WS_VISIBLE intact.
+pub fn is_hidden_by_app(id: WindowId) -> bool {
+    let visible = unsafe { IsWindowVisible(hwnd(id)).as_bool() };
+    !visible || cloaked(id).is_ok_and(|flags| flags & DWM_CLOAKED_APP != 0)
+}
+
 pub fn cloaked(id: WindowId) -> Result<u32> {
     let mut value = 0u32;
     unsafe {
         DwmGetWindowAttribute(hwnd(id), DWMWA_CLOAKED, &mut value as *mut _ as *mut c_void, 4)?;
     }
     Ok(value)
+}
+
+#[cfg(test)]
+mod visibility_tests {
+    use super::*;
+    use windows::core::{BOOL, w};
+
+    #[test]
+    fn detects_hide_before_destroy_and_recovers_on_show_or_uncloak() -> Result<()> {
+        unsafe {
+            let handle = CreateWindowExW(
+                WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                w!("STATIC"),
+                w!("Moon visibility test"),
+                WS_POPUP,
+                -32000,
+                -32000,
+                32,
+                32,
+                None,
+                None,
+                None,
+                None,
+            )?;
+            let id = window_id(handle);
+            let _ = ShowWindow(handle, SW_SHOWNOACTIVATE);
+            assert!(!is_hidden_by_app(id));
+            let _ = ShowWindow(handle, SW_HIDE);
+            assert!(is_window(id) && is_hidden_by_app(id));
+            let _ = ShowWindow(handle, SW_SHOWNOACTIVATE);
+            assert!(!is_hidden_by_app(id));
+            for hidden in [true, false] {
+                let cloak = BOOL::from(hidden);
+                DwmSetWindowAttribute(
+                    handle,
+                    DWMWA_CLOAK,
+                    (&cloak as *const BOOL).cast(),
+                    size_of::<BOOL>() as u32,
+                )?;
+                DwmFlush()?;
+                assert_eq!(is_hidden_by_app(id), hidden);
+            }
+            DestroyWindow(handle)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

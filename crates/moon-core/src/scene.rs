@@ -26,6 +26,9 @@ pub struct BarItem {
     pub label: String,
     #[serde(default)]
     pub selected: bool,
+    /// Center the visible glyphs on both axes within the item's rectangle.
+    #[serde(default)]
+    pub center_content: bool,
     pub text: String,
     pub foreground: String,
     pub background: Option<String>,
@@ -153,6 +156,7 @@ pub fn derive_with_bar_bounds<E>(
                             if selected { " · Current" } else { "" }
                         ),
                         selected,
+                        center_content: true,
                         text,
                         foreground: color(if selected { "crust" } else { accent }),
                         background: Some(color(if selected {
@@ -207,6 +211,7 @@ pub fn derive_with_bar_bounds<E>(
                     rect: Rect::default(),
                     label: label.clone(),
                     selected: false,
+                    center_content: false,
                     text: icon.clone(),
                     foreground: color("base"),
                     background: Some(color(widget.icon_color.as_deref().unwrap_or("terracotta"))),
@@ -219,6 +224,7 @@ pub fn derive_with_bar_bounds<E>(
                 rect: Rect::default(),
                 label,
                 selected: false,
+                center_content: false,
                 text,
                 foreground: color(widget.color.as_deref().unwrap_or(&config.bar.foreground)),
                 background: widget.background.as_deref().map(color),
@@ -248,6 +254,7 @@ pub fn derive_with_bar_bounds<E>(
                 rect,
                 label: format!("Moon: {error}. Click to reload configuration."),
                 selected: false,
+                center_content: false,
                 text: format!(
                     "moon: {}",
                     error.lines().map(str::trim).collect::<Vec<_>>().join(" ")
@@ -634,6 +641,7 @@ mod tests {
         config.bar.widgets[0].max_width = 300;
         config.workspaces[0].icon = Some("".into());
         let icon = item(config.clone());
+        assert!(icon.center_content);
         assert_eq!(icon.text, "");
         assert_eq!(icon.rect.width, 43);
         config.workspaces[0].icon = Some("DEV".into());

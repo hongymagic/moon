@@ -1140,6 +1140,26 @@ mod tests {
         w.check().unwrap();
     }
     #[test]
+    fn last_border_tracks_actual_window_visibility_through_close() {
+        let mut w = world();
+        let id = WindowId(1);
+        let borders = |world: &World| crate::scene::derive(world, &BTreeMap::new(), None).borders;
+        apply(&mut w, Event::WindowAdded(window(1)));
+        let original = borders(&w);
+        assert_eq!(original.len(), 1);
+        // A close request may open a save prompt or be cancelled by the app.
+        let requested = reduce(&w, Event::Command(Command::Close)).unwrap();
+        assert_eq!(requested.plan.close, [id]);
+        w = requested.world;
+        assert_eq!(borders(&w), original);
+        apply(&mut w, Event::WindowSuspended { id, suspended: true });
+        assert!(borders(&w).is_empty());
+        apply(&mut w, Event::WindowSuspended { id, suspended: false });
+        assert_eq!(borders(&w)[0].rect, original[0].rect);
+        apply(&mut w, Event::WindowRemoved(id));
+        assert!(borders(&w).is_empty());
+    }
+    #[test]
     fn explicit_workspace_focus_is_not_suppressed_as_an_echo() {
         let mut w = world();
         apply(&mut w, Event::WindowAdded(window(1)));

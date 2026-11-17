@@ -385,17 +385,25 @@ pub fn run(options: Options) -> Result<()> {
             daemon.world.monitors.len()
         );
         let mut maintenance = Instant::now();
+        let mut pending = None;
         while !daemon.quit {
-            if !runtime::pump(if daemon.carousel.is_active() { 16 } else { 1000 })
-                || runtime::shutdown_requested()
-            {
+            // The native pump may have drained wake messages for more than one
+            // batch. Keep dispatching if a close or other input is still queued.
+            let wait_ms = if pending.is_some() {
+                0
+            } else if daemon.carousel.is_active() {
+                16
+            } else {
+                1000
+            };
+            if !runtime::pump(wait_ms) || runtime::shutdown_requested() {
                 break;
             }
-            let mut changed = BTreeMap::new();
-            for input in rx.try_iter().take(4096) {
+            let mut changed = Vec::new();
+            for input in pending.take().into_iter().chain(rx.try_iter()).take(4096) {
                 match input {
                     Intake::Platform(PlatformEvent::Window { kind, id }) => {
-                        changed.insert((id, kind), ());
+                        changed.push((id, kind));
                     }
                     Intake::Platform(PlatformEvent::Commands { commands, received }) => {
                         daemon.flush_windows(&mut changed);
@@ -461,6 +469,7 @@ pub fn run(options: Options) -> Result<()> {
                 maintenance = Instant::now();
             }
             daemon.refresh_surfaces()?;
+            pending = rx.try_recv().ok();
         }
         Ok(())
     }));
@@ -1000,6 +1009,15 @@ impl Daemon {
         Ok(())
     }
     fn window_event(&mut self, id: WindowId, kind: u32) -> Result<()> {
+        // A destroy notification can arrive while the HWND is still valid.
+        // Retire the tile before querying its visibility or window metadata.
+        if kind == 0x8001 || !platform::is_window(id) {
+            if self.world.windows.contains_key(&id) {
+                self.commit(Event::WindowRemoved(id), "destroy")?;
+                self.journal.windows.remove(&id);
+            }
+            return Ok(());
+        }
         // A queued event can outlive its HWND. Check its current owner before
         // accepting placement echoes, changing suspension, or issuing effects.
         if self.world.windows.contains_key(&id) && !self.owns_native_window(id) {
@@ -1026,19 +1044,16 @@ impl Daemon {
         if self.world.windows.contains_key(&id) {
             self.sync_suspension(id)?;
         }
-        if kind == 0x8001 || !platform::is_window(id) {
-            if self.world.windows.contains_key(&id) {
-                self.commit(Event::WindowRemoved(id), "destroy")?;
-                self.journal.windows.remove(&id);
-            }
-        } else if kind == 3 {
+        if kind == 3 {
             if platform::foreground() == Some(id)
                 && self.world.windows.contains_key(&id)
                 && self.world.focused != Some(id)
             {
                 self.commit(Event::WindowFocused(id), "foreground")?;
             }
-        } else if let Ok(info) = platform::window_info(id) {
+        } else if (self.world.windows.contains_key(&id) || platform::is_manageable(id))
+            && let Ok(info) = platform::window_info(id)
+        {
             if !self.in_scope(&info.process) {
                 return Ok(());
             }
@@ -1057,8 +1072,7 @@ impl Daemon {
                 {
                     self.commit(Event::WindowChanged(info), "window")?;
                 }
-            } else if platform::is_manageable(id)
-                && platform::cloaked(id).unwrap_or(0) == 0
+            } else if platform::cloaked(id).unwrap_or(0) == 0
                 && platform::can_manage_process(info.process_id)
             {
                 self.commit(Event::WindowAdded(info), "create")?;
@@ -1066,8 +1080,8 @@ impl Daemon {
         }
         Ok(())
     }
-    fn flush_windows(&mut self, changed: &mut BTreeMap<(WindowId, u32), ()>) {
-        for ((id, kind), ()) in std::mem::take(changed) {
+    fn flush_windows(&mut self, changed: &mut Vec<(WindowId, u32)>) {
+        for (id, kind) in coalesced_window_events(changed) {
             if let Err(error) = self.window_event(id, kind) {
                 self.report(error);
             }
@@ -1195,6 +1209,7 @@ impl Daemon {
             return Ok(());
         }
         let suspended = platform::is_minimized(id)
+            || platform::is_hidden_by_app(id)
             || !platform::window_on_current_virtual_desktop(id).unwrap_or(false);
         if self.world.windows.get(&id).is_some_and(|window| window.suspended != suspended) {
             self.applied.remove(&id);
@@ -1315,6 +1330,17 @@ impl Daemon {
             _ => bail!("unknown query {query:?}"),
         })
     }
+}
+
+fn coalesced_window_events(
+    pending: &mut Vec<(WindowId, u32)>,
+) -> impl Iterator<Item = (WindowId, u32)> {
+    // Keep the last notification of each kind in delivery order. Sorting by
+    // event code can replay an old destroy after a reused HWND's newer create.
+    let mut seen = BTreeSet::new();
+    pending.reverse();
+    pending.retain(|event| seen.insert(*event));
+    pending.drain(..).rev()
 }
 
 fn keyboard_targets_window(command: &moon_core::command::Command) -> bool {
@@ -1474,6 +1500,24 @@ pub fn doctor(options: &Options, words: &[String]) -> Result<()> {
         return Ok(());
     }
     bail!("unknown doctor arguments: {}", words.join(" "))
+}
+
+#[cfg(test)]
+#[test]
+fn coalescing_preserves_close_and_reopen_order_for_reused_handles() {
+    let id = WindowId(42);
+    let other = WindowId(17);
+    let create = (id, 0x8000);
+    let destroy = (id, 0x8001);
+    let hide = (id, 0x8003);
+    let show = (id, 0x8002);
+    let location = (other, 0x800b);
+    let mut pending = vec![show, location, hide, destroy, create, location, show];
+    assert_eq!(
+        coalesced_window_events(&mut pending).collect::<Vec<_>>(),
+        [hide, destroy, create, location, show]
+    );
+    assert!(pending.is_empty());
 }
 
 #[cfg(test)]
