@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability privately
+    url: https://github.com/hongymagic/moon/security/advisories/new
+    about: Send vulnerability details to the maintainers through a private advisory.

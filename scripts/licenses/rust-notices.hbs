@@ -1,0 +1,16 @@
+# Rust dependency licenses
+
+Generated from the Windows dependency graph in Cargo.lock with cargo-about. See [third-party notices](third-party-notices.md) for the regeneration command.
+
+{{#each licenses}}
+{{#unless @first}}
+
+{{/unless}}
+## {{name}}
+
+{{#each used_by}}{{#unless @first}}, {{/unless}}`{{crate.name}} {{crate.version}}`{{/each}}
+
+```text
+{{{text}}}
+```
+{{/each}}

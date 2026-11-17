@@ -1,0 +1,28 @@
+name: Bug report
+description: Report an unexpected window, bar, Settings or installer behavior.
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Moon release or commit
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      description: Run winver to see the edition and build.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: What happened?
+      description: Include steps to reproduce, what you expected, and what you observed.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: For display issues, include monitor count and scaling. Redact private window titles and paths from screenshots or configuration.
