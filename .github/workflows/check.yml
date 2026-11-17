@@ -28,6 +28,8 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: apps/settings/package.json
+      - name: Test release version allocation
+        run: bun test ./scripts/release-version.test.ts
       - run: bun install --frozen-lockfile
         working-directory: apps/settings
       - run: bun run check && bun run build
