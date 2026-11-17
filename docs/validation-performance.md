@@ -264,6 +264,17 @@ for the process working-set acceptance metric. See Microsoft's
 and [working-set block](https://learn.microsoft.com/en-us/windows/win32/api/psapi/ns-psapi-psapi_working_set_ex_block)
 documentation.
 
+The measurement probe now also records `working_set_bytes` and
+`peak_working_set_bytes` from `GetProcessMemoryInfo` using
+`PROCESS_MEMORY_COUNTERS_EX`, sampled once after each region walk on the same
+process handle. These are Windows' current and peak working-set byte counters,
+separate from the sum of classified resident pages. The peak is not reset at an
+interval boundary; it can include earlier activity in that process and does not
+establish a bound for future activity or other workloads. This reporting-only
+addition supplies no new native measurement and changes no historical result.
+See Microsoft's [counter structure](https://learn.microsoft.com/en-us/windows/win32/api/psapi/ns-psapi-process_memory_counters_ex)
+and [query contract](https://learn.microsoft.com/en-us/windows/win32/api/psapi/nf-psapi-getprocessmemoryinfo).
+
 The diagnostic baseline is
 `FE9DF83994064DF0DBF918C7E2368D4DAF0ACD9DB9AA306897542134E521A387`.
 The resource-reuse candidate is

@@ -44,7 +44,7 @@ $original="# Owned native settings validation`r`nconfig-version = 1`r`n[bar]`r`n
 $process=$null;$daemon=$null;$failure=$null;$cleanupErrors=[Collections.Generic.List[string]]::new()
 $journal=Join-Path $env:LOCALAPPDATA ('moon\journal-v1-session'+[Diagnostics.Process]::GetCurrentProcess().SessionId+'.json')
 $filter='moon-settings-validation-'+[guid]::NewGuid().ToString('N')
-$otherConfig=$null;$liveEvidence=$null
+$otherConfig=$null;$liveEvidence=$null;$liveHelpEvidence=$null;$undoEvidence=$null
 $checks=[Collections.Generic.List[string]]::new()
 function Wait-MoonCondition([scriptblock]$Condition,[string]$Description) {
  $until=[DateTime]::UtcNow.AddSeconds(15)
@@ -178,6 +178,15 @@ try {
  }
  Start-OwnedSettings $config
  $checks.Add('Native WebView loads all settings from the selected owned file')
+ $initialInner=Get-MoonField 'Inner gap'
+ if($initialInner -eq '24'){throw 'The Undo fixture must start with a different inner gap.'}
+ Set-MoonField 'Inner gap' '24'
+ Wait-MoonCondition {(Get-MoonField 'Inner gap') -eq '24' -and (Find-MoonControl 'Save changes').Current.IsEnabled -and (Find-MoonControl 'Undo last change').Current.IsEnabled} 'A real draft edit enables Save and Undo'
+ Invoke-MoonButton 'Undo last change'
+ Wait-MoonCondition {(Get-MoonField 'Inner gap') -eq $initialInner -and !(Find-MoonControl 'Save changes').Current.IsEnabled -and !(Find-MoonControl 'Undo last change').Current.IsEnabled} 'Undo restores the previous draft and consumes its checkpoint'
+ if((Read-SettingsSource $config) -cne $original){throw 'Draft Undo unexpectedly changed the owned file.'}
+ $undoEvidence=[pscustomobject]@{initial_inner=$initialInner;edited_inner='24';restored_inner=(Get-MoonField 'Inner gap');saved_source_unchanged=$true}
+ $checks.Add('One-step Undo restores the draft without writing the owned file')
  Set-MoonField 'Inner gap' '24'
  Wait-MoonCondition {(Find-MoonControl 'Save changes').Current.IsEnabled} 'Save enabled after editing'
  Invoke-MoonButton 'Save changes'
@@ -187,13 +196,32 @@ try {
  Wait-MoonCondition {(Find-MoonControl 'All changes saved') -and (Find-MoonControl 'Reload').Current.IsEnabled -and (Find-MoonValue 'Outer gap')} 'Saved state and editable content after the native reply'
  $checks.Add('Real native bridge saves validated TOML and preserves comments')
  if($MoonBinary){
-  Wait-MoonCondition {Find-MoonControl 'Saved. Moon will apply the changes automatically.'} 'Live save acknowledges persistence'
-  Wait-MoonCondition { (Invoke-MoonRpc -Method query -Query config -DevelopmentPath $MoonBinary).gaps.inner -eq 24 } 'The owned daemon applies the saved configuration'
+  Wait-MoonCondition { (Invoke-MoonRpc -Method query -Query config -DevelopmentPath $MoonBinary).gaps.inner -eq 24 } 'The owned daemon loads the saved configuration'
   $state=Assert-OwnedDaemon
   $actual=Invoke-MoonRpc -Method query -Query config -DevelopmentPath $MoonBinary
-  if($actual.gaps.inner -ne 24 -or $actual.bar.enabled -or $actual.borders.enabled){throw 'Settings reported success without applying the exact isolated configuration.'}
+  if($actual.gaps.inner -ne 24 -or $actual.bar.enabled -or $actual.borders.enabled){throw 'The daemon did not load the exact isolated configuration.'}
   $liveEvidence=[pscustomobject]@{process_id=$state.process_id;config_path=$state.config_path;managed_windows=$state.managed_windows;inner_gap=$actual.gaps.inner;revision=$state.revision}
-  $checks.Add('The UI confirms persistence and the owned daemon applies the saved configuration')
+  Wait-MoonCondition {Find-MoonControl 'Saved and loaded by Moon.'} 'Persistent UI status confirms loaded configuration without claiming completed window effects'
+  $checks.Add('The UI reports loaded settings and an independent authenticated query confirms the exact owned configuration')
+  Invoke-MoonButton 'Shortcuts'
+  Wait-MoonCondition {Find-MoonValue 'Find a shortcut'} 'Searchable in-app shortcut help'
+  $null=Assert-OwnedDaemon
+  $help=Invoke-MoonRpc -Method query -Query shortcuts -DevelopmentPath $MoonBinary
+  if($help.hook_enabled -ne $false -or $help.mode -ne 'default' -or $help.paused -ne $false -or $help.emergency -ne 'ctrl+alt+shift+f12'){
+   throw 'The isolated daemon did not expose the expected inactive-hook help state.'
+  }
+  if(!@($help.bindings|Where-Object {$_.commands -contains 'focus left'}).Count){throw 'The help fixture lacks an independently queried focus-left binding.'}
+  $inactiveNotice='Mode: default '+[char]0x00B7+' Configured shortcuts are disabled for this Moon session. The recovery shortcut above remains available.'
+  Wait-MoonCondition {(Find-MoonControl 'Configured shortcuts') -and (Find-MoonControl 'Configured shortcuts (inactive)') -and (Find-MoonControl $inactiveNotice) -and (Find-MoonControl 'Ctrl + Alt + Shift + F12')} 'Configured hooks are labelled inactive and emergency recovery remains discoverable'
+  Set-MoonField 'Find a shortcut' 'focus left'
+  Wait-MoonCondition {Find-MoonControl 'Focus the left window'} 'Shortcut search shows an independently queried action with a readable label'
+  Set-MoonField 'Find a shortcut' $filter
+  Wait-MoonCondition {(Find-MoonControl 'No current shortcuts match. Try a key, action, or workspace name.') -and !(Find-MoonControl 'Focus the left window')} 'A unique unmatched search reports an empty result'
+  if((Read-SettingsSource $config) -cne $saved){throw 'Read-only shortcut help changed the owned configuration.'}
+  $liveHelpEvidence=[pscustomobject]@{mode=$help.mode;hook_enabled=$help.hook_enabled;paused=$help.paused;binding_count=@($help.bindings).Count;emergency=$help.emergency;saved_source_unchanged=$true}
+  $checks.Add('In-app help labels disabled hooks truthfully, searches current queried bindings, and exposes emergency recovery without editing settings')
+  Invoke-MoonButton 'General'
+  Wait-MoonCondition {Find-MoonValue 'Outer gap'} 'General settings remain editable after read-only help'
  }
  Set-MoonField 'Outer gap' '48'
  [IO.File]::AppendAllText($config,"# concurrent editor`r`n",[Text.UTF8Encoding]::new($false))
@@ -250,7 +278,7 @@ try {
 }
 $report=[pscustomobject]@{
  passed=($null -eq $failure);binary=$Binary;sha256=(Get-FileHash -LiteralPath $Binary -Algorithm SHA256).Hash
- config=$config;checks=$checks.ToArray();user_configuration_changed=$false
+ config=$config;checks=$checks.ToArray();user_configuration_changed=$false;draft_undo=$undoEvidence;live_help=$liveHelpEvidence
  moon=if($MoonBinary){[pscustomobject]@{binary=$MoonBinary;sha256=(Get-FileHash -LiteralPath $MoonBinary -Algorithm SHA256).Hash;filter=$filter;live_save=$liveEvidence}}else{$null}
  different_config=$otherConfig;cleanup_errors=$cleanupErrors.ToArray();error=if($failure){$failure.Exception.Message}else{$null}
 }

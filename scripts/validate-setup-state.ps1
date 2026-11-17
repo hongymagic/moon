@@ -33,6 +33,26 @@ try {
     }
     if(!$nativeFailure){throw 'The production shell launcher discarded a real native launch error.'}
     $checks.Add('Production shell launcher waits for an ordinary child and retains its exact exit status and native launch failures without UAC')
+    $timeoutScript=Join-Path $temporary 'bounded ordinary shell child.ps1'
+    $timeoutIdentity=Join-Path $temporary 'bounded-child.json'
+    [IO.File]::WriteAllText($timeoutScript,@'
+param([string]$IdentityPath)
+$self=[Diagnostics.Process]::GetCurrentProcess()
+[IO.File]::WriteAllText($IdentityPath,(@{pid=$PID;birth=$self.StartTime.ToFileTimeUtc()}|ConvertTo-Json))
+Start-Sleep -Seconds 15
+'@,[Text.UTF8Encoding]::new($false))
+    $timedOut=$false;$clock.Restart();$ownedChild=$null
+    try {
+        try {Invoke-MoonShellProcess $powershell @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$timeoutScript,'-IdentityPath',$timeoutIdentity) -TimeoutSeconds 3|Out-Null}
+        catch {if($_.Exception.Message -notlike 'Process timed out:*'){throw};$timedOut=$true}
+        if(!$timedOut -or $clock.ElapsedMilliseconds -lt 3000 -or $clock.ElapsedMilliseconds -ge 12000 -or !(Test-Path -LiteralPath $timeoutIdentity)){throw 'The finite shell wait did not exercise its owned running child.'}
+        $ownedIdentity=[IO.File]::ReadAllText($timeoutIdentity)|ConvertFrom-Json
+        try {$ownedChild=[Diagnostics.Process]::GetProcessById([int]$ownedIdentity.pid)} catch [ArgumentException] {}
+        if($ownedChild -and $ownedChild.StartTime.ToFileTimeUtc() -eq $ownedIdentity.birth -and !$ownedChild.HasExited){throw 'The timed-out owned child remained alive when the launcher returned.'}
+        $checks.Add('Production finite shell wait terminates its exact ordinary child and observes exit before returning timeout; approval waits retain the unlimited default')
+    } finally {
+        if($ownedChild){try {if($ownedChild.StartTime.ToFileTimeUtc() -eq $ownedIdentity.birth -and !$ownedChild.HasExited){$ownedChild.Kill();[void]$ownedChild.WaitForExit(5000)}} finally {$ownedChild.Dispose()}}
+    }
     foreach($file in @('install.ps1','uninstall.ps1')) {
         $tokens=$null;$errors=$null
         $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot $file),[ref]$tokens,[ref]$errors)
@@ -229,7 +249,7 @@ function Start-Process {
         $timer=[pscustomobject]@{started=$false};$timer|Add-Member ScriptMethod Start {$this.started=$true};$timer|Add-Member ScriptMethod Stop {$this.started=$false}
         $oldLog=Join-Path $temporary 'earlier-attempt.log';[IO.File]::WriteAllText($oldLog,'earlier diagnostics')
         $context=@{busy=$false;done=$false;process=$null;files=$null;operation='old';detail=$oldLog;status='failed';outcome=[pscustomobject]@{detail='old failure'}}
-        $Mode='Install';$installed=$false;$Binary='owned-moon.exe';$SettingsBinary='owned-settings.exe';$KeepPreviousDesktopStopped=$true
+        $Mode='Install';$installed=$false;$Binary='owned-moon.exe';$SettingsBinary='owned-settings.exe';$PortableBinary='C:\Owned portable\moon.exe';$KeepPreviousDesktopStopped=$true
         $ui.Secondary.IsEnabled=$false
         function Test-MoonAdministrator {$false}
         function Test-MoonSetupPayload {param($PackageDirectory,$Daemon,$Settings,$Installed)}
@@ -237,9 +257,9 @@ function Start-Process {
         function Show-MoonSetupProblem {param($Message,$Failure) $script:setupReportedProblem=$Message;$ui.Status.Text=$Message}
         function Start-Process {param($FilePath,$ArgumentList,$WindowStyle,$RedirectStandardOutput,$RedirectStandardError,[switch]$PassThru) $script:setupWorkerArguments=$ArgumentList;$child=[pscustomobject]@{HasExited=$false;ExitCode=0};$child|Add-Member ScriptMethod Dispose {};return $child}
         . $primaryHandler
-        if(!$context.busy -or $context.outcome -or $context.status -ne 'working' -or !$ui.Secondary.IsEnabled -or $ui.Details.Visibility -ne 'Collapsed' -or $script:setupWorkerArguments -notlike '*-KeepPreviousDesktopStopped*'){throw 'Actual retry did not reset stale UI state or forward no-fallback.'}
+        if(!$context.busy -or $context.outcome -or $context.status -ne 'working' -or !$ui.Secondary.IsEnabled -or $ui.Details.Visibility -ne 'Collapsed' -or $script:setupWorkerArguments -notlike '*-KeepPreviousDesktopStopped*' -or $script:setupWorkerArguments -notlike ('*-PortableBinary '+(ConvertTo-MoonArgument $PortableBinary)+'*')){throw 'Actual retry did not reset stale UI state or forward no-fallback.'}
         if([IO.File]::ReadAllText($oldLog) -ne 'earlier diagnostics'){throw 'Retry deleted earlier diagnostics.'}
-        $checks.Add('Actual guided retry resets stale controls/outcome, retains diagnostic history and forwards no-fallback')
+        $checks.Add('Actual guided retry resets stale controls/outcome, retains diagnostic history and forwards no-fallback plus the selected portable copy')
         function Read-MoonSetupStatus {param($OperationId) $script:setupFixtureStatus}
         $script:setupFixtureStatus=[pscustomobject]@{operation=$context.operation;status='cancelled';message='Moon setup was rolled back. Your previous desktop remains stopped.'}
         $context.process.HasExited=$true;$context.process.ExitCode=1223
@@ -255,6 +275,18 @@ function Start-Process {
         $context.done=$true;$Mode='Install'
         $window=[pscustomobject]@{closed=$false};$window|Add-Member ScriptMethod Close {$this.closed=$true}
         function Get-MoonWebViewRuntime {'fixture-runtime'}
+        function Get-MoonInstallDirectory {Join-Path $temporary 'owned-installed-fixture'}
+        function Read-MoonInstallState {param($Directory) $script:setupInstalledFixture}
+        foreach($configuration in @($null,(Join-Path $temporary 'custom settings.yaml'))) {
+            $script:setupInstalledFixture=[pscustomobject]@{config_path=$configuration}
+            $script:settingsArguments=$null;$script:settingsTarget=$null
+            function Start-Process {param($FilePath,$ArgumentList) $script:settingsTarget=$FilePath;$script:settingsArguments=$ArgumentList}
+            . $primaryHandler
+            $expected=Get-MoonLaunchArguments $script:setupInstalledFixture -Settings
+            if(!$window.closed -or $script:settingsTarget -ne (Join-Path (Get-MoonInstallDirectory) 'moon-settings.exe') -or [string]$script:settingsArguments -cne [string]$expected){throw 'Open Settings did not preserve the installation configuration path.'}
+            $window.closed=$false
+        }
+        $checks.Add('Actual Open Settings carries the recorded config path and preserves legacy argument-free launch')
         function Start-Process {param($FilePath,$ArgumentList) throw [ComponentModel.Win32Exception]::new(2)}
         $script:setupReportedProblem=$null
         . $primaryHandler

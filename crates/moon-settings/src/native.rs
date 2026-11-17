@@ -1,4 +1,4 @@
-use crate::store::Store;
+use crate::{startup::Startup, store::Store};
 use moon_core::{
     settings::{Edit, ErrorCode, SettingsError, Snapshot},
     world::World,
@@ -47,7 +47,7 @@ struct Call {
 #[derive(Debug)]
 enum UserEvent {
     Call(Call),
-    Reply(Value),
+    Reply { method: String, body: Value },
     MaterialChanged,
 }
 
@@ -161,7 +161,107 @@ fn handle(call: &Call, path: &std::path::Path) -> Result<Value, Value> {
     let store = Store::new(path.to_owned());
     match call.method.as_str() {
         "load" => Ok(data(store.load().map_err(|e| json!(e))?, path, runtime())),
+        "library-list" | "library-save" | "library-rename" | "library-delete"
+        | "library-import" | "library-export" | "library-apply" => {
+            crate::library_bridge::handle(&call.method, &call.params, path)
+        }
         "status" => Ok(runtime()),
+        "startup-status" => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Empty {}
+            let _: Empty = serde_json::from_value(call.params.clone()).map_err(failure)?;
+            crate::launch_on_startup::status().map_err(failure)
+        }
+        "startup-set" => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Startup {
+                enabled: bool,
+            }
+            let startup: Startup = serde_json::from_value(call.params.clone()).map_err(failure)?;
+            crate::launch_on_startup::set(startup.enabled).map_err(failure)
+        }
+        "location-search" => {
+            let search: crate::location::Search =
+                serde_json::from_value(call.params.clone()).map_err(failure)?;
+            crate::location::search(&search.query).map_err(failure)
+        }
+        "location-open-settings" => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Empty {}
+            let _: Empty = serde_json::from_value(call.params.clone()).map_err(failure)?;
+            moon_win::runtime::shell_execute("ms-settings:privacy-location", "")
+                .map_err(failure)?;
+            Ok(Value::Null)
+        }
+        "location-attribution" => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Attribution {
+                provider: String,
+            }
+            let attribution: Attribution =
+                serde_json::from_value(call.params.clone()).map_err(failure)?;
+            let url = match attribution.provider.as_str() {
+                "open-meteo" => "https://open-meteo.com/en/licence",
+                "geonames" => "https://www.geonames.org/",
+                _ => return Err(failure("Unknown location data provider.")),
+            };
+            moon_win::runtime::shell_execute(url, "").map_err(failure)?;
+            Ok(Value::Null)
+        }
+        "shortcuts" | "overview" => {
+            ipc_request("query", json!({"query":call.method})).map_err(failure)
+        }
+        "desktop" => {
+            let mut desktop = ipc_request("query", json!({"query":"desktop"})).map_err(failure)?;
+            crate::previews::add_icons(&mut desktop);
+            Ok(desktop)
+        }
+        "window-action" | "layout-undo" | "desktop-action" => {
+            let request = crate::actions::request(&call.method, &call.params).map_err(failure)?;
+            let reply = moon_win::ipc::request(&request).map_err(failure)?;
+            if reply["ok"] != true {
+                return Err(failure(
+                    reply["error"].as_str().unwrap_or("Moon could not complete this action."),
+                ));
+            }
+            Ok(reply["result"].clone())
+        }
+        "application-status" => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Check {
+                expected_source: Option<String>,
+            }
+            let check: Check = serde_json::from_value(call.params.clone()).map_err(failure)?;
+            let snapshot = store.load().map_err(|e| json!(e))?;
+            if snapshot.source != check.expected_source {
+                return Ok(
+                    json!({"state":"changed","message":"The saved file changed in another editor. Reload to review it; your draft has not been overwritten."}),
+                );
+            }
+            let state = runtime();
+            if state["running"] != true {
+                return Ok(
+                    json!({"state":"unavailable","message":"Saved on this PC. Moon is not reachable; these settings will be read when it starts."}),
+                );
+            }
+            if !state["stats"]["config_path"].as_str().is_some_and(|p| same_path(p, path)) {
+                return Ok(
+                    json!({"state":"other-config","message":"Saved on this PC. The running Moon is using a different configuration file."}),
+                );
+            }
+            let expected = serde_json::to_value(&snapshot.config).map_err(failure)?;
+            serde_json::to_value(crate::application::describe(
+                &expected,
+                ipc_request("query", json!({"query":"config"})),
+                &state["stats"],
+            ))
+            .map_err(failure)
+        }
         "save" => {
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
@@ -201,7 +301,7 @@ fn handle(call: &Call, path: &std::path::Path) -> Result<Value, Value> {
                 })
                 .map_err(|error| json!(error))?;
             let message = if same_configuration {
-                "Saved. Moon will apply the changes automatically."
+                "Saved. Moon will read the changes automatically."
             } else if state["running"] == true {
                 "Saved. The running Moon instance is using a different configuration."
             } else {
@@ -245,22 +345,13 @@ fn local_data() -> Result<PathBuf, Value> {
         .map(|p| PathBuf::from(p).join("moon/settings"))
         .ok_or_else(|| failure("Windows did not provide a local application data folder."))
 }
-fn config_path() -> Result<PathBuf, String> {
-    let mut args = std::env::args().skip(1);
-    let path = match args.next().as_deref() {
+fn config_path(config: Option<PathBuf>) -> Result<PathBuf, String> {
+    let path = match config {
         None => std::env::var_os("USERPROFILE")
             .map(|p| PathBuf::from(p).join(".config/moon/config.toml"))
             .ok_or("Windows did not provide a user profile folder.")?,
-        Some("--config") => PathBuf::from(args.next().ok_or("--config needs a file path.")?),
-        Some(_) => {
-            return Err(
-                "Use Moon Settings with no arguments, or --config followed by a file path.".into(),
-            );
-        }
+        Some(path) => path,
     };
-    if args.next().is_some() {
-        return Err("Unexpected settings argument.".into());
-    }
     if path.is_absolute() {
         Ok(path)
     } else {
@@ -313,7 +404,9 @@ pub fn run() -> Result<(), String> {
     }
     // Appearance reads use UISettings before WebView2 initializes its thread.
     let _apartment = moon_win::platform::Apartment::new().map_err(|e| e.to_string())?;
-    let path = config_path()?;
+    let startup = Startup::parse(std::env::args_os().skip(1))?;
+    let page = serde_json::to_string(startup.page.name()).map_err(|e| e.to_string())?;
+    let path = config_path(startup.config)?;
     let loop_ = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let window = WindowBuilder::new()
         .with_title("Moon Settings")
@@ -347,7 +440,10 @@ pub fn run() -> Result<(), String> {
                     Ok(value) => json!({"id":call.id,"ok":true,"result":value}),
                     Err(error) => json!({"id":call.id,"ok":false,"error":error}),
                 };
-                if reply_proxy.send_event(UserEvent::Reply(reply)).is_err() {
+                if reply_proxy
+                    .send_event(UserEvent::Reply { method: call.method, body: reply })
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -360,7 +456,7 @@ pub fn run() -> Result<(), String> {
         .with_background_color((0,0,0,0))
         .with_devtools(false)
         .with_browser_accelerator_keys(false)
-        .with_initialization_script(format!("document.addEventListener('DOMContentLoaded',()=>document.documentElement.classList.toggle('mica',{mica}));"))
+        .with_initialization_script(format!("window.moonStartPage={page};document.addEventListener('DOMContentLoaded',()=>document.documentElement.classList.toggle('mica',{mica}));"))
         .with_navigation_handler(|url| trusted_url(&url))
         .with_new_window_req_handler(|_,_| wry::NewWindowResponse::Deny)
         .with_download_started_handler(|_,_| false)
@@ -370,6 +466,7 @@ pub fn run() -> Result<(), String> {
                 "/" => ("text/html; charset=utf-8",include_bytes!("../../../apps/settings/dist/index.html")),
                 "/styles.css" => ("text/css; charset=utf-8",include_bytes!("../../../apps/settings/dist/styles.css")),
                 "/app.js" => ("text/javascript; charset=utf-8",include_bytes!("../../../apps/settings/dist/app.js")),
+                "/moon-symbols.ttf" => ("font/ttf",include_bytes!("../../moon-win/assets/SymbolsNerdFont-Regular.ttf")),
                 "/moon.svg" => ("image/svg+xml",include_bytes!("../../moon-win/assets/icons/moon.svg")),
                 _ => return Response::builder().status(404).body(Vec::new().into()).unwrap(),
             };
@@ -384,7 +481,10 @@ pub fn run() -> Result<(), String> {
         .with_url("moon://localhost/")
         .build(&window).map_err(|e|format!("Moon Settings could not open its interface. Check that Microsoft Edge WebView2 Runtime is installed.\n\n{e}\n\nRuntime help: https://developer.microsoft.com/microsoft-edge/webview2/"))?;
     let mut initialized = false;
+    let mut previews = crate::previews::Previews::default();
     let mut shown = false;
+    let mut location_pending = false;
+    let loop_proxy = loop_.create_proxy();
     let startup_deadline = Instant::now() + Duration::from_secs(30);
     loop_.run(move |event, _, flow| {
         // A failed script or WebView process must not leave an invisible host.
@@ -397,11 +497,17 @@ pub fn run() -> Result<(), String> {
         *flow = if shown { ControlFlow::Wait } else { ControlFlow::WaitUntil(startup_deadline) };
         match event {
             Event::UserEvent(UserEvent::MaterialChanged) => {
+                previews.clear();
                 material_observer.pending.set(false);
                 let mica = apply_material(&window);
-                let _ = webview.evaluate_script(&format!("document.documentElement.classList.toggle('mica',{mica})"));
+                let _ = webview.evaluate_script(&format!("document.documentElement.classList.toggle('mica',{mica});window.moonPreviewChanged?.()"));
             }
-            Event::WindowEvent { event: WindowEvent::ThemeChanged(_) | WindowEvent::Focused(true), .. } => {
+            Event::WindowEvent { event: WindowEvent::Focused(true), .. } => {
+                let mica = apply_material(&window);
+                let _ = webview.evaluate_script(&format!("document.documentElement.classList.toggle('mica',{mica});window.moonActivated?.()"));
+            }
+            Event::WindowEvent { event: WindowEvent::Focused(false), .. } => { previews.clear(); }
+            Event::WindowEvent { event: WindowEvent::ThemeChanged(_), .. } => {
                 let mica = apply_material(&window);
                 let _ = webview.evaluate_script(&format!("document.documentElement.classList.toggle('mica',{mica})"));
             }
@@ -420,13 +526,101 @@ pub fn run() -> Result<(), String> {
                     }
                 }
                 else if call.method == "close" { *flow = ControlFlow::Exit; }
+                else if call.method == "library-import-file" || call.method == "library-export-file" {
+                    previews.clear();
+                    let hwnd = HWND(window.hwnd() as *mut _);
+                    let result = if call.method == "library-import-file" {
+                        #[derive(Deserialize)]
+                        #[serde(deny_unknown_fields)]
+                        struct Import {}
+                        serde_json::from_value::<Import>(call.params).map_err(|e| e.to_string()).and_then(|_| {
+                            crate::library_files::import_file(hwnd)
+                                .map(|document| document.map_or(Value::Null, |document| json!({"document":document})))
+                        })
+                    } else {
+                        #[derive(Deserialize)]
+                        #[serde(deny_unknown_fields)]
+                        struct Export { suggested_name: String, document: String }
+                        serde_json::from_value::<Export>(call.params).map_err(|e| e.to_string()).and_then(|export| {
+                            crate::library_files::export_file(hwnd, &export.suggested_name, &export.document)
+                                .map(|saved| json!({"saved":saved}))
+                        })
+                    };
+                    let reply = match result {
+                        Ok(result) => json!({"id":call.id,"ok":true,"result":result}),
+                        Err(error) => json!({"id":call.id,"ok":false,"error":failure(error)}),
+                    };
+                    let _ = webview.evaluate_script(&format!("window.moonReceive({reply});window.moonPreviewChanged?.()"));
+                }
+                else if call.method == "location-current" {
+                    #[derive(Deserialize)]
+                    #[serde(deny_unknown_fields)]
+                    struct Empty {}
+                    let valid = serde_json::from_value::<Empty>(call.params).map_err(|e| e.to_string());
+                    let active = unsafe { GetForegroundWindow() } == HWND(window.hwnd() as *mut _);
+                    let id = call.id;
+                    let result = valid.and_then(|_| {
+                        if location_pending { return Err("A location request is already in progress.".into()); }
+                        if !active { return Err("Bring Moon Settings to the front before requesting location.".into()); }
+                        let reply_proxy = loop_proxy.clone();
+                        crate::location::current(move |result| {
+                            let body = match result {
+                                Ok(value) => json!({"id":id,"ok":true,"result":value}),
+                                Err(error) => json!({"id":id,"ok":false,"error":failure(error)}),
+                            };
+                            let _ = reply_proxy.send_event(UserEvent::Reply { method: "location-current".into(), body });
+                        })
+                    });
+                    match result {
+                        Ok(()) => location_pending = true,
+                        Err(error) => {
+                            let reply = json!({"id":id,"ok":false,"error":failure(error)});
+                            let _ = webview.evaluate_script(&format!("window.moonReceive({reply})"));
+                        }
+                    }
+                }
+                else if call.method == "previews" {
+                    let result = serde_json::from_value::<crate::preview_layout::Request>(call.params)
+                        .map_err(|e| e.to_string())
+                        .and_then(|request| {
+                            let size = window.inner_size();
+                            let hwnd = HWND(window.hwnd() as *mut _);
+                            let active = unsafe { GetForegroundWindow() } == hwnd
+                                && moon_win::platform::input_desktop_available().unwrap_or(false);
+                            previews.update(request, hwnd, window.scale_factor(), (size.width, size.height), active)
+                        });
+                    let reply = match result {
+                        Ok(result) => json!({"id":call.id,"ok":true,"result":result}),
+                        Err(error) => { previews.clear(); json!({"id":call.id,"ok":false,"error":failure(error)}) },
+                    };
+                    let _ = webview.evaluate_script(&format!("window.moonReceive({reply})"));
+                }
+                else if call.method == "clipboard-copy" {
+                    #[derive(Deserialize)]
+                    #[serde(deny_unknown_fields)]
+                    struct Copy { text: String }
+                    let result = serde_json::from_value::<Copy>(call.params).map_err(|e| e.to_string())
+                        .and_then(|copy| crate::clipboard::copy(HWND(window.hwnd() as *mut _), &copy.text));
+                    let reply = match result {
+                        Ok(()) => json!({"id":call.id,"ok":true,"result":null}),
+                        Err(error) => json!({"id":call.id,"ok":false,"error":failure(error)}),
+                    };
+                    let _ = webview.evaluate_script(&format!("window.moonReceive({reply})"));
+                }
                 else if let Err(error) = sender.try_send(call) {
                     let (mpsc::TrySendError::Full(call) | mpsc::TrySendError::Disconnected(call)) = error;
                     let reply = json!({"id":call.id,"ok":false,"error":{"message":"Moon is busy. Wait a moment and try again."}});
                     let _ = webview.evaluate_script(&format!("window.moonReceive({reply})"));
                 }
             }
-            Event::UserEvent(UserEvent::Reply(reply)) => { let _ = webview.evaluate_script(&format!("window.moonReceive({reply})")); }
+            Event::UserEvent(UserEvent::Reply { method, body }) => {
+                if method == "location-current" { location_pending = false; }
+                if method == "desktop" {
+                    if body["ok"] == true { previews.accept_catalog(&body["result"]); }
+                    else { previews.clear(); }
+                }
+                let _ = webview.evaluate_script(&format!("window.moonReceive({body})"));
+            }
             _ => {}
         }
     });

@@ -46,9 +46,18 @@ matches = [{ process = { equals = "notepad" } }]
 
 Bindings merge by chord, rules append, and other lists replace. Invalid reloads retain the last valid configuration and show an error on the bar. An `exec` widget explicitly opts into running its command through the ordinary desktop shell, with bounded output and execution time. A weather section explicitly opts into Open-Meteo HTTPS requests; no location means no weather requests.
 
-`moon config default`, `show`, `validate`, `schema`, `reference`, `path` and `migrate` inspect the live schema and configuration. Migration preserves comments and creates a backup before writing. The binding cheat sheet comes from the current bindings (`moon cheatsheet`).
+`moon config default`, `show`, `validate`, `schema`, `reference`, `path` and `migrate` inspect the live schema and configuration. Migration preserves comments and creates a backup before writing. `moon cheatsheet` opens searchable current shortcut help in Settings; a standalone executable retains text help.
 
-Open **Moon** from Start, choose **Settings** in the tray menu, or run `moon settings`. The settings pages cover window behavior, themes, border colors and gradients, workspaces, shortcuts, app rules, and advanced configuration. Changes remain a draft until saved; invalid changes and conflicting external edits leave the existing file intact. **Reload** reads the latest saved file after confirmation. Settings respects Windows contrast and reduced-motion preferences.
+Open **Moon** from Start, choose **Settings** in the tray menu, or run `moon settings`. The settings pages cover window behavior, themes, border colors and gradients, workspaces, shortcuts, app rules, and advanced configuration. General shows where your windows are assigned. Changes remain a draft until saved; **Undo** restores the last draft change, and invalid changes or conflicting external edits leave the existing file intact. **Reload** reads the latest saved file after confirmation. Save feedback distinguishes stored settings from settings loaded by Moon. Settings respects Windows contrast and reduced-motion preferences.
+
+**Ctrl+Alt+Space** opens Overview to find a window across workspaces, see its app
+icon and an available live preview, move it by dragging its handle or choosing
+**Move**, and create an app rule from its current details. Focusing a window on
+another workspace uses the workspace carousel. **Ctrl+Alt+Z** undoes the last
+eligible layout change; this is separate from undoing a Settings draft.
+Appearance includes a theme gallery, while Workspaces includes named saved
+setups. Both stage changes before saving and support sharing through Windows
+file dialogs. See [themes and saved setups](docs/desktop-library.md).
 
 The settings frontend uses pinned Bun 1.4.4 and TypeScript 7.0.2. `just settings` checks and rebuilds its bundled assets; `just settings-test` runs its browser interaction tests. Generated assets are checked in so a native Windows build does not require a web toolchain. See [settings persistence](docs/settings-editing.md) for exact merge and save behavior.
 

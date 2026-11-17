@@ -3,7 +3,8 @@
 use crate::platform;
 use moon_core::{
     geometry::{Point, Rect},
-    ids::WindowId,
+    ids::{WindowId, WorkspaceId},
+    motion::WorkspaceMotion,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -29,18 +30,20 @@ use windows::{
 const WAKE: u32 = WM_APP + 59;
 const DURATION: Duration = Duration::from_millis(200);
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WindowRef {
     pub id: WindowId,
     pub process_id: u32,
 }
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PageWindow {
     pub window: WindowRef,
     pub rect: Rect,
 }
 #[derive(Clone, Debug)]
 pub struct Transition {
+    pub from_workspace: WorkspaceId,
+    pub to_workspace: WorkspaceId,
     /// Back-to-front order within each workspace; an empty workspace is valid.
     pub from: Vec<PageWindow>,
     pub to: Vec<PageWindow>,
@@ -280,6 +283,9 @@ impl Thumbnail {
         if !valid(source) {
             return Err(windows::core::Error::from_hresult(E_INVALIDARG));
         }
+        Self::register(destination, source)
+    }
+    fn register(destination: HWND, source: WindowRef) -> Result<Self> {
         Ok(Self {
             handle: unsafe { DwmRegisterThumbnail(destination, platform::hwnd(source.id))? },
             source,
@@ -339,6 +345,113 @@ impl Thumbnail {
         unsafe { DwmUpdateThumbnailProperties(self.handle, &properties) }
     }
 }
+
+/// A stationary live desktop beneath the moving application thumbnails. The
+/// shell desktop is a documented DWM source; no screen bitmap or shell mutation
+/// is needed. Register it first so later application thumbnails cover it.
+struct DesktopBackground {
+    thumbnail: Thumbnail,
+    bounds: Rect,
+    #[cfg(test)]
+    fixture: Option<OwnedWindow>,
+}
+impl DesktopBackground {
+    fn new(destination: HWND, viewport: Rect) -> Result<Self> {
+        let window = unsafe { GetShellWindow() };
+        if window.is_invalid() || !unsafe { IsWindowVisible(window) }.as_bool() {
+            return Err(windows::core::Error::from_hresult(E_FAIL));
+        }
+        let source = WindowRef {
+            id: WindowId(window.0 as u64),
+            process_id: platform::process_id(WindowId(window.0 as u64)),
+        };
+        let mut bounds = RECT::default();
+        unsafe { GetWindowRect(window, &mut bounds)? };
+        let background = Self {
+            thumbnail: Thumbnail::register(destination, source)?,
+            bounds: Rect::from_edges(bounds.left, bounds.top, bounds.right, bounds.bottom),
+            #[cfg(test)]
+            fixture: None,
+        };
+        background.draw(viewport)?;
+        Ok(background)
+    }
+    fn valid(&self) -> bool {
+        let source = self.thumbnail.source;
+        #[cfg(test)]
+        if self.fixture.is_some() {
+            return platform::is_window(source.id)
+                && platform::process_id(source.id) == source.process_id;
+        }
+        (unsafe { GetShellWindow() }) == platform::hwnd(source.id)
+            && platform::process_id(source.id) == source.process_id
+            && unsafe { IsWindowVisible(platform::hwnd(source.id)) }.as_bool()
+    }
+    fn draw(&self, viewport: Rect) -> Result<()> {
+        if !self.valid() {
+            return Err(windows::core::Error::from_hresult(E_FAIL));
+        }
+        // The lifecycle unit owns an unshown source and a real DWM relationship.
+        // Pixel presentation is exercised separately by the interactive probe.
+        #[cfg(test)]
+        if self.fixture.is_some() {
+            return Ok(());
+        }
+        let mut current = RECT::default();
+        unsafe { GetWindowRect(platform::hwnd(self.thumbnail.source.id), &mut current)? };
+        if self.bounds != Rect::from_edges(current.left, current.top, current.right, current.bottom)
+        {
+            return Err(windows::core::Error::from_hresult(E_FAIL));
+        }
+        let dimensions = unsafe { DwmQueryThumbnailSourceSize(self.thumbnail.handle)? };
+        let source = desktop_crop(self.bounds, dimensions, viewport)
+            .ok_or_else(|| windows::core::Error::from_hresult(E_FAIL))?;
+        unsafe {
+            DwmUpdateThumbnailProperties(
+                self.thumbnail.handle,
+                &DWM_THUMBNAIL_PROPERTIES {
+                    dwFlags: DWM_TNP_RECTDESTINATION
+                        | DWM_TNP_RECTSOURCE
+                        | DWM_TNP_OPACITY
+                        | DWM_TNP_VISIBLE
+                        | DWM_TNP_SOURCECLIENTAREAONLY,
+                    rcDestination: RECT {
+                        left: 0,
+                        top: 0,
+                        right: viewport.width,
+                        bottom: viewport.height,
+                    },
+                    rcSource: source,
+                    opacity: 255,
+                    fVisible: true.into(),
+                    fSourceClientAreaOnly: false.into(),
+                },
+            )
+        }
+    }
+}
+
+fn desktop_crop(bounds: Rect, dimensions: SIZE, viewport: Rect) -> Option<RECT> {
+    if bounds.is_empty() || viewport.is_empty() || dimensions.cx <= 0 || dimensions.cy <= 0 {
+        return None;
+    }
+    let left = i64::from(viewport.x) - i64::from(bounds.x);
+    let top = i64::from(viewport.y) - i64::from(bounds.y);
+    let right = left + i64::from(viewport.width);
+    let bottom = top + i64::from(viewport.height);
+    if left < 0 || top < 0 || right > i64::from(bounds.width) || bottom > i64::from(bounds.height) {
+        return None;
+    }
+    let scale = |value, pixels, length| (value * i64::from(pixels) / i64::from(length)) as i32;
+    let crop = RECT {
+        left: scale(left, dimensions.cx, bounds.width),
+        top: scale(top, dimensions.cy, bounds.height),
+        right: scale(right, dimensions.cx, bounds.width),
+        bottom: scale(bottom, dimensions.cy, bounds.height),
+    };
+    (crop.right > crop.left && crop.bottom > crop.top).then_some(crop)
+}
+
 fn clip(destination: Rect, source: Rect, viewport: Rect) -> Option<(Rect, Rect)> {
     if destination.width <= 0 || destination.height <= 0 || source.width <= 0 || source.height <= 0
     {
@@ -365,44 +478,115 @@ fn clip(destination: Rect, source: Rect, viewport: Rect) -> Option<(Rect, Rect)>
     Some((shown, cropped))
 }
 
+struct PresentedPage {
+    workspace: WorkspaceId,
+    thumbnails: Vec<Thumbnail>,
+    windows: Vec<PageWindow>,
+}
+impl PresentedPage {
+    fn new(destination: HWND, workspace: WorkspaceId, windows: Vec<PageWindow>) -> Result<Self> {
+        let thumbnails = windows
+            .iter()
+            .map(|page| Thumbnail::new(destination, page.window))
+            .collect::<Result<_>>()?;
+        Ok(Self { workspace, thumbnails, windows })
+    }
+}
+
 struct Overlay {
     // Thumbnail relationships are released before their destination window.
-    from: Vec<Thumbnail>,
-    to: Vec<Thumbnail>,
+    pages: Vec<PresentedPage>,
+    background: DesktopBackground,
     window: OwnedWindow,
     spec: Transition,
+    motion: WorkspaceMotion,
 }
 impl Overlay {
     fn new(input: &Rc<Input>, spec: Transition) -> Result<Self> {
         let window = create_window(input, Some(spec.viewport), spec.background_rgb)?;
-        let from = spec
-            .from
+        // Do not show a solid-colour substitute if the desktop cannot cover this
+        // viewport. prepare() then leaves the native workspace switch immediate.
+        let background = DesktopBackground::new(window.0, spec.viewport)?;
+        let pages = vec![
+            PresentedPage::new(window.0, spec.from_workspace, spec.from.clone())?,
+            PresentedPage::new(window.0, spec.to_workspace, spec.to.clone())?,
+        ];
+        let motion = WorkspaceMotion::new(spec.from_workspace, spec.to_workspace, spec.direction);
+        Ok(Self { pages, background, window, spec, motion })
+    }
+    fn can_retarget(&self, spec: &Transition) -> bool {
+        self.spec.viewport == spec.viewport
+            && self.spec.background_rgb == spec.background_rgb
+            && self.motion.target == spec.from_workspace
+            && self
+                .pages
+                .iter()
+                .find(|page| page.workspace == spec.from_workspace)
+                .is_some_and(|page| page.windows == spec.from)
+            && self
+                .pages
+                .iter()
+                .find(|page| page.workspace == spec.to_workspace)
+                .is_none_or(|page| page.windows == spec.to)
+            && self.valid()
+    }
+    fn retarget(&mut self, spec: Transition, progress: f64) -> Result<()> {
+        let motion = self.motion.retarget(spec.to_workspace, spec.direction, progress);
+        let count: usize = motion
+            .pages
             .iter()
-            .map(|page| Thumbnail::new(window.0, page.window))
-            .collect::<Result<Vec<_>>>()?;
-        let to = spec
-            .to
-            .iter()
-            .map(|page| Thumbnail::new(window.0, page.window))
-            .collect::<Result<Vec<_>>>()?;
-        Ok(Self { from, to, window, spec })
+            .map(|page| {
+                self.pages
+                    .iter()
+                    .find(|old| old.workspace == page.workspace)
+                    .map_or(spec.to.len(), |old| old.windows.len())
+            })
+            .sum();
+        if count > 512 {
+            return Err(windows::core::Error::from_hresult(E_INVALIDARG));
+        }
+        let mut previous = std::mem::take(&mut self.pages);
+        previous.retain(|old| motion.pages.iter().any(|page| page.workspace == old.workspace));
+        for page in &motion.pages {
+            if let Some(index) = previous.iter().position(|old| old.workspace == page.workspace) {
+                let retained = previous.remove(index);
+                if page.workspace == spec.to_workspace && retained.windows != spec.to {
+                    return Err(windows::core::Error::from_hresult(E_INVALIDARG));
+                }
+                self.pages.push(retained);
+            } else {
+                self.pages.push(PresentedPage::new(
+                    self.window.0,
+                    page.workspace,
+                    spec.to.clone(),
+                )?);
+            }
+        }
+        self.spec = spec;
+        self.motion = motion;
+        Ok(())
     }
     fn draw(&self, progress: f64) -> Result<()> {
-        let shift = self.spec.viewport.width * if self.spec.direction >= 0 { 1 } else { -1 };
-        for (thumbnail, page) in self.from.iter().zip(&self.spec.from) {
-            let mut rect = page.rect;
-            rect.x -= (f64::from(shift) * progress).round() as i32;
-            thumbnail.draw(rect, self.spec.viewport)?;
-        }
-        for (thumbnail, page) in self.to.iter().zip(&self.spec.to) {
-            let mut rect = page.rect;
-            rect.x += (f64::from(shift) * (1.0 - progress)).round() as i32;
-            thumbnail.draw(rect, self.spec.viewport)?;
+        self.background.draw(self.spec.viewport)?;
+        for page in &self.pages {
+            let Some(position) =
+                self.motion.pages.iter().find(|position| position.workspace == page.workspace)
+            else {
+                return Err(windows::core::Error::from_hresult(E_UNEXPECTED));
+            };
+            let shift =
+                (f64::from(self.spec.viewport.width) * position.position(progress)).round() as i32;
+            for (thumbnail, window) in page.thumbnails.iter().zip(&page.windows) {
+                let mut rect = window.rect;
+                rect.x = rect.x.saturating_add(shift);
+                thumbnail.draw(rect, self.spec.viewport)?;
+            }
         }
         Ok(())
     }
     fn valid(&self) -> bool {
-        self.spec.from.iter().chain(&self.spec.to).all(|page| valid(page.window))
+        self.background.valid()
+            && self.pages.iter().flat_map(|page| &page.windows).all(|page| valid(page.window))
     }
 }
 
@@ -465,27 +649,64 @@ impl Carousel {
     }
     pub fn prepare(&mut self, specs: &[Transition]) -> Result<bool> {
         self.retire_hook();
-        if self.is_active() {
-            self.cancel();
-            return Ok(false);
-        }
         if self.input.swallowed.get() != 0
             || specs.is_empty()
             || !motion_allowed()
             || mouse_button_held()
+            || self.input.cancelled.get()
         {
+            self.cancel();
             return Ok(false);
         }
         if specs.len() > 32
+            || specs.iter().enumerate().any(|(index, spec)| {
+                specs[..index].iter().any(|previous| previous.viewport == spec.viewport)
+            })
             || specs.iter().any(|spec| {
-                spec.viewport.width <= 0
+                spec.from_workspace == spec.to_workspace
+                    || spec.viewport.width <= 0
                     || spec.viewport.height <= 0
                     || spec.from.len() + spec.to.len() > 512
                     || spec.from.is_empty() && spec.to.is_empty()
                     || spec.from.iter().chain(&spec.to).any(|page| !valid(page.window))
             })
         {
+            self.cancel();
             return Ok(false);
+        }
+        if self.is_active() {
+            let progress = self.progress();
+            let compatible = progress < 1.0
+                && specs.len() == self.overlays.len()
+                && specs
+                    .iter()
+                    .all(|spec| self.overlays.iter().any(|overlay| overlay.can_retarget(spec)));
+            if compatible {
+                let result = (|| {
+                    for spec in specs {
+                        let overlay = self
+                            .overlays
+                            .iter_mut()
+                            .find(|overlay| overlay.can_retarget(spec))
+                            .expect("compatible overlay was checked");
+                        overlay.retarget(spec.clone(), progress)?;
+                        overlay.draw(0.0)?;
+                    }
+                    // Retain the already visible popups and mouse ownership. Only
+                    // their thumbnail positions and bounded page set change.
+                    unsafe {
+                        DwmFlush()?;
+                    }
+                    Ok(())
+                })();
+                if let Err(error) = result {
+                    self.cancel();
+                    return Err(error);
+                }
+                self.started = None;
+                return Ok(true);
+            }
+            self.cancel();
         }
         let mut origin = POINT::default();
         unsafe {
@@ -538,6 +759,9 @@ impl Carousel {
             }
         }
     }
+    fn progress(&self) -> f64 {
+        self.started.map_or(0.0, |time| time.elapsed().as_secs_f64() / DURATION.as_secs_f64())
+    }
     pub fn animate(&mut self) -> Result<()> {
         if self.is_active() {
             self.started = Some(Instant::now());
@@ -546,23 +770,28 @@ impl Carousel {
         Ok(())
     }
     pub fn tick(&mut self) -> Result<()> {
+        let allowed = !self.is_active() || motion_allowed();
+        self.tick_with_motion_allowed(allowed)
+    }
+    fn tick_with_motion_allowed(&mut self, motion_allowed: bool) -> Result<()> {
         if !self.is_active() {
             self.retire_hook();
             return Ok(());
         }
-        if self.input.cancelled.get() || self.overlays.iter().any(|overlay| !overlay.valid()) {
+        if self.input.cancelled.get()
+            || !motion_allowed
+            || self.overlays.iter().any(|overlay| !overlay.valid())
+        {
             self.cancel();
             return Ok(());
         }
-        let progress =
-            self.started.map_or(0.0, |time| time.elapsed().as_secs_f64() / DURATION.as_secs_f64());
+        let progress = self.progress();
         if progress >= 1.0 {
             self.cancel();
             return Ok(());
         }
-        let eased = 1.0 - (1.0 - progress).powi(3);
         for overlay in &self.overlays {
-            if let Err(error) = overlay.draw(eased) {
+            if let Err(error) = overlay.draw(progress) {
                 self.cancel();
                 return Err(error);
             }
@@ -585,6 +814,131 @@ impl Drop for Carousel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn hidden_overlay(input: &Rc<Input>, spec: Transition) -> Result<Overlay> {
+        let window = create_window(input, Some(spec.viewport), spec.background_rgb)?;
+        let source = create_window(input, Some(spec.viewport), 0)?;
+        let id = WindowId(source.0.0 as u64);
+        let background = DesktopBackground {
+            thumbnail: Thumbnail::register(
+                window.0,
+                WindowRef { id, process_id: std::process::id() },
+            )?,
+            bounds: spec.viewport,
+            fixture: Some(source),
+        };
+        let pages = vec![
+            PresentedPage::new(window.0, spec.from_workspace, spec.from.clone())?,
+            PresentedPage::new(window.0, spec.to_workspace, spec.to.clone())?,
+        ];
+        let motion = WorkspaceMotion::new(spec.from_workspace, spec.to_workspace, spec.direction);
+        Ok(Overlay { pages, background, window, spec, motion })
+    }
+
+    #[test]
+    fn hidden_owned_overlays_retire_after_cancel_preference_change_expiry_or_stale_source() {
+        for reason in [
+            "cancel",
+            "monitor-removed",
+            "reduced-motion",
+            "expiry",
+            "stale-source",
+            "shell-replaced",
+        ] {
+            let mut carousel = Carousel::new().unwrap();
+            let spec = Transition {
+                from_workspace: WorkspaceId(0),
+                to_workspace: WorkspaceId(1),
+                from: Vec::new(),
+                to: Vec::new(),
+                viewport: Rect::new(0, 0, 40, 40),
+                direction: 1,
+                background_rgb: 0,
+            };
+            // Hidden owned popups only: no input hooks, display changes or foreign windows.
+            let overlay = hidden_overlay(&carousel.input, spec.clone()).unwrap();
+            let handle = overlay.window.0;
+            let background_handle = overlay.background.fixture.as_ref().unwrap().0;
+            carousel.overlays.push(overlay);
+            carousel.started = Some(Instant::now());
+            match reason {
+                "cancel" => {
+                    carousel.input.cancelled.set(true);
+                    carousel.cancel();
+                }
+                "reduced-motion" => carousel.tick_with_motion_allowed(false).unwrap(),
+                "monitor-removed" => assert!(!carousel.prepare(&[]).unwrap()),
+                "expiry" => {
+                    carousel.started = Some(Instant::now() - DURATION);
+                    carousel.tick_with_motion_allowed(true).unwrap();
+                }
+                "shell-replaced" => {
+                    carousel.overlays[0].background.thumbnail.source.process_id = u32::MAX;
+                    carousel.tick_with_motion_allowed(true).unwrap();
+                }
+                _ => {
+                    carousel.overlays[0].pages[0].windows.push(PageWindow {
+                        window: WindowRef { id: WindowId(0), process_id: u32::MAX },
+                        rect: spec.viewport,
+                    });
+                    carousel.tick_with_motion_allowed(true).unwrap();
+                }
+            }
+            assert!(!carousel.is_active(), "{reason}");
+            assert!(!unsafe { IsWindow(Some(handle)) }.as_bool(), "{reason}");
+            assert!(!unsafe { IsWindow(Some(background_handle)) }.as_bool(), "{reason}");
+            assert!(carousel.started.is_none());
+            assert!(!carousel.input.cancelled.get());
+            assert!(carousel.input.viewports.borrow().is_empty());
+            // Cancellation must not poison the next presentation.
+            let next = hidden_overlay(&carousel.input, spec).unwrap();
+            let next_handle = next.window.0;
+            carousel.overlays.push(next);
+            carousel.started = Some(Instant::now());
+            carousel.tick_with_motion_allowed(true).unwrap();
+            assert!(carousel.is_active());
+            drop(carousel);
+            assert!(!unsafe { IsWindow(Some(next_handle)) }.as_bool());
+            assert!(INPUT.with(|slot| slot.borrow().upgrade().is_none()));
+        }
+    }
+
+    #[test]
+    fn desktop_background_crops_each_monitor_without_moving_its_wallpaper() {
+        let desktop = Rect::new(-1920, -200, 5760, 2360);
+        let size = SIZE { cx: 5760, cy: 2360 };
+        let left = desktop_crop(desktop, size, Rect::new(-1920, -160, 1920, 1000)).unwrap();
+        assert_eq!(left, RECT { left: 0, top: 40, right: 1920, bottom: 1040 });
+        let primary = desktop_crop(desktop, size, Rect::new(0, 50, 3840, 2110)).unwrap();
+        assert_eq!(primary, RECT { left: 1920, top: 250, right: 5760, bottom: 2360 });
+        // Thumbnail dimensions, not a DPI assumption, define source pixels.
+        let scaled = desktop_crop(
+            Rect::new(-100, -100, 800, 600),
+            SIZE { cx: 400, cy: 300 },
+            Rect::new(0, 0, 400, 400),
+        )
+        .unwrap();
+        assert_eq!(scaled, RECT { left: 50, top: 50, right: 250, bottom: 250 });
+    }
+
+    #[test]
+    fn desktop_background_refuses_missing_or_partial_coverage() {
+        let desktop = Rect::new(0, 0, 1920, 1080);
+        let size = SIZE { cx: 1920, cy: 1080 };
+        for viewport in [
+            Rect::new(-1, 0, 1920, 1080),
+            Rect::new(0, -1, 1920, 1080),
+            Rect::new(0, 0, 1921, 1080),
+            Rect::new(0, 0, 1920, 1081),
+            Rect::new(0, 0, 0, 1080),
+            Rect::new(i32::MAX, 0, i32::MAX, 1080),
+        ] {
+            assert!(desktop_crop(desktop, size, viewport).is_none(), "{viewport:?}");
+        }
+        assert!(desktop_crop(desktop, SIZE { cx: 0, cy: 1080 }, desktop).is_none());
+        assert!(desktop_crop(Rect::default(), size, desktop).is_none());
+    }
+
     #[test]
     fn translated_page_is_clipped_without_scaling_visible_content() {
         let viewport = Rect::new(-1920, 40, 1920, 1040);

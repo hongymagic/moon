@@ -1409,6 +1409,7 @@ dependencies = [
 name = "moon-settings"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "moon-core",
  "moon-win",
  "serde",

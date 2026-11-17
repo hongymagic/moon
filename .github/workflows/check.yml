@@ -51,7 +51,10 @@ jobs:
         shell: powershell
         run: |
           ./scripts/validate-install-recovery.ps1 -ReportPath "$PWD/target/install-recovery-checks.json"
+          ./scripts/validate-upgrade-snapshot.ps1 -ReportPath "$PWD/target/upgrade-snapshot-checks.json"
+          ./scripts/validate-portable-install.ps1 -ReportPath "$PWD/target/portable-install-checks.json"
           ./scripts/validate-setup-state.ps1 -ReportPath "$PWD/target/setup-state-checks.json"
+          ./scripts/validate-startup.ps1 -ReportPath "$PWD/target/startup-preference-checks.json"
           ./scripts/validate-install-shell.ps1 -ReportPath "$PWD/target/install-shell-checks.json"
       - name: Real window integration
         shell: pwsh
@@ -76,6 +79,7 @@ jobs:
             target/integration-logs/
             target/install-recovery-checks.json
             target/setup-state-checks.json
+            target/startup-preference-checks.json
             target/install-shell-checks.json
           if-no-files-found: error
   fuzz:

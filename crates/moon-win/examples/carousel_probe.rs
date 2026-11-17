@@ -163,6 +163,8 @@ mod native {
                 .collect()
         };
         let spec = Transition {
+            from_workspace: moon_core::ids::WorkspaceId(0),
+            to_workspace: moon_core::ids::WorkspaceId(1),
             from: pages(0, outgoing),
             to: pages(2, incoming),
             viewport,
@@ -221,6 +223,8 @@ mod native {
         results.push(json!({"case":"two tiled workspaces translate together and incoming sources resize","passed":!carousel.is_active()&&incoming_exact&&outgoing_hidden,"outgoing_windows":spec.from.len(),"incoming_windows":spec.to.len(),"incoming_final_frames":spec.to.iter().map(|page|platform::window_rect(page.window.id).ok()).collect::<Vec<_>>(),"elapsed_ms":start.elapsed().as_secs_f64()*1000.0,"captured_frames":samples,"working_set_before":before.working_set_bytes,"working_set_after":after.working_set_bytes}));
 
         let reverse = Transition {
+            from_workspace: spec.to_workspace,
+            to_workspace: spec.from_workspace,
             from: spec.to.clone(),
             to: spec.from.clone(),
             direction: -1,
@@ -231,8 +235,19 @@ mod native {
         }
         apply(&reverse)?;
         carousel.animate()?;
+        runtime::pump(40);
+        carousel.tick()?;
         let repeated = carousel.prepare(std::slice::from_ref(&spec))?;
-        results.push(json!({"case":"rapid repeat settles without stale overlay","passed":!repeated&&!carousel.is_active()}));
+        apply(&spec)?;
+        carousel.animate()?;
+        runtime::pump(230);
+        carousel.tick()?;
+        let settled = spec
+            .to
+            .iter()
+            .all(|page| platform::window_rect(page.window.id).is_ok_and(|rect| rect == page.rect));
+        results.push(json!({"case":"rapid reversal retargets and settles without stale overlay","passed":repeated&&!carousel.is_active()&&settled,"retargeted":repeated}));
+        apply(&reverse)?;
 
         let instance = unsafe { GetModuleHandleW(None)? };
         struct Hook(HHOOK);

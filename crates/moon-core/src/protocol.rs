@@ -27,6 +27,84 @@ pub enum RequestAction {
     Lifecycle {
         action: LifecycleAction,
     },
+    Window {
+        generation: String,
+        revision: String,
+        target: WindowTarget,
+        action: crate::command::WindowAction,
+    },
+    Undo {
+        generation: String,
+        revision: String,
+    },
+    Control {
+        generation: String,
+        revision: String,
+        action: DesktopControl,
+    },
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WindowTarget {
+    pub id: String,
+    pub process_id: String,
+    pub process_birth: String,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum DesktopControl {
+    Pause,
+    Reload,
+    Restore,
+}
+
+pub fn decimal(value: &str) -> Result<u64, String> {
+    let number =
+        value.parse::<u64>().map_err(|_| "Expected an unsigned decimal identity string")?;
+    if number.to_string() != value {
+        return Err("Identity strings must use canonical decimal notation".into());
+    }
+    Ok(number)
+}
+pub fn check_generation(
+    generation: &str,
+    revision: &str,
+    current_generation: &str,
+    current_revision: u64,
+) -> Result<(), String> {
+    if generation != current_generation || decimal(revision)? != current_revision {
+        return Err("Desktop changed; refresh the overview and try again".into());
+    }
+    Ok(())
+}
+impl WindowTarget {
+    pub fn numbers(&self) -> Result<(crate::ids::WindowId, u32, u64), String> {
+        let id = decimal(&self.id)?;
+        let process =
+            u32::try_from(decimal(&self.process_id)?).map_err(|_| "Process ID exceeds u32")?;
+        let birth = decimal(&self.process_birth)?;
+        if id == 0 || process == 0 || birth == 0 {
+            return Err("Window and process identities must be nonzero".into());
+        }
+        Ok((crate::ids::WindowId(id), process, birth))
+    }
+    pub fn check(
+        &self,
+        world: &crate::world::World,
+        recorded_birth: u64,
+        native_process: u32,
+        native_birth: u64,
+    ) -> Result<crate::ids::WindowId, String> {
+        let (id, process, birth) = self.numbers()?;
+        if !world.windows.get(&id).is_some_and(|window| window.info.process_id == process)
+            || birth != recorded_birth
+            || process != native_process
+            || birth != native_birth
+        {
+            return Err("Window identity changed; refresh the overview and try again".into());
+        }
+        Ok(id)
+    }
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
@@ -54,15 +132,44 @@ impl Request {
         // Flatten and deny_unknown_fields are incompatible in serde. Validate the envelope explicitly.
         let object: serde_json::Value = serde_json::from_str(line).map_err(|e| e.to_string())?;
         let object = object.as_object().ok_or("request must be an object")?;
-        let allowed: &[&str] = match object.get("method").and_then(|m| m.as_str()) {
-            Some("query") => &["version", "id", "method", "query"],
-            Some("command") => &["version", "id", "method", "commands", "expected_focus"],
-            Some("subscribe") => &["version", "id", "method"],
-            Some("lifecycle") => &["version", "id", "method", "action"],
-            _ => return Err("method must be query, command, subscribe or lifecycle".into()),
-        };
+        let allowed: &[&str] =
+            match object.get("method").and_then(|m| m.as_str()) {
+                Some("query") => &["version", "id", "method", "query"],
+                Some("command") => &["version", "id", "method", "commands", "expected_focus"],
+                Some("subscribe") => &["version", "id", "method"],
+                Some("lifecycle") => &["version", "id", "method", "action"],
+                Some("window") => {
+                    &["version", "id", "method", "generation", "revision", "target", "action"]
+                }
+                Some("undo") => &["version", "id", "method", "generation", "revision"],
+                Some("control") => &["version", "id", "method", "generation", "revision", "action"],
+                _ => return Err(
+                    "method must be query, command, subscribe, lifecycle, window, undo or control"
+                        .into(),
+                ),
+            };
         if let Some(key) = object.keys().find(|k| !allowed.contains(&k.as_str())) {
             return Err(format!("unknown request field {key:?}"));
+        }
+        // Serde's internally tagged unit variants accept extra fields even with
+        // deny_unknown_fields. Keep the action capability boundary explicit.
+        if object.get("method").and_then(|m| m.as_str()) == Some("window") {
+            let action = object
+                .get("action")
+                .and_then(|a| a.as_object())
+                .ok_or("Window action must be an object")?;
+            let fields: &[&str] = match action.get("type").and_then(|t| t.as_str()) {
+                Some("focus" | "float" | "tile") => &["type"],
+                Some("move-to-workspace") => &["type", "workspace", "follow"],
+                _ => {
+                    return Err(
+                        "Window action must be focus, move-to-workspace, float or tile".into()
+                    );
+                }
+            };
+            if let Some(key) = action.keys().find(|key| !fields.contains(&key.as_str())) {
+                return Err(format!("unknown window action field {key:?}"));
+            }
         }
         let request: Self = serde_json::from_str(line).map_err(|e| e.to_string())?;
         if request.version != PROTOCOL_VERSION {
@@ -76,6 +183,22 @@ impl Request {
         {
             return Err("request must contain 1–128 commands".into());
         }
+        match &request.action {
+            RequestAction::Window { generation, revision, target, action } => {
+                validate_guard(generation, revision)?;
+                target.numbers()?;
+                if let crate::command::WindowAction::MoveToWorkspace { workspace, .. } = action
+                    && (workspace.trim().is_empty() || workspace.len() > 4096)
+                {
+                    return Err("Workspace name must contain 1–4096 bytes".into());
+                }
+            }
+            RequestAction::Undo { generation, revision }
+            | RequestAction::Control { generation, revision, .. } => {
+                validate_guard(generation, revision)?
+            }
+            _ => {}
+        }
         Ok(request)
     }
 
@@ -87,6 +210,14 @@ impl Request {
         }
         Ok(())
     }
+}
+fn validate_guard(generation: &str, revision: &str) -> Result<(), String> {
+    let (process, birth) = generation.split_once(':').ok_or("Invalid daemon generation")?;
+    if decimal(process)? == 0 || decimal(birth)? == 0 {
+        return Err("Invalid daemon generation".into());
+    }
+    decimal(revision)?;
+    Ok(())
 }
 impl Response {
     pub fn success(id: serde_json::Value, result: serde_json::Value, revision: u64) -> Self {

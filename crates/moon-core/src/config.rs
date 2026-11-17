@@ -147,6 +147,9 @@ pub struct Hooks {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct WeatherConfig {
+    /// Friendly city name, or the label for a one-time Windows location lookup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
     pub latitude: f64,
     pub longitude: f64,
     #[serde(default = "weather_interval")]
@@ -397,6 +400,16 @@ impl Config {
                 || weather.interval_seconds < 60)
         {
             return Err("weather needs valid latitude/longitude and interval-seconds >= 60".into());
+        }
+        if self.weather.as_ref().and_then(|weather| weather.location.as_ref()).is_some_and(|name| {
+            name.trim().is_empty()
+                || name.chars().count() > 200
+                || name.chars().any(char::is_control)
+        }) {
+            return Err(
+                "weather location must be a name of 1 to 200 characters without control characters"
+                    .into(),
+            );
         }
         Ok(())
     }
@@ -898,5 +911,23 @@ reload=["arrange"]
             && r.matches.iter().any(|m| m.matches("EXCEL", "dialog", ""))));
         assert!(!config.rules.iter().any(|r| r.commands == ["ignore"]
             && r.matches.iter().any(|m| m.matches("EXCEL", "XLMAIN", "Book"))));
+    }
+
+    #[test]
+    fn weather_city_label_is_optional_bounded_and_preserved() {
+        let old = Config::load("[weather]\nlatitude=-33.87\nlongitude=151.21\n").unwrap();
+        assert_eq!(old.weather.as_ref().unwrap().location, None);
+        assert!(serde_json::to_value(&old).unwrap()["weather"].get("location").is_none());
+        let mut config = old;
+        config.weather.as_mut().unwrap().location =
+            Some("Sydney, New South Wales, Australia".into());
+        config.validate().unwrap();
+        let serialized = serde_json::to_value(&config).unwrap();
+        let restored: Config = serde_json::from_value(serialized).unwrap();
+        assert_eq!(restored.weather, config.weather);
+        for invalid in ["".into(), "  ".into(), "x".repeat(201), "Sydney\nAustralia".into()] {
+            config.weather.as_mut().unwrap().location = Some(invalid);
+            assert!(config.validate().is_err());
+        }
     }
 }

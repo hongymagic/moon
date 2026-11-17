@@ -5,20 +5,128 @@ guided setup, product identity, theme editing, Windows 11 materials, and carouse
 navigation. The original signed-install, resilience, performance and seven-day
 acceptance conditions remain tracked in [acceptance-status.md](acceptance-status.md).
 
-## Current ordinary candidate, 13 November 2026
+## Development refinement, 15 November 2026
 
-The session-recovery update is now staged as ordinary build `47521240…` and
+The isolated `codex/polish-20261115` branch adds searchable live shortcut help,
+a current workspace overview, one-step draft Undo and persistent save/application
+feedback. Existing automatic first-launch adoption remains the source of workspace
+assignments; the overview explains those assignments rather than introducing a
+second placement mechanism. [Settings editing](settings-editing.md#live-help-and-draft-recovery)
+documents the behavior and recovery limits.
+
+Rapid workspace switches now retarget the visible carousel from its current
+positions, including reversals, while retaining at most three pages per monitor.
+The native final layout remains independent of presentation. This refinement has
+portable continuity/bounds tests, a Windows cross-build and the live workspace
+roundtrip recorded below. The roundtrip observes animation activity and final
+state; rapid-retargeting smoothness has not been visually validated. Previous
+carousel results below cover the earlier implementation.
+
+Installer changes preserve both an explicitly selected configuration and implicit
+defaults through startup, recovery and Settings entry points. Portable transfer
+authenticates the exact running image, retains a durable workspace checkpoint
+before exit, and restores that same Moon build after a failed installation. It
+refuses a paused, suspended or diagnostic session and checks that saved settings
+match the running configuration and can be parsed by the signed replacement.
+It never restores another window manager during portable recovery.
+The isolated PowerShell 5.1 suites pass 20 checkpoint/configuration checks,
+33 setup-state checks and 22 recovery checks without installing, requesting
+elevation or changing the live daemon. Reports are under
+`target/polish-20261115/` with `-final.json` names. Actual signed transfer remains
+a separate Windows acceptance check. The additional 34 checks in
+`portable-install.json` cover exact peer identity using private connected pipes,
+settings equivalence and the actual capture/stop/recovery helpers with desktop
+actions substituted. They pass after correcting JSON value comparison on
+PowerShell 5.1; all 41 scripts also parse successfully.
+
+After merging the repository review, all 123 portable Rust tests pass (96 core,
+14 daemon, 13 Settings), including standalone-help routing and restart preflight. Settings passes 44
+browser checks, and Windows-target Clippy passes for all affected crates. The
+frontend receipt is `target/polish-20261115/settings-merge-validation.json`; screenshots
+in `target/settings-polish/` include the live overview and shortcut list, dark and
+high-contrast appearances, and narrow previews with no caption overlap.
+Ordinary and UIAccess release images are built with 116 unchanged source inputs;
+their exact identities and manifests are in
+`target/polish-20261115-final/release-build.json`. One new native cleanup regression
+passes using hidden owned popups, without input hooks or foreign windows.
+The ordinary image has since been promoted and exercised as recorded below.
+The UIAccess image has not completed installation; these build checks do not
+establish signed-installation, performance or soak acceptance.
+
+## Live ordinary checks, 15 November 2026
+
+The ordinary daemon now runs as PID 48436 with SHA256
+`512515BF2BB41FFC95776ECCEF26064076B865AE446CCE6DF9136DDC09883B8E`.
+Its token is medium integrity, not elevated and without UIAccess. The promotion
+preserved the four original application identities, configuration and workspace
+layout. The subsequent workspace 2 → 10 roundtrip restored the original full
+layout fingerprint, remembered focus and workspace recency; visible native frames
+and inactive-window cloaking were verified. Four of nine query samples reported
+`carousel_active=true`, and both transitions settled. This establishes activity
+and final-state behavior, not visual motion quality or rapid-switch continuity.
+
+Settings build
+`53F48DA88434577EA18C99C0D81A949471E1D67A4EE9E168F79768D3EF7F2709`
+passes six checks in its real Windows host using a separate owned configuration:
+loading the selected file, one-step Undo without a write, validated save with
+comment preservation, conflict rejection with the draft retained, reload
+confirmation, and Appearance controls with their preview. Cleanup reports no
+errors. The outer check confirms that the personal configuration and live desktop
+layout remained unchanged, and the coordinator visually reviewed `appearance.png`.
+This run did not start a second daemon or exercise live shortcut rendering or
+same-file application in the native Settings window; those report fields are null.
+
+A separate authenticated read-only query against PID 48436 returned 52 effective
+bindings in default mode with hooks enabled and Moon unpaused. The overview
+reported four managed windows: one each on workspaces 1 and 2, and two on active
+workspace 10. The reported configuration matched the saved file. These are live
+backend checks; the 44 browser checks separately cover the help interface.
+
+A later native check also exercised the real `cheatsheet` launch into Shortcuts,
+verified all 52 active bindings, mode and emergency recovery, and tested filtering,
+no matches and clearing the search. General matched the live workspace counts.
+The exact ordinary Settings companion closed gracefully without edits, original
+foreground returned, and the same daemon, personal configuration and full layout
+were preserved. All five checks passed with no cleanup errors. This separate run
+is recorded in `polish-live-help-ui-20261115/result.json` and its retained copy
+`target/polish-20261115-final/live-help-ui-result.json`; it does not establish live
+application of changed personal settings.
+
+The installation attempt for operation `6c9f37baec5f4b7092208e02a6b505c1`
+returned Windows cancellation code 1223. Its recorded state is
+`rolled_back_portable`, installation metadata is absent, and the same ordinary
+PID 48436 remained healthy with four managed windows and no daemon error. No
+signed UIAccess transfer or elevated-application acceptance is claimed. Physical
+DPI/accessibility/resilience checks, current-candidate performance acceptance and
+the installed seven-day soak remain open.
+
+Evidence paths below are relative to
+`C:\Users\dhong\Downloads\Moon-validation\`:
+
+| Scope | Saved evidence |
+| --- | --- |
+| Ordinary promotion | `polish-promote-20261115-v3/result.json` |
+| Native Settings, six checks | `polish-native-settings-20261115/settings-fixture/report.json` |
+| Personal configuration and desktop preservation | `polish-native-settings-20261115/result.json` |
+| Reviewed Appearance capture | `polish-native-settings-20261115/settings-fixture/appearance.png` |
+| Live shortcuts and overview | `polish-current-readonly-20261115/result.json` |
+| Workspace roundtrip and activity samples | `polish-focus-restore-20261115-v2/result.json` |
+| Cancellation and remaining ordinary daemon | `polish-install-20261115/{handover-result,failure}.json` |
+
+## Recorded ordinary candidate, 13 November 2026
+
+The earlier session-recovery update was staged as ordinary build `47521240…` and
 UIAccess build `AFBA0420…`. It guards cursor movement while suspended and resets
 carousel input after a failed session recheck. Portable checks and the focused
-Windows registration test pass; native desktop validation and promotion remain
-pending while Windows is locked. See
+Windows registration test passed; native desktop validation and promotion were
+pending at that stage while Windows was locked. See
 [candidate status](acceptance-status.md#staged-session-recovery-update-13-november-2026).
 
-The latest fully exercised ordinary daemon is
-`43FD913681AD449967DEEBD2DD6BA38DAD59E37D384FD1142A30E9FC9F17E314`,
-its matching earlier UIAccess image is
+The earlier broad native-validation run used ordinary daemon
+`43FD913681AD449967DEEBD2DD6BA38DAD59E37D384FD1142A30E9FC9F17E314`.
+Its matching UIAccess image was
 `748B8829283BA55E7367EEE2F0820D3C3205914BF584B93668A44D9215D1F496`,
-and Settings remains
+with Settings build
 `EC22F24B07DFAD2ABE6198B519016E26E2C119843351FE81AEAC13EE9799727C`.
 The installation image has not yet been signed or installed. Build records are
 `target/provider-demand-build.json` and `target/provider-install-build.json`.
@@ -97,10 +205,12 @@ when needed, and preserves its explanation. Resetting a section clears invalid
 raw entries in that section. Keyboard saves restore focus to the edited field,
 or to the current page heading if the user navigated while saving. A confirmation
 dialog owns keyboard shortcuts and repeated close requests until it is dismissed.
-A successful save reloads only a daemon using the same configuration path.
+A successful save is picked up by a daemon watching the same configuration path.
+Settings reports when Moon has loaded that configuration; it does not equate a
+matching configuration with completed desktop effects.
 
 At narrow widths, navigation becomes a compact grid and the status sits above one
-aligned row of Reload, Discard and Save actions. Short viewports use normal
+aligned row of Undo, Reload, Discard and Save actions. Short viewports use normal
 document scrolling so navigation, editing and saving remain reachable. High
 contrast uses the user's system Highlight/HighlightText colors for the primary
 action, preventing an unreadable forced-color text backplate.
@@ -152,7 +262,7 @@ motion apply to these surfaces as well as Settings. Window-manager performance
 and settings-window performance are separate measurements, not an aggregated
 claim that a WebView fits the daemon's memory budget.
 
-## Current polish verification
+## Earlier polish verification
 
 The following checks cover the E050 polish baseline and unchanged frontend
 bundle. Renderer and workspace-label follow-up results are listed below. These

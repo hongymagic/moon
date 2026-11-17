@@ -363,9 +363,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         let total: u64 = groups.values().map(|group| group.resident_bytes).sum();
+        let mut counters = PROCESS_MEMORY_COUNTERS_EX {
+            cb: size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
+            ..Default::default()
+        };
+        // The API accepts the extended structure through its common prefix.
+        // Sample after the region walk; this does not reset the process peak.
+        unsafe {
+            GetProcessMemoryInfo(
+                process.0,
+                (&raw mut counters).cast::<PROCESS_MEMORY_COUNTERS>(),
+                size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
+            )?;
+        }
         Ok(
             json!({"groups":groups,"resident_bytes":total,"page_size":page_size,"observation_ms":started.elapsed().as_secs_f64()*1000.0,
-            "scope":"VirtualQueryEx committed regions and QueryWorkingSetEx valid pages; non-atomic read-only snapshot, shareable is not exclusively owned memory. No page contents or virtual addresses are recorded."}),
+            "working_set_bytes":counters.WorkingSetSize,"peak_working_set_bytes":counters.PeakWorkingSetSize,
+            "scope":"VirtualQueryEx committed regions and QueryWorkingSetEx valid pages; non-atomic read-only snapshot, shareable is not exclusively owned memory. GetProcessMemoryInfo current/peak working-set counters are sampled after the region walk; the peak is not reset for this interval. No page contents or virtual addresses are recorded."}),
         )
     }
     let args: Vec<_> = std::env::args().collect();

@@ -6,13 +6,16 @@
 
 #![forbid(unsafe_code)]
 
+pub mod desktop;
 pub mod geometry;
+pub mod help;
 pub mod ids;
 pub mod tree;
 
 pub mod command;
 pub mod config;
 pub mod layout;
+pub mod motion;
 pub mod protocol;
 pub mod scene;
 pub mod settings;

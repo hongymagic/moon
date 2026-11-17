@@ -2,6 +2,7 @@
 
 pub mod carousel;
 pub mod hooks;
+pub mod http;
 pub mod ipc;
 pub mod platform;
 

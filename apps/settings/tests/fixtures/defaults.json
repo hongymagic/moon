@@ -112,7 +112,9 @@
     "alt+shift+tab": ["move-workspace right"],
     "alt+shift+up": ["move up"],
     "alt+tab": ["recent-workspace"],
-    "alt+up": ["focus up"]
+    "alt+up": ["focus up"],
+    "alt+ctrl+space": ["overview"],
+    "alt+ctrl+z": ["undo"]
   },
   "modes": {},
   "aliases": {},

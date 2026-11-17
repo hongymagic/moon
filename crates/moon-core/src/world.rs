@@ -77,6 +77,7 @@ pub enum Event {
     PlacementRejected(WindowId),
     MonitorsChanged(Vec<Monitor>),
     Command(Command),
+    WindowAction { id: WindowId, action: crate::command::WindowAction },
     ConfigChanged(Box<Config>),
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -96,6 +97,8 @@ pub enum Control {
     Restore,
     CheatSheet,
     Settings,
+    Overview,
+    Undo,
 }
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Plan {
@@ -428,6 +431,7 @@ impl World {
         if old == target {
             if follow {
                 self.switch_workspace(target);
+                self.set_focus(Some(id));
             }
             return;
         }
@@ -704,6 +708,8 @@ impl World {
             Command::Restore => effects.control = Some(Control::Restore),
             Command::CheatSheet => effects.control = Some(Control::CheatSheet),
             Command::Settings => effects.control = Some(Control::Settings),
+            Command::Overview => effects.control = Some(Control::Overview),
+            Command::Undo => effects.control = Some(Control::Undo),
         }
         Ok(())
     }
@@ -712,7 +718,11 @@ impl World {
 pub fn reduce(world: &World, event: Event) -> Result<Transition, String> {
     let focus_requested = matches!(
         &event,
-        Event::Command(
+        Event::WindowAction {
+            action: crate::command::WindowAction::Focus
+                | crate::command::WindowAction::MoveToWorkspace { follow: true, .. },
+            ..
+        } | Event::Command(
             Command::Focus(_)
                 | Command::Workspace(_)
                 | Command::RecentWorkspace
@@ -831,6 +841,32 @@ pub fn reduce(world: &World, event: Event) -> Result<Transition, String> {
         }
         Event::PlacementRejected(id) => next.set_floating(id, true),
         Event::Command(command) => next.command(command, &mut effects, None)?,
+        Event::WindowAction { id, action } => {
+            use crate::command::WindowAction;
+            let window =
+                next.windows.get(&id).ok_or("Window is no longer managed; refresh the overview")?;
+            if next.paused || window.suspended {
+                return Err("Window actions are unavailable while Moon is paused or the window is suspended".into());
+            }
+            match action {
+                WindowAction::Focus => {
+                    let workspace = window.workspace;
+                    if !next.workspace_visible(workspace) {
+                        next.switch_workspace(workspace);
+                    }
+                    next.set_focus(Some(id));
+                }
+                WindowAction::MoveToWorkspace { workspace, follow } => next.command(
+                    Command::MoveToWorkspace { workspace, follow },
+                    &mut effects,
+                    Some(id),
+                )?,
+                WindowAction::Float => {
+                    next.command(Command::SetFloating, &mut effects, Some(id))?
+                }
+                WindowAction::Tile => next.command(Command::SetTiling, &mut effects, Some(id))?,
+            }
+        }
         Event::ConfigChanged(config) => {
             let mut rebuilt = World::with_previous(*config, next.monitors.clone(), Some(&next))?;
             rebuilt.disconnected_workspaces.retain(|name, _| {

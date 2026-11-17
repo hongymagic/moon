@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([ValidateSet('Install','Uninstall')][string]$Mode='Install',[string]$Binary,[string]$SettingsBinary,[switch]$KeepPreviousDesktopStopped,[switch]$CompileOnly)
+param([ValidateSet('Install','Uninstall')][string]$Mode='Install',[string]$Binary,[string]$SettingsBinary,[string]$PortableBinary,[switch]$KeepPreviousDesktopStopped,[switch]$CompileOnly)
 . (Join-Path $PSScriptRoot 'install-common.ps1')
 function Get-MoonSetupHandoverArguments {
     param([switch]$KeepStopped,[string]$StatePath=(Join-Path $env:LOCALAPPDATA 'moon\handover.json'))
@@ -92,6 +92,7 @@ if ($Mode -eq 'Uninstall') {
     $ui.Primary.IsDefault=$false;$ui.Secondary.IsDefault=$true
 } elseif ($installed) {
     $ui.Heading.Text='A fresh start for Moon.';$ui.Introduction.Text='Update or repair Moon while keeping your windows and personal settings in place.'
+    $ui.Promise.Text='Keeps your startup preference and personal settings.'
     $sourceVersion=if(Test-Path -LiteralPath $Binary){[Diagnostics.FileVersionInfo]::GetVersionInfo($Binary).ProductVersion}else{$null}
     $currentPath=Join-Path (Get-MoonInstallDirectory) 'moon.exe'
     $currentVersion=if(Test-Path -LiteralPath $currentPath -PathType Leaf){[Diagnostics.FileVersionInfo]::GetVersionInfo($currentPath).ProductVersion}else{$null}
@@ -143,7 +144,11 @@ $ui.Primary.Add_Click({
         try {
             if ($Mode -eq 'Install') {
                 if (!(Get-MoonWebViewRuntime)) {Start-Process 'https://developer.microsoft.com/microsoft-edge/webview2/consumer/';$ui.Status.Text='After installing WebView2, return here to open Settings.';return}
-                Start-Process -FilePath (Join-Path (Get-MoonInstallDirectory) 'moon-settings.exe')
+                $settingsDirectory=Get-MoonInstallDirectory
+                $settingsArguments=Get-MoonLaunchArguments (Read-MoonInstallState $settingsDirectory) -Settings
+                $settingsStart=@{FilePath=(Join-Path $settingsDirectory 'moon-settings.exe')}
+                if ($settingsArguments) {$settingsStart.ArgumentList=$settingsArguments}
+                Start-Process @settingsStart
             }
             $window.Close()
         } catch {Show-MoonSetupProblem 'Moon is installed, but Settings could not open. You can try again or open Moon from Start.' $_}
@@ -159,7 +164,7 @@ $ui.Primary.Add_Click({
         $context.detail=Join-Path $context.files.directory ($context.operation+'.log')
         $entry=if($Mode -eq 'Uninstall'){'uninstall.ps1'}elseif(!$installed -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'handover.ps1'))){'handover.ps1'}else{'install.ps1'}
         $arguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $PSScriptRoot $entry),'-OperationId',$context.operation)
-        if ($Mode -eq 'Install') {$arguments+=@('-Binary',$Binary,'-SettingsBinary',$SettingsBinary)}
+        if ($Mode -eq 'Install') {$arguments+=@('-Binary',$Binary,'-SettingsBinary',$SettingsBinary);if($PortableBinary){$arguments+=@('-PortableBinary',$PortableBinary)}}
         if ($entry -eq 'handover.ps1') {$arguments+=@(Get-MoonSetupHandoverArguments -KeepStopped:$KeepPreviousDesktopStopped)}
         $powershell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
         $context.process=Start-Process -FilePath $powershell -ArgumentList (($arguments|ForEach-Object {ConvertTo-MoonArgument $_}) -join ' ') -WindowStyle Hidden -RedirectStandardOutput ($context.detail+'.out') -RedirectStandardError $context.detail -PassThru

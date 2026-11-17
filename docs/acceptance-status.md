@@ -1,9 +1,227 @@
 # Acceptance evidence
 
 This ledger maps the checks in `.claude/plans/moon-v1.md` to observed evidence.
-It was reviewed on 13 November 2026 (Sydney). Implemented event handling and passing
+It was reviewed on 15 November 2026 (Sydney). Implemented event handling and passing
 simulated tests do not establish that the corresponding physical Windows event
 has been exercised.
+
+## Current signed upgrade observed, 15 November 2026
+
+Source `ad07642` was installed successfully by operation
+`ece5416c88324ee1a21a4bf82d632eab` at **08:18:27 UTC**. Product status is
+`succeeded`, installer exit code is 0, and the independent coordinator passed.
+The new installed daemon is PID **35052**, native birth **134392043063996486**,
+with UIAccess enabled, elevation disabled, integrity RID 12288 and no last error.
+Its signed SHA-256 is
+`D3ABC1DE88325EDAF72983AB1BB34C44451627202C40E96F93271FE986A1168F`;
+the signed Settings SHA-256 is
+`55C97E722E6E2A3DEDE5577AC2F6EE6B37ACDE44DF7E7C7863CF369A48237632`.
+Both installed executable payloads independently match the frozen package inputs
+after accounting for their signatures.
+
+The check verified unchanged semantic layout, selected configuration and
+installation identity, four managed windows, and exit of the old PID 42956
+lifetime. Startup remained enabled. Task owner/group and every previous access
+entry were preserved; the sole added entry grants the installation owner read,
+write and execute (`0x1201BF`), without delete or permission/ownership-changing
+rights. An ordinary worker subsequently disabled and restored the startup task
+at 08:23:45 UTC without changing configuration or the healthy daemon lifetime.
+At 08:33:02 UTC the installed ordinary-token Settings companion also passed all
+five native usability checks. Guarded clicks changed startup enabled → disabled
+→ enabled, with matching UI state and independent COM task readback. Personal
+configuration and live layout were unchanged, original foreground 393448 returned,
+and the owned Settings window closed without cleanup errors. PID 35052 remained
+healthy; this later baseline contained five managed windows. Only the owned
+fixture document was edited by the weather/icon/bar/rule checks. This does not
+exercise sign-out/sign-in or reboot behavior.
+
+Receipts are under `Downloads\Moon-validation` in
+`usability-upgrade-ready-worker-20261115` and
+`usability-installed-startup-backend-20261115`, and
+`usability-installed-settings-click-20261115`. The earlier 04:37 UTC canceled
+attempt remains preserved and is not relabeled as a success. The upgrade's
+layout fingerprint does not independently prove native frames/process births
+or recent-workspace preservation. Earlier UIA Toggle and SetFocus attempts did
+not perform the requested switch action; their harness failures remain recorded
+and are not product-defect or keyboard-accessibility evidence. The guarded-click
+run above establishes the native switch behavior. The high-integrity shortcut
+prompt was canceled at 08:31:09 UTC before its child or test body ran. That
+128-shortcut burst remains unexecuted pending fresh readiness; preparation and
+compilation are not execution evidence. See [the detailed record](desktop-polish-validation.md#usability-package-and-approval-outcome).
+
+## Earlier signed installation observed, 15 November 2026
+
+The earlier installation is source commit `9079c6e`, operation
+`ada1303b353f424ab46a341454d5f384`. Its UIAccess input is
+`04DBD64C98B2EC7E113641050968B81E978529D79F4DB2ED074DFF0945F2F88E`;
+the installed, signed Moon image is
+`DB793217696E0EDE4ADB44A48973DAD18FD0861B7C18455A4DC42D88B56683B2`.
+Settings input is `5C817B710BC5925969E1939C754F1ADA36E704B4952F9A2040D7F5E4E156EDA6`.
+Moon started from `C:\Program Files\moon\moon.exe` as PID 10064, native birth
+134391876924100214. Its actual token has UIAccess, is not elevated, and reports
+integrity RID 12288. Older sections below retain their historical build status.
+
+The live S8 checks passed: the installed signature is valid, the owned startup
+task uses Limited run level, an ordinary medium-integrity client connects, an
+application launched through Moon remains medium-integrity without UIAccess or
+elevation, and a low-integrity client is refused. The signed self-launch fix is
+covered by three passing native child-process tests and two release-mode private
+stdio checks. These checks do not prove control of an actual elevated application.
+
+The first strict coordinator postcheck failed after installation; that receipt
+remains a failure. A later authenticated readback matches the entire original
+layout fingerprint, all four application identities, visible native frames,
+visibility and foreground 263988. Configuration path, explicit selection and
+file hash `055E3A6A…B832` are unchanged. Preservation of the recent-workspace value
+is unproved: it changed from index 8 to 1, and the later observation includes 17
+additional command transactions and 917 keyboard callbacks. The later readback
+also records a focus-refusal error; it is not an error-free runtime acceptance.
+No layout repair or rollback is inferred from the later matching state.
+
+Evidence is preserved under `Downloads\Moon-validation` in
+`runtimefix-install-closed-20261115/{before,failure,handover-ada1303b353f424ab46a341454d5f384}.json`
+and `runtimefix-installed-readback-v3-20261115/current.json`; the S8 report is
+included in the latter. Signed installation and the listed S8 checks are observed,
+while actual elevated-application control, remaining physical resilience,
+performance budgets, clean-machine validation and the seven-day installed
+sole-manager soak remain open. No historical performance result is promoted to
+an acceptance pass for this installed image.
+
+A real installed lifecycle restart at 03:49 UTC produced PID 42956 (native birth
+134391881647308150) from the same signed image. The original test helper failed
+after restart while comparing a PowerShell ordered dictionary and then repeated
+that error while writing its report. Its saved baseline and failure remain
+unchanged. A separate read-only audit verified both predecessor lifetimes had
+ended, the current signed UIAccess successor and its sole same-image child, and
+the successor's ownership of the recovery journal. All four native frames,
+semantic layout, configuration, foreground and current recency exactly match the
+pre-restart baseline; the successor reports no error. Child command-line arguments
+were not observable from the ordinary verifier, so watchdog-role evidence is
+limited to its image, parent, lifetime and journal relationship.
+
+At 03:54 UTC the installed daemon passed a targeted focus round trip: Terminal on
+workspace 2, then Codex on workspace 10. The carousel was observed active and
+retired. Exact layout, native frames and visibility, foreground, configuration and
+recency were restored without a daemon error. This verifies the exercised focus
+path; it does not diagnose the earlier latched warning or measure animation frame
+time. Receipts are `runtimefix-restart-completion-20261115/result.json` and
+`runtimefix-installed-focus-20261115/result.json` under `Downloads\Moon-validation`.
+
+## Combined review and polish on Windows, 15 November 2026
+
+Commit `b2c9fc9` combines the completed repository review (`75e5468`, an exact
+45-file snapshot of the review working tree) with the polish implementation.
+The original review files were independently hash-checked and remain unchanged
+in their checkout. This candidate adds current shortcut help and workspace counts,
+draft Undo, truthful saved/loaded feedback, continuous carousel retargeting, and
+the reviewed IPC, reload, configuration, provider and workspace fixes.
+
+The final staged ordinary image, including the read-only restart preflight, is
+`512515BF2BB41FFC95776ECCEF26064076B865AE446CCE6DF9136DDC09883B8E`;
+the UIAccess image is
+`2B0AA7420F2CF206376BBB01606B0C46726211E6D9561FA4AE12FE2A26FD2CFF`;
+Settings is
+`53F48DA88434577EA18C99C0D81A949471E1D67A4EE9E168F79768D3EF7F2709`.
+All 116 build inputs remained unchanged during compilation. Manifest, icon and
+static-runtime import checks are recorded in
+`target/polish-20261115-final/release-build.json`; copied Windows images are verified
+in `target/polish-20261115-final/windows-stage.json`. The earlier combined-build
+artifacts and their receipts remain unchanged.
+
+The combined source passes 123 portable Rust tests (96 core, 14 daemon, 13
+Settings), 44 Settings browser checks, Windows-target Clippy, and formatting.
+The merged installer foundation passes 20 snapshot/configuration checks, 33
+setup-state checks and 22 recovery checks under PowerShell 5.1. These use private
+fixtures, not a live installation. All 34 portable-transfer checks pass, including
+actual private connected-pipe identity checks and mocked capture/stop/recovery
+failure paths. The effective-config comparison preserves array order and scalar
+values; a regression caught by the first run was corrected and the suite rerun.
+All 41 PowerShell scripts parse under Windows PowerShell 5.1.
+The native carousel cleanup regression also
+passes on the exact new unit executable using hidden owned popups only; it
+does not exercise visible animation, keyboard hooks or the user's windows.
+Reports are under `target/polish-20261115/` with prefixes `merged-core-checks`,
+`settings-merge-validation`, `combined-` and `native-hidden-popup-`.
+Final installer reports are `upgrade-snapshot-final.json`,
+`install-recovery-final.json`, `setup-state-final.json` and `portable-install.json`.
+The package regression suite also passes on the final executable inputs; it
+reads executable resources without launching them, checks archive integrity and
+failure cleanup, and confirms the original images are unchanged. Its report is
+`target/polish-20261115-final/package-validation.json`.
+
+Commit `db6a116` is packaged as `moon-0.1.0-windows-x64.zip` with SHA-256
+`56C955D32BD6EC4CEF3C2BC614B51C925EF0975E28CC735D09D9BC67ABFA66F7`.
+All 34 archive entries, including 33 payload files, were independently verified.
+The immutable package and earlier failed-attempt evidence remain preserved.
+
+The ordinary 512515 image was promoted through Explorer at 19:32 UTC on
+14 November (15 November Sydney), as PID 48436. Its native process birth is
+134391583249052813. Four original application identities, workspace assignments,
+visible native frames, hidden-window cloaks, configuration and foreground were
+preserved. The one-time migration ended the exact legacy shared-pipe daemon
+through its normal message-loop shutdown; product IPC verification was not relaxed.
+An earlier migration-harness attempt briefly introduced a terminal window because
+its launcher was not hidden. The harness was corrected; the product launcher
+already used hidden startup. That attempt and its recovery remain recorded.
+
+A subsequent workspace 2 → 10 round trip restored the original remembered focus
+and recent workspace. Four of nine observations reported an active carousel;
+final native frames, visibility and foreground matched the original desktop.
+This proves native transition activity and state restoration, not visual animation
+quality. Reports are `target/polish-20261115-final/ordinary-promotion-result.json`
+and `workspace-roundtrip-result.json`.
+
+The actual Settings WebView host passes six checks against an owned temporary
+configuration: loading, draft Undo without a disk write, saving with comments
+preserved, rejecting a concurrent edit while retaining the draft, reload
+confirmation, and the Appearance controls/preview. Its screenshot was inspected;
+no fixture cleanup error occurred. Personal configuration and layout remained
+unchanged. The fixture did not exercise live configuration application or the
+live shortcut page. Separate read-only daemon checks return 52 active shortcuts,
+current workspace counts, and matching live/on-disk configuration. Evidence is
+`target/polish-20261115-final/native-settings-*` and `live-help-result.json`.
+
+A separate native live-help check subsequently passed all five checks: Moon's
+actual `cheatsheet` command opened the exact Settings companion directly on
+Shortcuts at ordinary privileges; the page showed all 52 active bindings, mode
+and emergency recovery; search filtered, handled an empty result and restored
+the full list; General matched the live workspace counts; and the same healthy
+daemon, exact configuration bytes and complete layout remained unchanged.
+The owned unedited Settings window closed gracefully and original foreground
+393448 returned. No cleanup errors occurred. This did not save personal settings
+or certify live application of a changed configuration. Evidence:
+`target/polish-20261115-final/live-help-ui-{result,completion,process}.json`.
+
+Signed installation was attempted at 19:39 UTC. Windows canceled the approval
+prompt with native code 1223 at 19:41 UTC, before the elevated installation ran.
+Operation `6c9f37baec5f4b7092208e02a6b505c1` records `rolled_back_portable`;
+no installation metadata or signed runtime was created, and the same ordinary
+Moon process continued without a recovery restart. All four recorded window
+identities, frames and cloaks matched before and after cancellation. Previous
+window managers remain stopped and their startup shortcut backups are retained.
+During the prompt, Moon reported session suspension; a fresh 19:48 UTC check
+confirmed it had resumed, was not paused, had no last error, and still matched
+the saved configuration. Evidence is `install-attempt-*`, `uac-observation.json`
+and `post-cancel-result.json` under `target/polish-20261115-final/`.
+
+The combined source also passes the existing Linux Criterion reducer/layout
+benchmark with 50 windows: estimated time 22.821 µs, confidence interval
+22.649–23.130 µs, below the 100 µs core budget. All 25 tracked benchmark/dependency
+inputs were unchanged. This measures the pure reducer and layout, not Windows
+input dispatch or native placement. Its receipt and log are
+`target/polish-20261115-final/reducer-benchmark.{json,log}`.
+
+A read-only Windows process-counter sample at 19:51 UTC records 46,092,288 bytes
+current working set and 47,116,288 bytes peak working set for this daemon lifetime,
+including startup and the preceding desktop checks. This is a four-window real
+session observation, not the required controlled eight-window performance workload
+or a universal bound. The receipt is `memory-readonly-result.json` in the same
+final-evidence directory.
+
+The latest ordinary Moon build is running. Signed installation and actual
+administrator-window control, visual carousel acceptance, remaining physical
+resilience, performance budgets and the seven-day installed sole-manager soak
+remain open. Earlier results below do not establish them for this build.
 
 ## Staged session-recovery update, 13 November 2026
 
@@ -324,8 +542,8 @@ identity; they are not promoted to measurements of the SID-fix binary.
 | M2: config and workspaces | All 46 active GlazeWM chords have equivalent moon defaults; none are missing. Real rule fixtures, command parsing, live reload, cloak, restart, public IPC extension and parser fuzzers pass. Sixteen ordinary native regressions include terminated-process liveness, bounded IPC, atomic-replacement sharing, modifier state and border ownership. All 52 defaults route exact command payloads through the live hook without executing daemon effects. Five portable writer tests cover durable barriers, coalescing, error handling and shutdown. A source/data-flow review and 231 saved evidence files found no raw keyboard-event logging or pressed-state dumps; [scope and limits](validation-platform.md#input-logging-evidence) are recorded. | Exercise every binding's resulting behavior with moon as the sole manager. |
 | M3: bar | Pure scene tests, provider probes, native rendering, centered pills, custom theme and default glyphs pass. | Record side-by-side visual parity and the full-process idle/performance measurements. |
 | M4: borders | Pure ring geometry and physical 125% rendering pass; floating native tint is implemented. | Complete physical 100% and 150% scaling and multi-monitor visual checks. |
-| M5: installation | The initial cancellation had verified full rollback. Later accepted attempts failed; the diagnostic retry recorded rollback and a readiness timeout. The latest SID-fix consent cancellation retained code 1223 and recorded `rolled_back_stopped`. [Attempt evidence](installation.md#live-installation-attempts-and-sid-fix) keeps these outcomes separate. | Complete installation and signed runtime verification of the current SID-fix candidate, then verify a running upgrade/rollback. Installation authorization exists; Windows consent is still required for an elevated attempt. |
-| S8: privilege boundary | Medium-integrity IPC succeeds; low-integrity IPC is rejected. | With the installed signed binary, exercise elevated foreground hotkeys/placement and confirm launched applications are medium integrity without UIAccess. |
+| M5: installation | Signed installation and the `ad07642` running upgrade succeeded. The current upgrade preserved its semantic layout/configuration and startup preference, replaced the old daemon lifetime, and passed ordinary backend and actual Settings-click disable/restore startup checks. All five installed native Settings usability checks passed. Earlier cancellations remain failures of their own attempts. | Complete independent native-state preservation/rollback, clean-machine and remaining physical checks, then the installed seven-day sole-manager soak. The high-integrity shortcut-burst approval was canceled before execution and remains pending. |
+| S8: privilege boundary | The earlier installed runtime-fix candidate passed valid signature, Limited startup task, medium IPC, low-integrity refusal and medium/no-UIAccess external launch checks. The current upgrade reports a valid signed UIAccess daemon with elevation disabled. | Exercise actual elevated foreground hotkeys/placement and retain current-build boundary evidence; the high-integrity burst fixture is not yet executed. |
 | M5: clean first run | No-config loading and native sandbox adoption pass. | Run the copied executable on a clean Hyper-V Windows VM with no config and confirm tiling. |
 | M5: seven-day soak | No seven-day observation has elapsed. | Seven consecutive days as the sole manager, no lost windows, recorded uptime and papercuts, no fallback to GlazeWM. |
 
