@@ -6,7 +6,7 @@ default:
 bootstrap:
     rustup target add x86_64-pc-windows-msvc
     cargo install --locked cargo-xwin --version 0.23.1
-    cargo install --locked cargo-deny --version 0.20.2
+    cargo install --locked cargo-deny --version 0.21.0
     cargo install --locked cargo-audit --version 0.23.0
     XWIN_ARCH=x86_64 cargo xwin cache xwin
 

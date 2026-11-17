@@ -72,8 +72,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: cargo install --locked cargo-deny --version 0.20.2
-      - run: cargo install --locked cargo-audit --version 0.23.0
+      - name: Install verified dependency checkers
+        working-directory: ${{ runner.temp }}
+        run: |
+          curl -fsSL --retry 3 -o deny.tar.gz https://github.com/EmbarkStudios/cargo-deny/releases/download/0.21.0/cargo-deny-0.21.0-x86_64-unknown-linux-musl.tar.gz
+          curl -fsSL --retry 3 -o audit.tar.gz https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.23.0/cargo-audit-x86_64-unknown-linux-musl-v0.23.0.tgz
+          echo 'a2170b854ff697e79e39c4c538981c9c1bdd803addbae6719a4cb66b4585a903  deny.tar.gz' | sha256sum --check
+          echo '4f01c74ed84b2dffd0b1d37012a62cdf2a92c96e25bdf8eec7fcc0d4d3eb7811  audit.tar.gz' | sha256sum --check
+          mkdir -p moon-tools
+          tar -xzf deny.tar.gz -C moon-tools --strip-components=1 --wildcards '*/cargo-deny'
+          tar -xzf audit.tar.gz -C moon-tools --strip-components=1 --wildcards '*/cargo-audit'
+          echo "$RUNNER_TEMP/moon-tools" >> "$GITHUB_PATH"
       - run: cargo deny check
       - run: cargo audit
   windows:
