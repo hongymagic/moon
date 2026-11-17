@@ -1,29 +1,60 @@
 name: Check
 on:
   push:
+    branches: [main]
   pull_request:
+    branches: [main]
 permissions:
   contents: read
+
+# Each main push must finish its own checks and release. Superseded PR runs may stop.
+concurrency:
+  group: check-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+
 jobs:
   settings:
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.4
+          bun-version-file: apps/settings/package.json
       - run: bun install --frozen-lockfile
         working-directory: apps/settings
       - run: bun run check && bun run build
         working-directory: apps/settings
-      - run: git diff --exit-code -- apps/settings/dist
+      - name: Verify the bundled Settings assets
+        run: |
+          git diff --exit-code -- apps/settings/dist
+          test -z "$(git ls-files --others --exclude-standard -- apps/settings/dist)"
       - run: bunx playwright install --with-deps chromium --only-shell && bun run test
         working-directory: apps/settings
+      - name: Upload failed browser traces
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: settings-test-results
+          path: |
+            target/settings-browser-results.json
+            target/settings-browser-tests/**/trace.zip
+          retention-days: 7
+          if-no-files-found: ignore
   core:
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt,clippy
+        with:
+          persist-credentials: false
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
@@ -34,15 +65,24 @@ jobs:
           cargo run --locked -q -p moon -- protocol schema > docs/protocol.schema.json
           git diff --exit-code -- docs/config.schema.json docs/config-reference.md docs/protocol.schema.json
       - run: cargo bench -p moon-core --bench reducer --locked
+  dependencies:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - run: cargo install --locked cargo-deny --version 0.20.2
       - run: cargo install --locked cargo-audit --version 0.23.0
       - run: cargo deny check
       - run: cargo audit
   windows:
     runs-on: windows-2025
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: rustup toolchain install 1.99.1 --profile minimal --component clippy
+        with:
+          persist-credentials: false
       # Keep the static CRT setting on target code, away from host proc macros.
       - run: cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc --locked -- -D warnings
       - run: cargo test --workspace --target x86_64-pc-windows-msvc --locked
@@ -50,6 +90,7 @@ jobs:
       - name: Setup ownership and recovery
         shell: powershell
         run: |
+          ./scripts/validate-script-defaults.ps1
           ./scripts/validate-install-recovery.ps1 -ReportPath "$PWD/target/install-recovery-checks.json"
           ./scripts/validate-upgrade-snapshot.ps1 -ReportPath "$PWD/target/upgrade-snapshot-checks.json"
           ./scripts/validate-portable-install.ps1 -ReportPath "$PWD/target/portable-install-checks.json"
@@ -68,27 +109,46 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
-          name: windows-build-and-evidence
+          name: windows-test-results
+          retention-days: 7
           path: |
-            target/x86_64-pc-windows-msvc/release/moon.exe
-            target/x86_64-pc-windows-msvc/release/moon-settings.exe
-            target/x86_64-pc-windows-msvc/release/testwin.exe
             target/integration-results.json
             target/startup-assignment-results.json
             target/carousel-integration-results.json
             target/integration-logs/
             target/install-recovery-checks.json
+            target/upgrade-snapshot-checks.json
+            target/portable-install-checks.json
             target/setup-state-checks.json
             target/startup-preference-checks.json
             target/install-shell-checks.json
-          if-no-files-found: error
+          if-no-files-found: ignore
   fuzz:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     strategy:
+      fail-fast: false
       matrix:
         parser: [config, protocol]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - run: rustup toolchain install nightly-2026-11-10 --profile minimal
       - run: cargo install --locked cargo-fuzz --version 0.13.2
       - run: cargo +nightly-2026-11-10 fuzz run --fuzz-dir crates/moon-core/fuzz ${{ matrix.parser }} -- -max_total_time=30 -max_len=65536
+      - name: Upload a failing fuzz input
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-${{ matrix.parser }}-artifacts
+          path: crates/moon-core/fuzz/artifacts/${{ matrix.parser }}/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [settings, core, dependencies, windows, fuzz]
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release.yml
