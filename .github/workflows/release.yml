@@ -1,0 +1,99 @@
+name: Release
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: windows-2025
+    timeout-minutes: 45
+    # Keep every waiting merge. Default group behavior replaces the pending run.
+    concurrency:
+      group: moon-main-release
+      queue: max
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+      - name: Select release version
+        id: plan
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=$(bun scripts/release-version.ts)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # shellcheck disable=SC2016 # GraphQL declares its own variables.
+          state=$(gh api graphql -f owner="${GITHUB_REPOSITORY%/*}" -f name="${GITHUB_REPOSITORY#*/}" -f tag="$version" \
+            -f query='query($owner:String!, $name:String!, $tag:String!) { repository(owner:$owner, name:$name) { release(tagName:$tag) { isDraft tagCommit { oid } } } }' \
+            --jq '.data.repository.release | if . == null then "new" elif .tagCommit.oid != env.GITHUB_SHA then error("Release belongs to a different commit") elif .isDraft then "draft" else "published" end')
+          echo "state=$state" >> "$GITHUB_OUTPUT"
+      - name: Build release executables
+        if: steps.plan.outputs.state != 'published'
+        shell: bash
+        env:
+          MOON_RELEASE_VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --target x86_64-pc-windows-msvc -p moon -p moon-settings --features moon/uiaccess
+          cargo build --locked --release --target x86_64-pc-windows-msvc -p moon-win --example window_inventory --example recover_windows
+      - name: Package and verify the Windows distribution
+        if: steps.plan.outputs.state != 'published'
+        shell: powershell
+        env:
+          MOON_RELEASE_VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          $build = "$PWD\target\x86_64-pc-windows-msvc\release"
+          .\scripts\package.ps1 -Version $env:MOON_RELEASE_VERSION -OutputDirectory "$PWD\dist" `
+            -Binary "$build\moon.exe" -SettingsBinary "$build\moon-settings.exe" `
+            -InventoryBinary "$build\examples\window_inventory.exe" -RecoveryBinary "$build\examples\recover_windows.exe"
+      - name: Publish verified release assets
+        if: steps.plan.outputs.state != 'published'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.plan.outputs.version }}
+          RELEASE_STATE: ${{ steps.plan.outputs.state }}
+        run: |
+          set -euo pipefail
+          ref="refs/tags/$VERSION"
+          if ! git show-ref --verify --quiet "$ref"; then
+            # Create-only reservation after verification. A competing tag fails closed.
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="$ref" -f sha="$GITHUB_SHA" --silent
+          fi
+          # Check the remote object itself before touching draft assets.
+          # shellcheck disable=SC2016
+          remote_sha=$(gh api graphql -f owner="${GITHUB_REPOSITORY%/*}" -f name="${GITHUB_REPOSITORY#*/}" -f rev="$ref^{commit}" \
+            -f query='query($owner:String!, $name:String!, $rev:String!) { repository(owner:$owner, name:$name) { object(expression:$rev) { oid } } }' \
+            --jq '.data.repository.object.oid')
+          [[ "$remote_sha" == "$GITHUB_SHA" ]]
+          if [[ "$RELEASE_STATE" == new ]]; then
+            gh release create "$VERSION" --draft --verify-tag --target "$GITHUB_SHA" --title "Moon $VERSION" --generate-notes
+          fi
+          name="moon-$VERSION-windows-x64"
+          cd dist
+          files=("$name.zip" "$name.zip.sha256" "$name.manifest.json")
+          gh release upload "$VERSION" "${files[@]}" --clobber
+          sha256sum --binary "${files[@]}" | sort > expected.sha256
+          gh release view "$VERSION" --json assets --jq '.assets[] | "\(.digest | ltrimstr("sha256:")) *\(.name)"' | sort > uploaded.sha256
+          diff -u expected.sha256 uploaded.sha256
+
+          # A slower CI run may publish an older merge after its descendant.
+          # shellcheck disable=SC2016
+          latest=$(gh api graphql -f owner="${GITHUB_REPOSITORY%/*}" -f name="${GITHUB_REPOSITORY#*/}" \
+            -f query='query($owner:String!, $name:String!) { repository(owner:$owner, name:$name) { latestRelease { tagCommit { oid } } } }' \
+            --jq '.data.repository.latestRelease.tagCommit.oid // empty')
+          promote=true
+          if [[ -n "$latest" ]] && git merge-base --is-ancestor "$GITHUB_SHA" "$latest"; then promote=false; fi
+          gh release edit "$VERSION" --draft=false --latest="$promote"

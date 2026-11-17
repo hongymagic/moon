@@ -5,11 +5,17 @@ use std::{env, fs, path::Path};
 pub fn embed(binary: &str, display_name: &str, manifest_path: &str, uiaccess: bool) {
     println!("cargo:rerun-if-changed={manifest_path}");
     println!("cargo:rerun-if-changed=../windows-resources.rs");
+    println!("cargo::rerun-if-env-changed=MOON_RELEASE_VERSION");
+    let version = env::var("MOON_RELEASE_VERSION")
+        .unwrap_or_else(|_| env::var("CARGO_PKG_VERSION").expect("package version"));
+    let [year, month, day, build] = version_numbers(&version);
+    println!("cargo::rustc-env=MOON_VERSION={version}");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
     let source = fs::read_to_string(manifest_path).expect("read Windows manifest");
     let manifest = source
+        .replace("@ASSEMBLY_VERSION@", &format!("{year}.{month}.{day}.{build}"))
         .replace("@UIACCESS@", if uiaccess { "true" } else { "false" })
         .replace("name=\"moon\"", &format!("name=\"{binary}\""))
         .replace("moon window manager", display_name);
@@ -24,7 +30,6 @@ pub fn embed(binary: &str, display_name: &str, manifest_path: &str, uiaccess: bo
             append_icon(&mut resource, group, image_id, &fs::read(path).expect("read brand icon"))
                 .expect("valid brand ICO");
     }
-    let version = env::var("CARGO_PKG_VERSION").expect("package version");
     append(&mut resource, 16, 1, &version_info(binary, display_name, &version));
     let path = Path::new(&env::var_os("OUT_DIR").expect("OUT_DIR")).join(format!("{binary}.res"));
     fs::write(&path, resource).expect("write Windows resources");
@@ -100,11 +105,29 @@ fn block(key: &str, value: &[u8], text: bool, children: &[Vec<u8>]) -> Vec<u8> {
     bytes[..2].copy_from_slice(&len.to_le_bytes());
     bytes
 }
+// VERSIONINFO and assembly identities encode four unsigned 16-bit numbers.
+// Keep the exact CalVer string (including zero padding and '-') for display.
+fn version_numbers(version: &str) -> [u16; 4] {
+    let mut parts = version.split(['.', '-']);
+    let mut number = || {
+        parts
+            .next()
+            .expect("three version components")
+            .parse::<u16>()
+            .expect("numeric version component")
+    };
+    let numbers = [
+        number(),
+        number(),
+        number(),
+        parts.next().map_or(0, |value| value.parse().expect("numeric build number")),
+    ];
+    assert!(parts.next().is_none(), "at most four version components");
+    numbers
+}
+
 fn version_info(binary: &str, name: &str, version: &str) -> Vec<u8> {
-    let mut numbers = [0u16; 4];
-    for (number, part) in numbers.iter_mut().zip(version.split('.')) {
-        *number = part.parse().expect("numeric release version");
-    }
+    let numbers = version_numbers(version);
     let high = u32::from(numbers[0]) << 16 | u32::from(numbers[1]);
     let low = u32::from(numbers[2]) << 16 | u32::from(numbers[3]);
     let fixed = [0xfeef04bdu32, 0x10000, high, low, high, low, 0x3f, 0, 0x40004, 1, 0, 0, 0]
@@ -162,6 +185,15 @@ mod tests {
         }
         assert!(append_icon(&mut Vec::new(), 101, 1001, &icon[..40]).is_err());
     }
+    #[test]
+    fn calver_has_numeric_windows_components_and_preserves_display_spelling() {
+        let tag = "2026.01.02-10";
+        assert_eq!(version_numbers(tag), [2026, 1, 2, 10]);
+        assert_eq!(version_numbers("0.1.0"), [0, 1, 0, 0]);
+        let resource = version_info("moon", "Moon", tag);
+        assert!(resource.windows(utf16(tag).len()).any(|bytes| bytes == utf16(tag)));
+    }
+
     #[test]
     fn version_has_fixed_numbers_and_unicode_product_identity() {
         let version = version_info("moon-settings", "Moon Settings", "0.1.0");

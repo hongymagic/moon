@@ -1753,7 +1753,7 @@ pub fn doctor(options: &Options, words: &[String]) -> Result<()> {
     }
     let _ = platform::enable_dpi_awareness();
     let config = load_config(options);
-    let report = json!({"version":env!("CARGO_PKG_VERSION"),"session":runtime::session_id()?,"token":platform::token_capabilities(process::id())?,"config_path":config_path(options),"config_valid":config.is_ok(),"config_error":config.err().map(|e|format!("{e:#}")),"competing_managers":competing_managers()?,"monitors":platform::monitors()?,"manageable_windows":platform::enumerate_windows()?,"resources":runtime::resource_stats()?,"journal_exists":journal::default_path().exists(),"uiaccess_build":cfg!(feature="uiaccess")});
+    let report = json!({"version":env!("MOON_VERSION"),"session":runtime::session_id()?,"token":platform::token_capabilities(process::id())?,"config_path":config_path(options),"config_valid":config.is_ok(),"config_error":config.err().map(|e|format!("{e:#}")),"competing_managers":competing_managers()?,"monitors":platform::monitors()?,"manageable_windows":platform::enumerate_windows()?,"resources":runtime::resource_stats()?,"journal_exists":journal::default_path().exists(),"uiaccess_build":cfg!(feature="uiaccess")});
     if words.is_empty() {
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());

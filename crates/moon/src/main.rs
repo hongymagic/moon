@@ -57,7 +57,7 @@ fn run(options: Options, words: Vec<String>) -> Result<()> {
     let first = words.first().map(String::as_str).unwrap_or("start");
     match first {
         "help" | "--help" | "-h" => print_help(),
-        "version" | "--version" | "-V" => println!("moon {}", env!("CARGO_PKG_VERSION")),
+        "version" | "--version" | "-V" => println!("moon {}", env!("MOON_VERSION")),
         "config" => config_command(&options, &words[1..])?,
         "protocol" if words.get(1).is_some_and(|word| word == "schema") => {
             println!("{}", serde_json::to_string_pretty(&moon_core::protocol::schema())?)
@@ -338,7 +338,7 @@ moon exec COMMAND            Launch through the ordinary desktop shell\n\n\
 Use --config PATH to select a config file. No file is required.\n\
 Place moon options before exec; arguments after exec belong to the application.\n\
 Emergency recovery: Ctrl+Alt+Shift+F12.",
-        env!("CARGO_PKG_VERSION")
+        env!("MOON_VERSION")
     );
 }
 

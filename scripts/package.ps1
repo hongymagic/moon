@@ -8,7 +8,7 @@ param(
     [Parameter(Mandatory,ParameterSetName='Binaries')][string]$RecoveryBinary,
     [Parameter(Mandatory,ParameterSetName='Staged')][string]$StageDirectory,
     [Parameter(Mandatory)][string]$OutputDirectory,
-    [Parameter(Mandatory)][ValidatePattern('^[0-9]+\.[0-9]+\.[0-9]+$')][string]$Version,
+    [Parameter(Mandatory)][ValidatePattern('\A(?:[0-9]+\.[0-9]+\.[0-9]+|[0-9]{4}\.[0-9]{2}\.[0-9]{2}-(?:0|[1-9][0-9]*))\z')][string]$Version,
     [switch]$Development
 )
 Set-StrictMode -Version Latest
@@ -60,6 +60,8 @@ foreach($file in @('examples/workspace-state.ps1','examples/README.md')) {
 foreach($document in Get-ChildItem -LiteralPath (Join-Path $repository 'docs') -File) {
     if($document.Extension -in @('.md','.json')){$sources['docs/'+$document.Name]=$document.FullName}
 }
+$sources['LICENSE']=Join-Path $repository 'LICENSE'
+$sources['licenses/Symbols-NOTICES.txt']=Join-Path $repository 'crates/moon-win/assets/Symbols-NOTICES.txt'
 $sources['licenses/Symbols-LICENSE.txt']=Join-Path $repository 'crates/moon-win/assets/Symbols-LICENSE.txt'
 $sources['moon.exe']=$Binary
 $sources['moon-settings.exe']=$SettingsBinary

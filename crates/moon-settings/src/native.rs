@@ -148,7 +148,7 @@ fn runtime() -> Value {
     }
 }
 fn data(snapshot: Snapshot, path: &std::path::Path, runtime: Value) -> Value {
-    json!({"snapshot":snapshot,"path":path,"version":env!("CARGO_PKG_VERSION"),"runtime":runtime})
+    json!({"snapshot":snapshot,"path":path,"version":env!("MOON_VERSION"),"runtime":runtime})
 }
 fn same_path(a: &str, b: &std::path::Path) -> bool {
     let a = fs::canonicalize(a).unwrap_or_else(|_| PathBuf::from(a));

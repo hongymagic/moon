@@ -1,5 +1,18 @@
 # Windows distribution package
 
+GitHub Actions publishes a Windows x64 release after a push to `main` passes CI.
+The tag uses `YYYY.MM.DD-n`, with the date in Australia/Sydney when the
+release job selects its version. The first release that day starts at `0`.
+The ZIP, manifest, checksum, Windows product/file versions and Moon CLI use
+the same version. Local builds default to the Cargo workspace version.
+
+The release queue serializes version selection and publication. Packaging verifies
+the ZIP before the job creates its Git tag. A rerun reuses the tag for that commit,
+finishes a pending draft and compares the uploaded asset names and SHA-256
+digests to the local files before publishing. A completed release is skipped on
+reruns. If CI finishes out of merge order, the newest released commit on
+`main` retains GitHub's **Latest** designation.
+
 `scripts/package.ps1` packages already-built, explicitly selected executables.
 It never launches them, builds Rust code, requests elevation, changes certificate
 stores, or installs Moon. Run it using Windows PowerShell 5.1 or newer:
