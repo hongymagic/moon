@@ -5,7 +5,7 @@ import "./globals.css";
 
 const title = "Moon — Tiling window manager for Windows 11";
 const description =
-  "Give every window a place. Download Moon for Windows 11, try the keyboard controls, and set up your first tiled workspace.";
+  "Moon arranges your windows as you open apps on Windows 11. Download the x64 ZIP or try the keyboard shortcuts in your browser.";
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://moon.hongy.dev"),
