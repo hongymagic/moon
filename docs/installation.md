@@ -2,8 +2,12 @@
 
 ## Guided setup
 
-The complete Windows package includes **Install Moon.cmd**. Open it from the
-ordinary Windows account that will use Moon. The setup window offers one install
+Download `moon-<version>-windows-x64-setup.exe` and double-click it in File
+Explorer from the Windows account where you’ll use Moon. To update, open the
+newer installer the same way. [Download Moon for Windows](https://moon.hongy.dev/download)
+
+If you chose the ZIP, use **Extract All** and open **Install Moon.cmd** in the
+extracted folder. Both downloads open the same setup window. It offers one install
 action, explains the Windows approval prompt, reports progress and ends with
 **Open Settings**. A first installation uses the existing controlled desktop
 handover; an update preserves the active window layout. Cancellation requests a
@@ -174,8 +178,9 @@ Build the installation candidate from WSL:
 cargo xwin build -p moon --features uiaccess --release --target x86_64-pc-windows-msvc --locked
 ```
 
-After development probes have exited, stage the complete verified package outside
-AppData and open **Install Moon.cmd** from File Explorer. For development builds,
+After development probes have exited, open the verified setup EXE from Downloads
+in File Explorer. If you’re using the ZIP, extract it outside AppData and open
+**Install Moon.cmd** from the extracted folder. For development builds,
 `just install` and `just handover` use `scripts/launch-from-explorer.ps1` to reach
 the existing Explorer desktop before invoking setup. Both the caller and worker
 must be ordinary processes in the same Windows account and session. The helper

@@ -29,7 +29,7 @@ function DownloadLink() {
   return (
     <a className="download-button" href="/download">
       <ArrowDownToLine size={18} />
-      Download for Windows
+      Download installer
     </a>
   );
 }
@@ -105,7 +105,7 @@ export default function Home() {
                 </a>
               </div>
               <div className="platform-info">
-                <Monitor size={14} /> Windows 11 x64 <span>·</span> ZIP download
+                <Monitor size={14} /> Windows 11 x64 <span>·</span> Guided setup
               </div>
             </div>
             <LunarPlate />
@@ -126,16 +126,16 @@ export default function Home() {
               <ol className="setup-steps">
                 <li>
                   <p>
-                    Download the <a href="/download">Windows x64 ZIP</a>.
-                    Right-click it in File Explorer and choose{" "}
-                    <strong>Extract All</strong>.
+                    Download the <a href="/download">Windows installer</a> and
+                    open the setup EXE. If you have the{" "}
+                    <a href="/download?format=zip">ZIP package</a>, choose{" "}
+                    <strong>Extract All</strong> in File Explorer, then open{" "}
+                    <strong>Install Moon.cmd</strong> in the extracted folder.
                   </p>
                 </li>
                 <li>
                   <p>
-                    In the extracted folder, double-click{" "}
-                    <strong>Install Moon.cmd</strong>. Choose{" "}
-                    <strong>Install Moon</strong> and approve the Windows
+                    Choose <strong>Install Moon</strong> and approve the Windows
                     prompt.
                   </p>
                 </li>

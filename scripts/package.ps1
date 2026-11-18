@@ -1,5 +1,5 @@
 # Build a validated distribution from explicit, already-built Windows executables.
-# This script never starts an executable, requests elevation, or changes installation state.
+# The build runs the Windows compiler. It never starts Moon or requests elevation.
 [CmdletBinding(DefaultParameterSetName='Binaries')]
 param(
     [Parameter(Mandatory,ParameterSetName='Binaries')][string]$Binary,
@@ -214,7 +214,10 @@ $finalStage=Join-Path $OutputDirectory $name
 $finalZip=Join-Path $OutputDirectory ($name+'.zip')
 $finalManifest=Join-Path $OutputDirectory ($name+'.manifest.json')
 $finalChecksum=Join-Path $OutputDirectory ($name+'.zip.sha256')
-foreach($path in @($finalStage,$finalZip,$finalManifest,$finalChecksum)) {
+$finalInstaller=Join-Path $OutputDirectory ($name+'-setup.exe')
+$outputs=@($finalStage,$finalZip,$finalManifest,$finalChecksum)
+if(!$Development){$outputs+=@($finalInstaller,($finalInstaller+'.sha256'))}
+foreach($path in $outputs) {
     if(Test-Path -LiteralPath $path){throw "Package output already exists; choose another output directory: $path"}
 }
 $temporary=Join-Path $OutputDirectory ('.moon-package-'+[guid]::NewGuid().ToString('N'))
@@ -282,7 +285,7 @@ creation itself does not install, sign, start, or trust any application.
     foreach($file in $files){$expected[$file.path]=$file.sha256}
     $expected['package-manifest.json']=(Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
     [string[]]$entries=@($expected.Keys);[Array]::Sort($entries,[StringComparer]::Ordinal)
-    $zipPath=Join-Path $temporary 'package.zip'
+    $zipPath=Join-Path $temporary ($name+'.zip')
     $zip=[IO.Compression.ZipFile]::Open($zipPath,[IO.Compression.ZipArchiveMode]::Create)
     try {
         foreach($file in $entries) {
@@ -312,11 +315,17 @@ creation itself does not install, sign, start, or trust any application.
     $checksumPath=Join-Path $temporary 'package.sha256'
     [IO.File]::WriteAllText($checksumPath,($zipHash+'  '+[IO.Path]::GetFileName($finalZip)+"`n"),$utf8)
     $outsideManifest=Join-Path $temporary 'manifest.json';[IO.File]::Copy($manifestPath,$outsideManifest)
+    $filesToPublish=@(@($zipPath,$finalZip),@($outsideManifest,$finalManifest),@($checksumPath,$finalChecksum))
+    if(!$Development) {
+        $setup=& (Join-Path $PSScriptRoot 'build-setup-exe.ps1') -ArchivePath $zipPath -Version $Version -OutputDirectory $temporary
+        $filesToPublish+=@(@($setup.installer,$finalInstaller),@($setup.checksum,($finalInstaller+'.sha256')))
+    }
     [IO.Directory]::Move($payload,$finalStage);$published.Add($finalStage)
-    foreach($pair in @(@($zipPath,$finalZip),@($outsideManifest,$finalManifest),@($checksumPath,$finalChecksum))) {
+    foreach($pair in $filesToPublish) {
         [IO.File]::Move($pair[0],$pair[1]);$published.Add($pair[1])
     }
     $report=[pscustomobject]@{kind=$mode;version=$Version;directory=$finalStage;archive=$finalZip;manifest=$finalManifest;checksum=$finalChecksum;sha256=$zipHash;payload_files=$files.Count;archive_verified=$true;cleanup_leftovers=@()}
+    if(!$Development){$report | Add-Member -NotePropertyMembers @{installer=$finalInstaller;installer_checksum=($finalInstaller+'.sha256');installer_sha256=$setup.sha256}}
 } catch {
     $primaryError=$_
     foreach($path in $published) {

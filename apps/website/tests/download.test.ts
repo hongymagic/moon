@@ -5,39 +5,79 @@ import { GET } from "../app/download/route";
 const releases = "https://github.com/hongymagic/moon/releases";
 const fallback = `${releases}/latest`;
 
-function publishedRelease(tag: string) {
-  const name = `moon-${tag}-windows-x64.zip`;
+function publishedRelease(tag: string, suffixes = [".zip", "-setup.exe"]) {
   return {
     tag_name: tag,
     draft: false,
     prerelease: false,
-    assets: [
-      {
+    assets: suffixes.map((suffix) => {
+      const name = `moon-${tag}-windows-x64${suffix}`;
+      return {
         name,
         state: "uploaded",
         browser_download_url: `${releases}/download/${tag}/${name}`,
-      },
-    ],
+      };
+    }),
   };
+}
+
+function download(query = "") {
+  return GET(new Request(`https://moon.hongy.dev/download${query}`));
 }
 
 afterEach(() => mock.restoreAll());
 
-test("redirects to the Windows ZIP for each new release", async () => {
+test("prefers the setup EXE and honours explicit ZIP downloads", async () => {
   for (const tag of ["2026.11.18-0", "2027.01.02-14"]) {
     const release = publishedRelease(tag);
     const upstream = mock.method(globalThis, "fetch", async () =>
       Response.json(release),
     );
-    const response = await GET();
+    const response = await download();
     assert.equal(response.status, 307);
     assert.equal(
       response.headers.get("Location"),
-      release.assets[0].browser_download_url,
+      release.assets[1].browser_download_url,
     );
     assert.equal(response.headers.get("Cache-Control"), "no-store");
+    assert.equal(
+      (await download("?format=zip")).headers.get("Location"),
+      release.assets[0].browser_download_url,
+    );
     upstream.mock.restore();
   }
+});
+
+test("serves the ZIP for older releases and incomplete installer uploads", async () => {
+  const release = publishedRelease("2026.11.18-2");
+  const [zip, exe] = release.assets;
+  for (const assets of [
+    [zip],
+    [zip, { ...exe, state: "starter" }],
+    [zip, { ...exe, browser_download_url: "https://example.com/setup.exe" }],
+  ]) {
+    const upstream = mock.method(globalThis, "fetch", async () =>
+      Response.json({ ...release, assets }),
+    );
+    assert.equal(
+      (await download()).headers.get("Location"),
+      zip.browser_download_url,
+    );
+    upstream.mock.restore();
+  }
+});
+
+test("uses the release page if an explicitly requested ZIP is unavailable", async () => {
+  const release = publishedRelease("2026.11.18-3", ["-setup.exe"]);
+  mock.method(globalThis, "fetch", async () => Response.json(release));
+  assert.equal(
+    (await download()).headers.get("Location"),
+    release.assets[0].browser_download_url,
+  );
+  assert.equal(
+    (await download("?format=zip")).headers.get("Location"),
+    fallback,
+  );
 });
 
 test("uses the release page for invalid tags, missing assets, and unexpected URLs", async () => {
@@ -61,7 +101,7 @@ test("uses the release page for invalid tags, missing assets, and unexpected URL
     const upstream = mock.method(globalThis, "fetch", async () =>
       Response.json(data),
     );
-    assert.equal((await GET()).headers.get("Location"), fallback);
+    assert.equal((await download()).headers.get("Location"), fallback);
     upstream.mock.restore();
   }
 });
@@ -75,7 +115,7 @@ test("uses the release page when GitHub is unavailable or returns invalid JSON",
     },
   ]) {
     const upstream = mock.method(globalThis, "fetch", async () => reply());
-    assert.equal((await GET()).headers.get("Location"), fallback);
+    assert.equal((await download()).headers.get("Location"), fallback);
     upstream.mock.restore();
   }
 });

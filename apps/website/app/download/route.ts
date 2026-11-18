@@ -9,7 +9,7 @@ type Release = {
   assets?: unknown;
 };
 
-async function windowsDownload(): Promise<string | undefined> {
+async function windowsDownload(zipOnly: boolean): Promise<string | undefined> {
   const response = await fetch(latestReleaseApi, {
     headers: {
       Accept: "application/vnd.github+json",
@@ -33,22 +33,26 @@ async function windowsDownload(): Promise<string | undefined> {
     return;
   }
 
-  const name = `moon-${tag}-windows-x64.zip`;
-  const url = `${releases}/download/${tag}/${name}`;
-  if (
-    release.assets.some(
-      (asset) =>
-        asset?.state === "uploaded" &&
-        asset.name === name &&
-        asset.browser_download_url === url,
-    )
-  ) {
-    return url;
+  const suffixes = zipOnly ? [".zip"] : ["-setup.exe", ".zip"];
+  for (const suffix of suffixes) {
+    const name = `moon-${tag}-windows-x64${suffix}`;
+    const url = `${releases}/download/${tag}/${name}`;
+    if (
+      release.assets.some(
+        (asset) =>
+          asset?.state === "uploaded" &&
+          asset.name === name &&
+          asset.browser_download_url === url,
+      )
+    ) {
+      return url;
+    }
   }
 }
 
-export async function GET(): Promise<Response> {
-  const download = await windowsDownload().catch(() => undefined);
+export async function GET(request: Request): Promise<Response> {
+  const zipOnly = new URL(request.url).searchParams.get("format") === "zip";
+  const download = await windowsDownload(zipOnly).catch(() => undefined);
   return new Response(null, {
     status: 307,
     headers: {

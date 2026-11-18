@@ -3,6 +3,7 @@ param([string]$ReportPath)
 . (Join-Path $PSScriptRoot 'install-common.ps1')
 $checks=[Collections.Generic.List[string]]::new()
 $temporary=Join-Path ([IO.Path]::GetTempPath()) ('moon-setup-check-'+[guid]::NewGuid().ToString('N'))
+$standaloneRoot=$temporary
 [void][IO.Directory]::CreateDirectory($temporary)
 $operation=[guid]::NewGuid().ToString('N')
 try {
@@ -257,6 +258,7 @@ function Start-Process {
         function Show-MoonSetupProblem {param($Message,$Failure) $script:setupReportedProblem=$Message;$ui.Status.Text=$Message}
         function Start-Process {param($FilePath,$ArgumentList,$WindowStyle,$RedirectStandardOutput,$RedirectStandardError,[switch]$PassThru) $script:setupWorkerArguments=$ArgumentList;$child=[pscustomobject]@{HasExited=$false;ExitCode=0};$child|Add-Member ScriptMethod Dispose {};return $child}
         . $primaryHandler
+        if (!(Test-Path -LiteralPath $context.workerMarker)) {throw 'Standalone setup did not retain the worker payload.'}
         if(!$context.busy -or $context.outcome -or $context.status -ne 'working' -or !$ui.Secondary.IsEnabled -or $ui.Details.Visibility -ne 'Collapsed' -or $script:setupWorkerArguments -notlike '*-KeepPreviousDesktopStopped*' -or $script:setupWorkerArguments -notlike ('*-PortableBinary '+(ConvertTo-MoonArgument $PortableBinary)+'*')){throw 'Actual retry did not reset stale UI state or forward no-fallback.'}
         if([IO.File]::ReadAllText($oldLog) -ne 'earlier diagnostics'){throw 'Retry deleted earlier diagnostics.'}
         $checks.Add('Actual guided retry resets stale controls/outcome, retains diagnostic history and forwards no-fallback plus the selected portable copy')
@@ -264,12 +266,14 @@ function Start-Process {
         $script:setupFixtureStatus=[pscustomobject]@{operation=$context.operation;status='cancelled';message='Moon setup was rolled back. Your previous desktop remains stopped.'}
         $context.process.HasExited=$true;$context.process.ExitCode=1223
         . $tickHandler
+        if ((Test-Path -LiteralPath $context.workerMarker) -or $context.exitCode -ne 1223) {throw 'Standalone cancellation did not release the worker payload and preserve its exit code.'}
         if($context.busy -or $ui.Status.Text -ne $script:setupFixtureStatus.message -or $ui.Primary.Content -ne 'Try again'){throw 'Cancellation replaced the actual desktop recovery outcome.'}
         $checks.Add('Actual cancellation completion preserves the accurate previous-desktop-stopped outcome')
         $context.busy=$true;$context.detail=Join-Path $temporary 'missing-directory\failure.log'
         $context.process=[pscustomobject]@{HasExited=$true;ExitCode=1};$context.process|Add-Member ScriptMethod Dispose {}
         $script:setupFixtureStatus=[pscustomobject]@{operation=$context.operation;status='failed';message='Setup could not finish.';detail='Failure details'}
         . $tickHandler
+        if ($context.exitCode -ne 1) {throw 'Standalone setup lost its failed worker exit code.'}
         if($context.busy -or !$ui.Primary.IsEnabled -or $ui.Details.Visibility -ne 'Visible' -or $ui.Status.Text -ne $script:setupFixtureStatus.message){throw 'Diagnostic append failure left setup apparently busy or prevented retry.'}
         $checks.Add('Actual failed completion remains actionable when diagnostics cannot be appended')
         $context.done=$true;$Mode='Install'
@@ -323,6 +327,7 @@ function Start-Process {
         }
         $body=$removed.Extent.Text;. ([scriptblock]::Create($body.Substring(1,$body.Length-2)))
         $body=$loaded.Arguments[0].ScriptBlock.Extent.Text;. ([scriptblock]::Create($body.Substring(1,$body.Length-2)))
+        if (!(Test-Path -LiteralPath (Join-Path $standaloneRoot '.moon-setup-visible'))) {throw 'Standalone setup did not record that its window opened.'}
         if(!$context.done -or $ui.Promise.Text -ne '' -or $ui.Promise.Visibility -ne 'Collapsed' -or $ui.Secondary.Visibility -ne 'Collapsed' -or $ui.Primary.Content -ne 'Done' -or !$ui.Primary.IsDefault -or !$ui.Primary.IsCancel -or !$ui.Primary.focused -or $ui.Secondary.focused){throw 'Already-removed setup did not present a single focused Done action without a startup promise.'}
         $checks.Add('Actual already-removed state hides the startup promise and duplicate action, with Done focused for Enter and Escape')
     }
