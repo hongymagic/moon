@@ -79,10 +79,14 @@ try {
         function Read-MoonSetupStatus {param($OperationId) throw [IO.IOException]::new('Injected unreadable progress')}
         $process=[pscustomobject]@{HasExited=$true;ExitCode=1};$process|Add-Member ScriptMethod Dispose {}
         $timer=[pscustomobject]@{stopped=$false};$timer|Add-Member ScriptMethod Stop {$this.stopped=$true}
-        $context=@{busy=$true;process=$process;operation=$operation;status='working';outcome=$null}
+        $standaloneRoot=$temporary
+        $marker=Join-Path $standaloneRoot ('.moon-setup-worker-'+$operation)
+        [IO.File]::WriteAllText($marker,'')
+        $context=@{busy=$true;process=$process;operation=$operation;status='working';outcome=$null;workerMarker=$marker}
         $ui=@{};foreach($name in @('Status','Progress','Primary','Secondary','Details')){$ui[$name]=[pscustomobject]@{Text='';Visibility='';IsEnabled=$false;Content='';IsCancel=$false}}
         . $completion
         if ($context.busy -or $context.process -or !$timer.stopped -or !$ui.Primary.IsEnabled -or $ui.Details.Visibility -ne 'Visible') {throw 'Unreadable progress prevented the setup UI from handling worker exit.'}
+        if ($context.exitCode -ne 1 -or ![IO.File]::Exists($marker)) {throw 'Unreadable progress must preserve the failed exit code and retain the source for the unfinished operation.'}
     }
     $checks.Add('Actual setup completion handler handles worker failure even when progress cannot be read')
 
