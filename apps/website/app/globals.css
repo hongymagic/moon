@@ -3,7 +3,7 @@
   --night: #121311;
   --paper: #f7f5ef;
   --copper: #ffab79;
-  --muted: #565850;
+  --muted: #50524a;
   --line: #d6d6ca;
   --mono: var(--font-geist-mono), monospace;
   --sans: var(--font-geist-sans), "Segoe UI", sans-serif;
@@ -13,7 +13,6 @@
   box-sizing: border-box;
 }
 html {
-  scroll-behavior: smooth;
   scroll-padding-top: 24px;
 }
 body {
@@ -48,12 +47,21 @@ a:focus-visible,
 button:focus-visible,
 summary:focus-visible,
 [tabindex="0"]:focus-visible {
-  outline: 3px solid #bc672b;
+  outline: 3px solid #985021;
   outline-offset: 4px;
 }
 img {
   display: block;
   max-width: 100%;
+}
+.masthead :focus-visible,
+.hero :focus-visible,
+.navigation-section :focus-visible,
+footer :focus-visible {
+  outline-color: #ffb785;
+}
+.screen-preview:focus-visible {
+  outline-color: #512b17;
 }
 ::selection {
   background: #ffc29b;
@@ -102,6 +110,9 @@ footer {
 .footer-links a {
   display: inline-flex;
   align-items: center;
+}
+.home-link {
+  min-height: 44px;
 }
 .wordmark {
   gap: 8px;
@@ -239,7 +250,7 @@ h1 em {
   margin-top: 17px;
 }
 .platform-info span {
-  color: #76796d;
+  color: #8e9285;
 }
 .platform-info {
   display: flex;
