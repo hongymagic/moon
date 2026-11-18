@@ -1,0 +1,27 @@
+{
+  "name": "@moon/website",
+  "version": "1.0.0",
+  "private": true,
+  "packageManager": "bun@1.4.4",
+  "scripts": {
+    "dev": "bun run --bun next dev",
+    "build": "bun run --bun next build",
+    "start": "bun run --bun next start",
+    "check": "next typegen && tsc --noEmit"
+  },
+  "dependencies": {
+    "@ui-sdk/core": "0.1.0-beta.8",
+    "@ui-sdk/react": "0.1.0-beta.8",
+    "geist": "1.9.2",
+    "lucide-react": "1.74.0",
+    "next": "16.4.6",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.6",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "typescript": "7.0.2"
+  }
+}

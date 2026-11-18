@@ -1,0 +1,442 @@
+.moon-demo {
+  --demo-ink: #eeebe5;
+  --demo-muted: #b9b6b0;
+  --demo-orange: #fe9d68;
+  --demo-mono: var(--font-geist-mono, "Cascadia Code"), Consolas, monospace;
+  container-type: inline-size;
+  min-width: 0;
+  color: var(--demo-ink);
+  font-family: var(--font-geist-sans, "Segoe UI"), sans-serif;
+  text-align: left;
+}
+
+.moon-demo :where(*, *::before, *::after) {
+  box-sizing: border-box;
+}
+.moon-demo [hidden] {
+  display: none !important;
+}
+.moon-demo button {
+  font: inherit;
+  cursor: pointer;
+}
+.moon-demo :where(button, [role="tabpanel"]):focus-visible {
+  outline: 2px solid var(--demo-orange);
+  outline-offset: 3px;
+}
+
+.moon-demo .md-tabs {
+  display: inline-flex;
+  gap: 2px;
+  margin: 0 0 14px;
+  padding: 3px;
+  border: 1px solid #42413d;
+  border-radius: 8px;
+  background: #242423;
+}
+.moon-demo .md-tabs button {
+  min-height: 44px;
+  padding: 0 20px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #cfccc6;
+  font-size: 13px;
+  font-weight: 550;
+}
+.moon-demo .md-tabs button:hover {
+  color: #fffaf2;
+  background: #343431;
+}
+.moon-demo .md-tabs button[aria-selected="true"] {
+  background: #f1eae0;
+  color: #272521;
+}
+
+.moon-demo .md-desktop {
+  position: relative;
+  height: clamp(213px, 44cqw, 335px);
+  overflow: hidden;
+  border: 1px solid #414042;
+  border-radius: 9px;
+  background:
+    radial-gradient(ellipse at 18% 115%, #6c5046 0, transparent 58%),
+    linear-gradient(125deg, #393637 2%, #3d3c42 42%, #313540 80%, #292b32);
+  box-shadow: 0 9px 22px #0002;
+  font-family: var(--demo-mono);
+  user-select: none;
+}
+.moon-demo .md-bar {
+  display: flex;
+  align-items: center;
+  gap: clamp(4px, 1cqw, 8px);
+  height: clamp(24px, 4.8cqw, 34px);
+  padding: 0 clamp(7px, 1.5cqw, 12px);
+  background: #141417;
+  color: #dedbd3;
+  font-size: clamp(8px, 1.35cqw, 11px);
+}
+.moon-demo .md-crescent {
+  margin-right: 1px;
+  color: #d38b65;
+  font-size: 1.7em;
+  line-height: 1;
+}
+.moon-demo .md-spaces,
+.moon-demo .md-providers,
+.moon-demo .md-bar-center {
+  display: flex;
+  gap: 3px;
+  align-items: center;
+}
+.moon-demo .md-spaces > span,
+.moon-demo .md-bar-center span,
+.moon-demo .md-providers span {
+  padding: 0.3em 0.52em;
+  border-radius: 3px;
+  background: #202024;
+  line-height: 1.12;
+}
+.moon-demo .md-spaces > span {
+  position: relative;
+  min-width: 1.65em;
+  color: #d59776;
+  text-align: center;
+}
+.moon-demo .md-spaces > span[data-active="true"] {
+  background: #d17a4f;
+  color: #171417;
+}
+.moon-demo .md-spaces > span[data-active="true"]::after {
+  position: absolute;
+  right: 28%;
+  bottom: 1px;
+  left: 28%;
+  height: 1px;
+  background: #532b1e;
+  content: "";
+}
+.moon-demo .md-bar-center {
+  flex: 1;
+  justify-content: center;
+  min-width: 0;
+}
+.moon-demo .md-bar-center span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.moon-demo .md-providers span:first-child {
+  color: #d9956c;
+}
+.moon-demo .md-providers span:last-child {
+  color: #b8a46e;
+  font-size: 0.85em;
+}
+
+.moon-demo .md-tiles {
+  --tile-gap: clamp(6px, 1.5cqw, 12px);
+  position: absolute;
+  inset: clamp(35px, 7.5cqw, 55px) clamp(9px, 2.8cqw, 24px)
+    clamp(11px, 2.8cqw, 24px);
+  animation: moon-demo-enter 0.23s ease-out;
+}
+.moon-demo .md-tile {
+  position: absolute;
+  inset: 0 auto 0 0;
+  display: flex;
+  flex-direction: column;
+  width: calc((100% - var(--tile-gap)) / 2);
+  overflow: hidden;
+  border: clamp(2px, 0.37cqw, 3px) solid #39393c;
+  border-radius: 7px;
+  background: #25272b;
+  box-shadow: 0 5px 12px #09090945;
+  transition:
+    transform 0.32s cubic-bezier(0.22, 0.75, 0.22, 1),
+    border-color 0.18s;
+}
+.moon-demo .md-tile[data-side="right"] {
+  transform: translateX(calc(100% + var(--tile-gap)));
+}
+.moon-demo .md-tile[data-focused="true"] {
+  z-index: 1;
+  border-color: #e39468 #cb7953 #bd6b47 #de8b5d;
+  box-shadow: 0 5px 17px #08090a58;
+}
+.moon-demo .md-chrome {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: clamp(24px, 4.2cqw, 31px);
+  padding: 0 clamp(6px, 1.3cqw, 10px);
+  background: #303135;
+  color: #e0ded8;
+  font:
+    500 clamp(9px, 1.5cqw, 12px)/1 var(--font-geist-sans, "Segoe UI"),
+    sans-serif;
+}
+.moon-demo .md-app-symbol {
+  color: #e8a172;
+  font: bold 1.07em/1 var(--demo-mono);
+}
+.moon-demo .md-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.moon-demo .md-window-controls {
+  display: flex;
+  align-items: center;
+  gap: clamp(5px, 1.4cqw, 11px);
+  margin-left: auto;
+  color: #bbbcbf;
+}
+.moon-demo .md-window-controls i {
+  font-size: 0.85em;
+  font-style: normal;
+}
+
+.moon-demo .md-code {
+  flex: 1;
+  padding: clamp(6px, 1.7cqw, 14px) 0;
+  background: #212226;
+  color: #ded5c3;
+  font: 400 clamp(8.5px, 1.6cqw, 12px)/1.48 var(--demo-mono);
+  letter-spacing: -0.025em;
+}
+.moon-demo .md-code > div {
+  display: flex;
+  white-space: pre;
+}
+.moon-demo .md-code small {
+  flex: none;
+  width: 3.4em;
+  margin-right: 0.8em;
+  color: #96948f;
+  font: inherit;
+  text-align: right;
+}
+.moon-demo .md-code :is(b, strong, em, i) {
+  font: inherit;
+}
+.moon-demo .md-code i {
+  color: #999a8f;
+  font-style: italic;
+}
+.moon-demo .md-code b {
+  color: #e2ac88;
+}
+.moon-demo .md-code em {
+  color: #b8c6a6;
+}
+.moon-demo .md-code strong {
+  color: #e3b475;
+}
+
+.moon-demo .md-paper,
+.moon-demo .md-files {
+  flex: 1;
+  background: #292b2d;
+  color: #ece9e2;
+}
+.moon-demo .md-notes-tile .md-chrome,
+.moon-demo .md-files-tile .md-chrome {
+  background: #363739;
+}
+.moon-demo .md-notes-tile .md-app-symbol {
+  color: #a6c8cf;
+}
+.moon-demo .md-menu,
+.moon-demo .md-location {
+  display: flex;
+  align-items: center;
+  gap: 1.2em;
+  height: clamp(20px, 3.5cqw, 26px);
+  padding: 0 1.1em;
+  border-bottom: 1px solid #484849;
+  color: #c3c1be;
+  font:
+    400 clamp(8px, 1.4cqw, 10.5px)/1 var(--font-geist-sans, "Segoe UI"),
+    sans-serif;
+}
+.moon-demo .md-writing {
+  padding: clamp(10px, 2.4cqw, 20px);
+  font: 400 clamp(10px, 1.68cqw, 13px)/1.55 var(--demo-mono);
+}
+.moon-demo .md-writing strong {
+  color: #f1d9b7;
+  font-size: 1.35em;
+  font-weight: 550;
+}
+.moon-demo .md-writing p {
+  margin: 1.1em 0 0;
+  color: #d9d6ce;
+  font: inherit;
+}
+.moon-demo .md-caret {
+  display: block;
+  width: 1px;
+  height: 1.1em;
+  margin-top: 0.9em;
+  background: #a7aaa6;
+}
+.moon-demo .md-photo {
+  position: relative;
+  flex: 1;
+  background: #121315 url("/lunar.webp") center 57% / cover no-repeat;
+}
+.moon-demo .md-photo span {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  padding: 3px 5px;
+  background: #1b1b1bcc;
+  color: #eee;
+  font-size: 9px;
+}
+.moon-demo .md-file {
+  display: flex;
+  align-items: center;
+  gap: 0.6em;
+  margin: 0.65em 0.7em;
+  padding: 0.45em;
+  font-size: clamp(8px, 1.5cqw, 12px);
+}
+.moon-demo .md-file:nth-child(2) {
+  border-radius: 3px;
+  background: #3b3b3f;
+}
+.moon-demo .md-thumbnail,
+.moon-demo .md-file-sheet {
+  flex: none;
+  display: block;
+  width: 2.15em;
+  height: 2em;
+}
+.moon-demo .md-thumbnail {
+  background: #1a1a1a url("/lunar.webp") center / cover no-repeat;
+}
+.moon-demo .md-file-sheet {
+  width: 1.55em;
+  height: 1.8em;
+  margin: 0 0.3em;
+  background: repeating-linear-gradient(0deg, #c4c1b9 0 3px, #98958b 3px 4px);
+}
+
+.moon-demo .md-panel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 12px;
+  padding: 12px 16px;
+  border: 1px solid #41403d;
+  border-radius: 7px;
+  background: #242423;
+}
+.moon-demo .md-panel > p {
+  flex: 1;
+  margin: 0;
+  color: #d6d1c8;
+  font:
+    400 14px/1.45 var(--font-geist-sans, "Segoe UI"),
+    sans-serif;
+}
+.moon-demo .md-panel button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.8em;
+  min-height: 43px;
+  padding: 0 12px;
+  border: 1px solid #e7a37d;
+  border-radius: 5px;
+  background: #fead80;
+  color: #262019;
+  font-size: 13px;
+  font-weight: 650;
+}
+.moon-demo .md-panel button:hover {
+  background: #ffbe9b;
+}
+.moon-demo .md-panel button:active {
+  background: #f49e70;
+}
+.moon-demo .md-keys {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.22em;
+}
+.moon-demo .md-keys kbd {
+  padding: 0.15em 0.3em;
+  border: 1px solid #996649;
+  border-radius: 3px;
+  font: 550 11px/1.2 var(--demo-mono);
+}
+.moon-demo .md-announcement {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+@container (max-width: 490px) {
+  .moon-demo .md-bar-center {
+    justify-content: end;
+  }
+  .moon-demo .md-providers,
+  .moon-demo .md-window-controls i:not(:last-child) {
+    display: none;
+  }
+  .moon-demo .md-code small {
+    width: 2em;
+    margin-right: 0.5em;
+  }
+  .moon-demo .md-tabs {
+    margin-bottom: 9px;
+  }
+  .moon-demo .md-tabs button {
+    padding: 0 16px;
+  }
+  .moon-demo .md-panel {
+    flex-wrap: wrap;
+    gap: 9px;
+    padding: 12px;
+  }
+  .moon-demo .md-panel > p {
+    flex-basis: 100%;
+  }
+  .moon-demo .md-panel button {
+    min-height: 44px;
+  }
+}
+@container (max-width: 340px) {
+  .moon-demo .md-bar-center span:first-child {
+    display: none;
+  }
+  .moon-demo .md-writing {
+    padding: 8px;
+  }
+}
+@keyframes moon-demo-enter {
+  from {
+    transform: translateX(4px);
+  }
+  to {
+    transform: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .moon-demo .md-tiles {
+    animation: none;
+  }
+  .moon-demo .md-tile {
+    transition: none;
+  }
+}

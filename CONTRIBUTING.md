@@ -23,6 +23,8 @@ From WSL, install Rustup and `just`, run `just bootstrap` to install the pinned 
 
 The native Settings host embeds the TypeScript frontend from `apps/settings/dist`. For UI changes, use the Bun version in [package.json](apps/settings/package.json) and run `just settings-test`. Commit both the source changes and the regenerated assets.
 
+The [marketing website](https://moon.hongy.dev) lives in `apps/website`. From that directory, run `bun install --frozen-lockfile` and `bun run dev` to preview it. Run `bun test`, `bun run check` and `bun run build` before submitting a change. Vercel builds the same directory from GitHub.
+
 ## Send a change
 
 Open a pull request against `main`. Describe the behavior before and after your change and how you verified it. For a visual change, include a screenshot or pixel measurement and the display scale you tested. If your change affects window management, describe what happened to the other windows in the workspace and to the desktop when Moon exited. Full desktop integration runs belong on a disposable Windows desktop. See [integration validation](docs/validation-integration.md).

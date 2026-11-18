@@ -2,6 +2,8 @@
 
 Moon is a tiling window manager for Windows 11. It arranges your windows as you open them, shows your workspaces in a bar at the top of each monitor, and draws a border around the focused window. You can move between windows with the keyboard or click a workspace in the bar.
 
+[Get started with Moon](https://moon.hongy.dev) for a visual installation guide, interactive keyboard walkthrough and screenshots.
+
 ## Install on Windows 11 x64
 
 1. Download the asset named `moon-<version>-windows-x64.zip` from the [latest release](https://github.com/hongymagic/moon/releases/latest).
