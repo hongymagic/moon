@@ -29,6 +29,6 @@ The [marketing website](https://moon.hongy.dev) lives in `apps/website`. From th
 
 Open a pull request against `main`. Describe the behavior before and after your change and how you verified it. For a visual change, include a screenshot or pixel measurement and the display scale you tested. If your change affects window management, describe what happened to the other windows in the workspace and to the desktop when Moon exited. Full desktop integration runs belong on a disposable Windows desktop. See [integration validation](docs/validation-integration.md).
 
-CI checks Rust, native Windows behavior and the Settings UI. After a successful merge to `main`, the release workflow publishes a Windows ZIP with a tag in the form `YYYY.MM.DD-n`. The date uses Australia/Sydney time and the first release of each day ends in `-0`. See [packaging](docs/packaging.md).
+CI checks Rust, native Windows behavior and the Settings UI. After a successful merge to `main`, the release workflow publishes a Windows setup EXE and ZIP with a tag in the form `YYYY.MM.DD-n`. The date uses Australia/Sydney time and the first release of each day ends in `-0`. See [packaging](docs/packaging.md).
 
 Contributions to Moon are licensed under the [MIT license](LICENSE). Keep third-party notices with any contributed assets. Our [code of conduct](CODE_OF_CONDUCT.md) applies to issues, pull requests and reviews.

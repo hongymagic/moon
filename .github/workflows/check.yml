@@ -117,6 +117,20 @@ jobs:
       - name: Workspace carousel integration
         shell: powershell
         run: ./scripts/carousel-integration.ps1 -BuildDirectory "$PWD/target/x86_64-pc-windows-msvc/release" -ReportPath "$PWD/target/carousel-integration-results.json"
+      - name: Build and exercise the Windows installer
+        if: github.event_name == 'pull_request'
+        shell: powershell
+        run: |
+          cargo build --locked --release --target x86_64-pc-windows-msvc -p moon --features moon/uiaccess
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo build --locked --release --target x86_64-pc-windows-msvc -p moon-win --example window_inventory --example recover_windows
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $build = "$PWD\target\x86_64-pc-windows-msvc\release"
+          $version = (Get-Item "$build\moon.exe").VersionInfo.ProductVersion
+          $package = .\scripts\package.ps1 -Version $version -OutputDirectory "$env:RUNNER_TEMP\moon-dist" `
+            -Binary "$build\moon.exe" -SettingsBinary "$build\moon-settings.exe" `
+            -InventoryBinary "$build\examples\window_inventory.exe" -RecoveryBinary "$build\examples\recover_windows.exe"
+          .\scripts\validate-setup-exe.ps1 -InstallerPath $package.installer -ArchivePath $package.archive -Version $version
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:

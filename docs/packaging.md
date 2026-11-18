@@ -3,11 +3,12 @@
 GitHub Actions publishes a Windows x64 release after a push to `main` passes CI.
 The tag uses `YYYY.MM.DD-n`, with the date in Australia/Sydney when the
 release job selects its version. The first release that day starts at `0`.
-The ZIP, manifest, checksum, Windows product/file versions and Moon CLI use
-the same version. Local builds default to the Cargo workspace version.
+The setup EXE, ZIP and their checksums carry the release tag in their names.
+The package manifest, Explorer’s product version and the Moon CLI report the
+same version. Local builds default to the Cargo workspace version.
 
 The release queue serializes version selection and publication. Packaging verifies
-the ZIP before the job creates its Git tag. A rerun reuses the tag for that commit,
+both downloads before the job creates its Git tag. A rerun reuses the tag for that commit,
 finishes a pending draft and compares the uploaded asset names and SHA-256
 digests to the local files before publishing. A completed release is skipped on
 reruns. If CI finishes out of merge order, the newest released commit on
@@ -18,7 +19,7 @@ It never launches them, builds Rust code, requests elevation, changes certificat
 stores, or installs Moon. Run it using Windows PowerShell 5.1 or newer:
 
 ```powershell
-.\scripts\package.ps1 -Binary C:\build\moon.exe `
+$package = .\scripts\package.ps1 -Binary C:\build\moon.exe `
   -SettingsBinary C:\build\moon-settings.exe `
   -InventoryBinary C:\build\examples\window_inventory.exe `
   -RecoveryBinary C:\build\examples\recover_windows.exe `
@@ -52,8 +53,9 @@ can instead be supplied with `-StageDirectory`; unexpected files and links are
 rejected. If it already contains `package-manifest.json`, every recorded hash,
 size, entry, and package identity is verified before repackaging.
 
-The output is `moon-<version>-windows-x64/`, the corresponding `.zip`, an
-external `.manifest.json`, and `.zip.sha256`. The internal manifest lists sorted
+Release packaging writes `moon-<version>-windows-x64-setup.exe`,
+`moon-<version>-windows-x64.zip`, a `.sha256` file for each download,
+the extracted package directory and an external `.manifest.json`. The internal manifest lists sorted
 payload paths, exact lengths, SHA-256 hashes, and executable identities. It does
 not attempt to hash itself; the ZIP hash covers the manifest too. The archive is
 reopened and every entry hashed before any final artifact is published. Existing
@@ -61,18 +63,44 @@ outputs are never overwritten. Cleanup attempts every temporary and partially
 published path owned by the failed invocation; a locked leftover is reported
 without masking the original failure or skipping the remaining paths.
 
+`scripts/build-setup-exe.ps1` uses the x64 C# compiler supplied with Windows’
+.NET Framework. It embeds the verified ZIP in the EXE and gives it Moon’s icon
+and an `asInvoker` manifest. Double-clicking the EXE checks the embedded ZIP,
+extracts it to a private working folder and opens the same setup window as
+**Install Moon.cmd**. Setup asks for Windows approval when installation needs it.
+After setup closes, the EXE removes the working folder. If the window crashes
+while a worker may still be installing or restoring Moon, the EXE leaves the
+folder in the user profile so the worker can finish.
+
+To check the EXE without installing, run the following in PowerShell. Exit code
+`0` means the embedded ZIP matched its build-time SHA-256 and contained the
+setup entry point. To check the downloaded EXE itself, compare its `Get-FileHash`
+result with the release’s `.exe.sha256` file. The download is unsigned.
+
+```powershell
+$check = Start-Process -FilePath $package.installer -ArgumentList /VERIFYONLY -PassThru -Wait
+$check.ExitCode
+```
+
+To run the same native checks as CI, pass the packaging result to the validator.
+It compares the EXE’s embedded ZIP with the release ZIP and exercises setup and
+cleanup with a harmless test script.
+
+```powershell
+.\scripts\validate-setup-exe.ps1 -InstallerPath $package.installer -ArchivePath $package.archive -Version $package.version
+```
+
 Manifest JSON uses ordered fields, ordinal path ordering, UTF-8 without a BOM,
 and LF line endings. ZIP entries have fixed 1980 timestamps and the same sorted
-ordering. Identical inputs produce identical output on the same .NET compressor
+ordering. Identical inputs produce identical ZIP and manifest bytes on the same .NET compressor
 version; compressed bytes are not promised to match across runtime versions.
 Checksums detect changes, but do not authenticate the publisher on their own.
 
 `-Development` permits a non-UIAccess daemon and external Visual C++ runtime
 dependencies for packaging tests. It still validates the executables and requires
 ordinary-permission Settings. It labels the directory,
-archive, manifest, and README as development material, unsuitable for guided
-installation. Use this only for packaging tests; final installation bundles
-must pass the default strict checks.
+archive, manifest, and README as development material. Only a strict release
+build produces a setup EXE.
 
 Current official references checked 2026-11-12:
 

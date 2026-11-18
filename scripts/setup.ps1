@@ -105,7 +105,8 @@ try {
     $icon=[Drawing.Icon]::ExtractAssociatedIcon($iconPath)
     if ($icon) {try {$ui.ProductIcon.Source=[Windows.Interop.Imaging]::CreateBitmapSourceFromHIcon($icon.Handle,[Windows.Int32Rect]::Empty,[Windows.Media.Imaging.BitmapSizeOptions]::FromEmptyOptions());$window.Icon=$ui.ProductIcon.Source;$ui.ProductIcon.Visibility='Visible'}finally{$icon.Dispose()}}
 } catch { }
-$context=@{busy=$false;done=$false;process=$null;files=$null;operation=$null;detail=$null;status=$null;outcome=$null}
+$context=@{busy=$false;done=$false;process=$null;files=$null;operation=$null;detail=$null;status=$null;outcome=$null;exitCode=1223}
+$standaloneRoot=if([string]::Equals($env:MOON_SETUP_EXE_DIRECTORY,$PSScriptRoot,[StringComparison]::OrdinalIgnoreCase)){$PSScriptRoot}
 function Show-MoonSetupProblem([string]$Message,$Failure) {
     $ui.Status.Text=$Message
     try {
@@ -115,6 +116,7 @@ function Show-MoonSetupProblem([string]$Message,$Failure) {
     } catch {$ui.Status.Text=$Message+' Details could not be saved.'}
 }
 if (Test-MoonAdministrator) {
+    $context.exitCode=1
     $ui.Status.Text='Close this window and open Moon setup normally. Windows will ask for approval when needed.'
     $ui.Primary.IsEnabled=$false;$ui.Secondary.Content='Close'
 } elseif ($Mode -eq 'Uninstall' -and !$installed) {
@@ -124,7 +126,7 @@ if (Test-MoonAdministrator) {
     $ui.Secondary.Visibility='Collapsed';$ui.Secondary.IsDefault=$false;$ui.Secondary.IsCancel=$false
 } elseif ($Mode -eq 'Install') {
     try {Test-MoonSetupPayload $PSScriptRoot $Binary $SettingsBinary $installed}
-    catch {Show-MoonSetupProblem 'Extract the entire Moon download into one folder, then open Install Moon.cmd again.' $_;$ui.Primary.IsEnabled=$false;$ui.Secondary.Content='Close'}
+    catch {$context.exitCode=1;Show-MoonSetupProblem 'Download Moon Setup again. If you use the ZIP, extract the whole folder before opening Install Moon.cmd.' $_;$ui.Primary.IsEnabled=$false;$ui.Secondary.Content='Close'}
 }
 $timer=[Windows.Threading.DispatcherTimer]::new();$timer.Interval=[TimeSpan]::FromMilliseconds(350)
 $ui.RuntimeLink.Add_Click({try {Start-Process 'https://developer.microsoft.com/microsoft-edge/webview2/consumer/'}catch{Show-MoonSetupProblem 'The Microsoft download page could not open. Check your default browser, then try again.' $_}})
@@ -167,14 +169,20 @@ $ui.Primary.Add_Click({
         if ($Mode -eq 'Install') {$arguments+=@('-Binary',$Binary,'-SettingsBinary',$SettingsBinary);if($PortableBinary){$arguments+=@('-PortableBinary',$PortableBinary)}}
         if ($entry -eq 'handover.ps1') {$arguments+=@(Get-MoonSetupHandoverArguments -KeepStopped:$KeepPreviousDesktopStopped)}
         $powershell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-        $context.process=Start-Process -FilePath $powershell -ArgumentList (($arguments|ForEach-Object {ConvertTo-MoonArgument $_}) -join ' ') -WindowStyle Hidden -RedirectStandardOutput ($context.detail+'.out') -RedirectStandardError $context.detail -PassThru
+        $commandLine=($arguments|ForEach-Object {ConvertTo-MoonArgument $_}) -join ' '
+        if ($standaloneRoot) {
+            $context.workerMarker=Join-Path $standaloneRoot ('.moon-setup-worker-'+$context.operation)
+            [IO.File]::WriteAllText($context.workerMarker,'')
+        }
+        $context.process=Start-Process -FilePath $powershell -ArgumentList $commandLine -WindowStyle Hidden -RedirectStandardOutput ($context.detail+'.out') -RedirectStandardError $context.detail -PassThru
         $context.busy=$true;$context.status='working';$ui.Primary.IsEnabled=$false;$ui.Secondary.Content='Cancel';$ui.Secondary.IsCancel=$false
         $ui.Progress.Visibility=if([Windows.SystemParameters]::ClientAreaAnimation){'Visible'}else{'Collapsed'};$ui.Progress.IsIndeterminate=[Windows.SystemParameters]::ClientAreaAnimation
         $ui.Status.Text='Preparing Moon…';$timer.Start()
-    } catch {Show-MoonSetupProblem 'Setup could not start. Open details, then try again.' $_}
+    } catch {$context.exitCode=1;Show-MoonSetupProblem 'Setup could not start. Open details, then try again.' $_}
 })
 $timer.Add_Tick({
     try {
+        $finished=$context.process.HasExited
         try {
             $status=Read-MoonSetupStatus $context.operation
             if ($status) {
@@ -185,17 +193,24 @@ $timer.Add_Tick({
             # Status may be unavailable, but the child's exit still determines
             # completion. Never keep the dialog busy forever on a read failure.
         }
-        if (!$context.process.HasExited) {return}
+        if (!$finished) {return}
         $code=$context.process.ExitCode;$context.process.Dispose();$context.process=$null;$timer.Stop();$context.busy=$false
+        if ($standaloneRoot -and $context.status -in @('succeeded','cancelled','failed','recovery_required')) {
+            # A crashed worker can leave an independent installer running. Only
+            # release this operation's source after receiving a terminal status.
+            try {[IO.File]::Delete($context.workerMarker)}catch{}
+        }
         $ui.Progress.Visibility='Collapsed';$ui.Primary.IsEnabled=$true;$ui.Secondary.IsEnabled=$true;$ui.Secondary.Content='Close';$ui.Secondary.IsCancel=$true
         if ($code -eq 0 -and $context.status -eq 'succeeded') {
             $context.done=$true;$ui.Heading.Text=if($Mode -eq 'Install'){'Welcome to Moon.'}else{'Moon has been removed.'}
             $ui.Primary.Content=if($Mode -eq 'Uninstall'){'Done'}elseif(Get-MoonWebViewRuntime){'Open Settings'}else{'Get WebView2'}
             $ui.Primary.IsDefault=$true;$ui.Secondary.IsDefault=$false
         } elseif ($context.status -eq 'cancelled' -or $code -eq 1223) {
+            $context.exitCode=1223
             $ui.Status.Text=if($context.outcome -and $context.outcome.message){$context.outcome.message}elseif($Mode -eq 'Install'){'Setup was canceled. Your personal settings were preserved.'}else{'Removal was canceled. Moon is still installed.'}
             $ui.Primary.Content='Try again'
         } else {
+            $context.exitCode=if($code){$code}else{1}
             if (!$context.outcome -or $context.status -in @('working','waiting','succeeded')) {$ui.Status.Text='Moon could not finish. Open details for the next step.'}
             $ui.Details.Visibility='Visible';$ui.Primary.Content='Try again'
             if($context.status -eq 'recovery_required'){$ui.Primary.IsEnabled=$false}
@@ -203,7 +218,10 @@ $timer.Add_Tick({
         }
     } catch {$ui.Status.Text='Waiting for setup to finish safely…'}
 })
-$window.Add_Loaded({if($ui.Primary.IsEnabled -and ($Mode -eq 'Install' -or $context.done)){[void]$ui.Primary.Focus()}else{[void]$ui.Secondary.Focus()}})
+$window.Add_Loaded({
+    if ($standaloneRoot) {[IO.File]::WriteAllText((Join-Path $standaloneRoot '.moon-setup-visible'),'')}
+    if($ui.Primary.IsEnabled -and ($Mode -eq 'Install' -or $context.done)){[void]$ui.Primary.Focus()}else{[void]$ui.Secondary.Focus()}
+})
 $window.Add_Activated({
     if ($Mode -eq 'Install' -and !$context.busy) {
         $available=Get-MoonWebViewRuntime
@@ -216,3 +234,7 @@ $window.Add_Activated({
     }
 })
 try {[void]$window.ShowDialog()}finally{$timer.Stop();if($context.process -and !$context.busy){$context.process.Dispose()}}
+if ($standaloneRoot) {
+    if ($context.done) {exit 0}
+    exit $context.exitCode
+}
