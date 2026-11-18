@@ -10,17 +10,19 @@ const lessons = [
   {
     id: "focus",
     title: "Focus",
-    detail: "Follow the terracotta border to the neighboring window.",
+    detail:
+      "Follow the border from one window to the other. Both windows stay where they are.",
   },
   {
     id: "move",
     title: "Move",
-    detail: "Swap the focused window with its neighbor.",
+    detail: "The two windows trade places. You keep typing in the same one.",
   },
   {
     id: "switch",
     title: "Switch",
-    detail: "Visit the other workspace. Your windows stay in place.",
+    detail:
+      "Hold Alt and press a workspace number. On your desktop, you can also click its number in Moon’s top bar.",
   },
 ] as const;
 
@@ -110,8 +112,7 @@ function TileContent({ id }: { id: WindowId }) {
           </div>
           <div className="md-writing">
             <strong>Field notes</strong>
-            <p>Check the crater rim.</p>
-            <p>Compare the shadows.</p>
+            <p>Look for the shadow along the crater rim.</p>
             <span className="md-caret" />
           </div>
         </div>

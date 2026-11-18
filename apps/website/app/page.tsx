@@ -39,8 +39,7 @@ const screens = [
     name: "Overview",
     file: "/screens/overview.webp",
     icon: LayoutGrid,
-    description:
-      "Find an open window across workspaces and bring it into focus.",
+    description: "Pick a window from the list to jump to its workspace.",
     alt: "Moon Overview showing Code and Arc on workspace 1 and another Code window on workspace 2.",
   },
   {
@@ -48,7 +47,7 @@ const screens = [
     file: "/screens/shortcuts.webp",
     icon: Keyboard,
     description:
-      "Click the crescent in the bar to see your current key bindings.",
+      "Click the crescent at the top of your screen to look up a shortcut.",
     alt: "Moon Shortcuts filtered to focus commands, showing their Alt key combinations.",
   },
   {
@@ -56,7 +55,7 @@ const screens = [
     file: "/screens/appearance.webp",
     icon: Palette,
     description:
-      "Set your gaps, border colors, and theme. Preview them as you go.",
+      "Choose a theme or try a different border colour. Click Save changes when the preview looks right.",
     alt: "Moon Appearance with a live border preview and Light, Dark, and System theme options.",
   },
 ];
@@ -88,16 +87,16 @@ export default function Home() {
             <div className="hero-copy">
               <p className="eyebrow hero-eyebrow">
                 <span className="status-light" />
-                Tiling window manager
+                Free and open source
               </p>
               <h1 id="hero-title">
-                Your desktop,
-                <br />
-                <em>in orbit.</em>
+                Window tiling <br />
+                <em>for Windows 11</em>
               </h1>
               <p className="hero-lead">
-                Moon tiles your windows as you open them. Move between apps and
-                workspaces on Windows 11 with a few keystrokes.
+                Moon puts your editor and browser side by side as you open them.
+                Hold Alt and tap the left or right arrow to switch between the
+                two.
               </p>
               <div className="hero-actions">
                 <DownloadLink />
@@ -106,8 +105,7 @@ export default function Home() {
                 </a>
               </div>
               <div className="platform-info">
-                <Monitor size={14} /> Windows 11 x64 <span>·</span> Open source{" "}
-                <span>·</span> MIT
+                <Monitor size={14} /> Windows 11 x64 <span>·</span> ZIP download
               </div>
             </div>
             <LunarPlate />
@@ -124,37 +122,30 @@ export default function Home() {
               <p className="eyebrow">
                 <ArrowDownToLine size={14} /> Quick start
               </p>
-              <h2 id="quick-title">Set up Moon.</h2>
+              <h2 id="quick-title">Install Moon</h2>
               <ol className="setup-steps">
                 <li>
-                  <div>
-                    <h3>Download and extract</h3>
-                    <p>
-                      Get the <a href="/download">Windows x64 ZIP</a>. In File
-                      Explorer, right-click it and choose{" "}
-                      <strong>Extract All</strong>.
-                    </p>
-                  </div>
+                  <p>
+                    Download the <a href="/download">Windows x64 ZIP</a>.
+                    Right-click it in File Explorer and choose{" "}
+                    <strong>Extract All</strong>.
+                  </p>
                 </li>
                 <li>
-                  <div>
-                    <h3>Run the installer</h3>
-                    <p>
-                      Double-click <strong>Install Moon.cmd</strong> in the
-                      extracted folder. Choose <strong>Install Moon</strong> and
-                      approve the Windows prompt.
-                    </p>
-                  </div>
+                  <p>
+                    In the extracted folder, double-click{" "}
+                    <strong>Install Moon.cmd</strong>. Choose{" "}
+                    <strong>Install Moon</strong> and approve the Windows
+                    prompt.
+                  </p>
                 </li>
                 <li>
-                  <div>
-                    <h3>Open two windows</h3>
-                    <p>
-                      Choose <strong>Open Settings</strong>. If prompted,
-                      install WebView2 and return to setup. Open two app windows
-                      on the same workspace to see Moon tile them.
-                    </p>
-                  </div>
+                  <p>
+                    If setup offers <strong>Get WebView2</strong>, install the
+                    runtime and return to setup. Choose{" "}
+                    <strong>Open Settings</strong>, then open two app windows on
+                    the same workspace to try tiling.
+                  </p>
                 </li>
               </ol>
               <a className="text-link" href={`${docs}/installation.md`}>
@@ -169,7 +160,7 @@ export default function Home() {
                   file="/screens/install.webp"
                   width={775}
                   height={600}
-                  alt="Moon setup for Windows, with Install Moon selected and a description of what happens next."
+                  alt="The Windows installer with the Install Moon button in the lower right."
                 />
               </div>
             </div>
@@ -186,15 +177,15 @@ export default function Home() {
               <p className="eyebrow">
                 <Keyboard size={15} /> Navigation
               </p>
-              <h2 id="navigation-title">Try the controls.</h2>
+              <h2 id="navigation-title">Getting around</h2>
               <p className="section-lead">
-                Focus a neighbor, move a tile, or switch workspaces. Try each
-                shortcut in the demo.
+                The orange border shows which window gets your keystrokes. Click
+                a shortcut in the demo to see what changes.
               </p>
               <div className="shortcut-notes">
                 <div>
                   <span>
-                    <ScanSearch size={16} /> Find any window
+                    <ScanSearch size={16} /> Find a window
                   </span>
                   <span>
                     <kbd>Ctrl</kbd> <kbd>Alt</kbd> <kbd>Space</kbd>
@@ -212,7 +203,7 @@ export default function Home() {
               <details className="exit-note">
                 <summary>How do I stop Moon?</summary>
                 <p>
-                  Press <strong>Ctrl + Alt + Shift + F12</strong> to stop Moon
+                  Press <strong>Ctrl + Alt + Shift + F12</strong> to close Moon
                   and restore your windows.
                 </p>
               </details>
@@ -229,10 +220,10 @@ export default function Home() {
           <div className="wrap">
             <div className="settings-heading">
               <div>
-                <p className="eyebrow">
-                  <LayoutGrid size={14} /> Settings
+                <h2 id="settings-title">Moon Settings</h2>
+                <p className="settings-intro">
+                  Search for Moon in Start to reopen Settings.
                 </p>
-                <h2 id="settings-title">Inside Moon.</h2>
               </div>
               <a className="text-link" href={`${docs}/config-reference.md`}>
                 Configuration reference <ArrowUpRight size={16} />

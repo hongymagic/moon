@@ -276,6 +276,9 @@
   color: #d9d6ce;
   font: inherit;
 }
+.moon-demo [data-focused="false"] .md-caret {
+  visibility: hidden;
+}
 .moon-demo .md-caret {
   display: block;
   width: 1px;
