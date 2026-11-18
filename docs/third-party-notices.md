@@ -9,6 +9,8 @@ Moon's original source, documentation and crescent artwork use the MIT license. 
 | Rust standard library | Native Windows binaries | The release ZIP includes the toolchain’s `licenses/Rust-library.html`. See the [Rust project copyright](https://github.com/rust-lang/rust/blob/1.99.1/COPYRIGHT) and [license texts](https://github.com/rust-lang/rust/tree/1.99.1/LICENSES) |
 | Microsoft WebView2 SDK loader | Launches the shared Evergreen Runtime for Settings | [SDK license and notices](webview2-notices.md) |
 
+The [website notices](../apps/website/public/notices.txt) cover the lunar mosaic, fonts, icons and UI libraries used on moon.hongy.dev.
+
 The Rust license list is generated from the locked Windows dependency graph. When updating dependencies, regenerate it from the checkout root and check upstream notices for crates that omit license files from their published packages.
 
 ```sh
