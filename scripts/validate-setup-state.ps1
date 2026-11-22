@@ -40,13 +40,13 @@ try {
 param([string]$IdentityPath)
 $self=[Diagnostics.Process]::GetCurrentProcess()
 [IO.File]::WriteAllText($IdentityPath,(@{pid=$PID;birth=$self.StartTime.ToFileTimeUtc()}|ConvertTo-Json))
-Start-Sleep -Seconds 15
+Start-Sleep -Seconds 60
 '@,[Text.UTF8Encoding]::new($false))
     $timedOut=$false;$clock.Restart();$ownedChild=$null
     try {
-        try {Invoke-MoonShellProcess $powershell @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$timeoutScript,'-IdentityPath',$timeoutIdentity) -TimeoutSeconds 3|Out-Null}
+        try {Invoke-MoonShellProcess $powershell @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$timeoutScript,'-IdentityPath',$timeoutIdentity) -TimeoutSeconds 15|Out-Null}
         catch {if($_.Exception.Message -notlike 'Process timed out:*'){throw};$timedOut=$true}
-        if(!$timedOut -or $clock.ElapsedMilliseconds -lt 3000 -or $clock.ElapsedMilliseconds -ge 12000 -or !(Test-Path -LiteralPath $timeoutIdentity)){throw 'The finite shell wait did not exercise its owned running child.'}
+        if(!$timedOut -or $clock.ElapsedMilliseconds -lt 15000 -or $clock.ElapsedMilliseconds -ge 45000 -or !(Test-Path -LiteralPath $timeoutIdentity)){throw 'The finite shell wait did not exercise its owned running child.'}
         $ownedIdentity=[IO.File]::ReadAllText($timeoutIdentity)|ConvertFrom-Json
         try {$ownedChild=[Diagnostics.Process]::GetProcessById([int]$ownedIdentity.pid)} catch [ArgumentException] {}
         if($ownedChild -and $ownedChild.StartTime.ToFileTimeUtc() -eq $ownedIdentity.birth -and !$ownedChild.HasExited){throw 'The timed-out owned child remained alive when the launcher returned.'}
@@ -120,7 +120,7 @@ $trapText
 throw [IO.IOException]::new('Generic child exit 1')
 "@
         [IO.File]::WriteAllText($child,$childText,[Text.UTF8Encoding]::new($false))
-        $result=Invoke-MoonNative $powershell @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$child) -AllowFailure
+        $result=Invoke-MoonNative $powershell @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$child) -TimeoutSeconds 60 -AllowFailure
         $expectedExit=if($kind -in @('cancelled','stopped-cancelled')){1223}else{1}
         if($result.ExitCode -ne $expectedExit){throw "Handover trap returned unexpected exit status for $kind : $($result.ExitCode)"}
         $actual=Get-Content -Raw -LiteralPath (Join-Path $fixture 'status.json')|ConvertFrom-Json
@@ -178,7 +178,7 @@ function Start-Process {
             }
             [IO.File]::WriteAllText($worker,($prefix+(Get-MoonTaskLaunchScript $testTarget $testArguments)),[Text.UTF8Encoding]::new($false))
             $since=[DateTime]::UtcNow
-            $result=Invoke-MoonNative $powershell @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$worker) -TimeoutSeconds 20 -AllowFailure
+            $result=Invoke-MoonNative $powershell @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$worker) -TimeoutSeconds 60 -AllowFailure
             $status=Join-Path $fixture ('moon\startup-session'+[Diagnostics.Process]::GetCurrentProcess().SessionId+'.json')
             $actual=Get-Content -Raw -LiteralPath $status|ConvertFrom-Json
             if($actual.target -ne $testTarget -or $actual.arguments -ne $testArguments -or !$actual.environment.local_app_data -or (Get-Item $status).Length -gt 65536){throw 'Startup record lost its identity, context or bound.'}

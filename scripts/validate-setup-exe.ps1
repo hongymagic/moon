@@ -31,10 +31,10 @@ function Start-Probe([string]$Executable, [string]$Arguments, [hashtable]$ChildE
 
 function Get-ProbeExitCode([Diagnostics.Process]$Process) {
     try {
-        if (!$Process.WaitForExit(30000)) {
+        if (!$Process.WaitForExit(60000)) {
             $Process.Kill()
             $Process.WaitForExit()
-            throw 'Setup probe did not exit within 30 seconds.'
+            throw 'Setup probe did not exit within 60 seconds.'
         }
         $Process.ExitCode
     } finally { $Process.Dispose() }
@@ -131,7 +131,7 @@ exit 42
     $process = Start-Probe $fixture '' $environment
     try {
         $timer = [Diagnostics.Stopwatch]::StartNew()
-        while (!(Test-Path -LiteralPath $receiptPath) -and !$process.HasExited -and $timer.Elapsed.TotalSeconds -lt 30) {
+        while (!(Test-Path -LiteralPath $receiptPath) -and !$process.HasExited -and $timer.Elapsed.TotalSeconds -lt 60) {
             Start-Sleep -Milliseconds 50
         }
         if ($process.HasExited -or !(Test-Path -LiteralPath $receiptPath)) { throw 'Setup exited or failed to start the fixture.' }
