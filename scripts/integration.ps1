@@ -71,6 +71,7 @@ public static class MoonIntegrationNative {
     [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
+    [DllImport("user32.dll",SetLastError=true)] public static extern bool PostMessageW(IntPtr hwnd, uint message, IntPtr wparam, IntPtr lparam);
     [DllImport("user32.dll",SetLastError=true)] static extern bool GetWindowRect(IntPtr hwnd, out Rect rect);
     [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
     [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hwnd, int command);
@@ -203,12 +204,12 @@ function Invoke-PublicRequest([hashtable]$Request) {
     } finally { $pipe.Dispose() }
 }
 
-function Assert-EffectIdentity([long]$Id) {
+function Assert-HelperIdentity([long]$Id) {
     $helper.Refresh()
-    if ($helper.HasExited -or !$originals.ContainsKey([string]$Id) -or ![MoonIntegrationNative]::IsWindow([IntPtr]$Id) -or [MoonIntegrationNative]::Owner($Id) -ne $helper.Id) { throw 'An owned binding-effect window identity changed.' }
+    if ($helper.HasExited -or !$originals.ContainsKey([string]$Id) -or ![MoonIntegrationNative]::IsWindow([IntPtr]$Id) -or [MoonIntegrationNative]::Owner($Id) -ne $helper.Id) { throw 'An owned test window identity changed.' }
 }
 function Focus-EffectWindow([long]$Id) {
-    Assert-EffectIdentity $Id
+    Assert-HelperIdentity $Id
     $placement = @(Invoke-Moon query windows | Where-Object { [long]$_.id -eq $Id })
     if ($placement.Count -ne 1 -or !$placement[0].visible) { throw 'Refused to focus an inactive binding-effect window.' }
     if (![MoonIntegrationNative]::SetForegroundWindow([IntPtr]$Id)) { throw 'Windows refused owned binding-effect foreground.' }
@@ -229,7 +230,7 @@ function Assert-EffectWorkspace([string]$Name,[hashtable]$Members,[long]$Expecte
         if ($placements.Count -ne 4) { return $false }
         foreach ($entry in $world.windows.PSObject.Properties) {
             if (!$Members.ContainsKey($entry.Name) -or $world.workspaces[$entry.Value.workspace].name -ne $Members[$entry.Name]) { return $false }
-            Assert-EffectIdentity ([long]$entry.Name)
+            Assert-HelperIdentity ([long]$entry.Name)
             $placement = @($placements | Where-Object { [string]$_.id -eq $entry.Name })
             if ($placement.Count -ne 1 -or $placement[0].visible -ne ($Members[$entry.Name] -eq $Name)) { return $false }
         }
@@ -241,7 +242,7 @@ function Assert-EffectWorkspace([string]$Name,[hashtable]$Members,[long]$Expecte
 function Save-EffectStep([string]$Name) {
     $world = Invoke-Moon query world
     $native = foreach ($key in $originals.Keys) {
-        Assert-EffectIdentity ([long]$key)
+        Assert-HelperIdentity ([long]$key)
         [pscustomobject]@{id=[long]$key;frame=[MoonIntegrationNative]::Frame([long]$key);cloak=[MoonIntegrationNative]::Cloaked([long]$key)}
     }
     $effectSteps.Add([pscustomobject]@{name=$Name;active=$world.active;focused=$world.focused;paused=$world.paused;workspaces=$world.workspaces;native=@($native)})
@@ -341,7 +342,7 @@ function Invoke-BindingEffects {
     $treeBefore=(Invoke-Moon query world).workspaces | ConvertTo-Json -Depth 64 -Compress
     $null=Invoke-Moon pause
     if (!(Invoke-Moon query world).paused -or @(Invoke-Moon query windows).Count -ne 0) { throw 'Pause did not disable placement effects.' }
-    Assert-EffectIdentity $anchor
+    Assert-HelperIdentity $anchor
     $outer=[MoonIntegrationNative]::Outer($anchor)
     $offset=[pscustomobject]@{Left=($tiled.Left+17);Top=($tiled.Top+11);Right=($tiled.Right+17);Bottom=($tiled.Bottom+11)}
     if (![MoonIntegrationNative]::SetWindowPos([IntPtr]$anchor,[IntPtr]::Zero,($outer.Left+17),($outer.Top+11),0,0,0x15)) { throw 'Could not move the owned paused fixture.' }
@@ -582,8 +583,18 @@ try {
     Record-Pass 'restart preserves workspace trees focus and exact frames'
 
     $null = Invoke-Moon workspace 2
-    $null = Invoke-Moon close
-    Wait-Until -Description 'closed window disappears from world' -Condition { (Invoke-Moon query stats).managed_windows -eq 3 }
+    $destinationWindows=@(Invoke-Moon query windows | Where-Object visible)
+    if ($destinationWindows.Count -ne 1) {throw 'Expected one owned window on the destination workspace.'}
+    $closing=[long]$destinationWindows[0].id
+    Assert-HelperIdentity $closing
+    if ($foregroundAvailable) {
+        $null = Invoke-Moon close
+    } elseif (![MoonIntegrationNative]::PostMessageW([IntPtr]$closing,0x10,[IntPtr]::Zero,[IntPtr]::Zero)) {
+        throw [ComponentModel.Win32Exception]::new()
+    }
+    Wait-Until -Description 'the selected window closes and disappears from the world' -Condition {
+        ![MoonIntegrationNative]::IsWindow([IntPtr]$closing) -and (Invoke-Moon query stats).managed_windows -eq 3
+    }
     $null = Invoke-Moon workspace 1
     Assert-Placements
     Record-Pass 'window close reflows survivors'
