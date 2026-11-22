@@ -29,7 +29,7 @@ function DownloadLink() {
   return (
     <a className="download-button" href="/download">
       <ArrowDownToLine size={18} />
-      Download installer
+      Download for x64
     </a>
   );
 }
@@ -105,7 +105,8 @@ export default function Home() {
                 </a>
               </div>
               <div className="platform-info">
-                <Monitor size={14} /> Windows 11 x64 <span>·</span> Guided setup
+                <Monitor size={14} /> Windows 11 <span>·</span>{" "}
+                <a href="/download?arch=arm64">Download for Arm64</a>
               </div>
             </div>
             <LunarPlate />
@@ -126,9 +127,10 @@ export default function Home() {
               <ol className="setup-steps">
                 <li>
                   <p>
-                    Download the <a href="/download">Windows installer</a> and
-                    open the setup EXE. If you have the{" "}
-                    <a href="/download?format=zip">ZIP package</a>, choose{" "}
+                    Download and open the <a href="/download">x64 installer</a>{" "}
+                    or <a href="/download?arch=arm64">Arm64 installer</a>. For the{" "}
+                    <a href="/download?format=zip">x64 ZIP</a> or{" "}
+                    <a href="/download?arch=arm64&format=zip">Arm64 ZIP</a>, choose{" "}
                     <strong>Extract All</strong> in File Explorer, then open{" "}
                     <strong>Install Moon.cmd</strong> in the extracted folder.
                   </p>

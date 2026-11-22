@@ -2,9 +2,14 @@
 
 ## Guided setup
 
-Download `moon-<version>-windows-x64-setup.exe` and double-click it in File
-Explorer from the Windows account where you’ll use Moon. To update, open the
-newer installer the same way. [Download Moon for Windows](https://moon.hongy.dev/download)
+Choose the x64 or Arm64 installer for Windows 11. Check **System type** under
+**Settings → System → About** for your architecture.
+[Download x64](https://moon.hongy.dev/download) · [Download Arm64](https://moon.hongy.dev/download?arch=arm64)
+
+Double-click the setup EXE in File Explorer from the Windows account where
+you’ll use Moon. To update, open the newer installer the same way. If you’ve
+been running the x64 build on Windows on Arm, use the Arm64 installer to update
+that installation.
 
 If you chose the ZIP, use **Extract All** and open **Install Moon.cmd** in the
 extracted folder. Both downloads open the same setup window. It offers one install
@@ -172,10 +177,12 @@ earlier installation failures. Signed installation remains a separate test.
 
 ## First handover
 
-Build the installation candidate from WSL:
+Build the installation candidate from WSL. Set `target` to `aarch64-pc-windows-msvc`
+for Windows on Arm or `x86_64-pc-windows-msvc` for Windows x64.
 
 ```sh
-cargo xwin build -p moon --features uiaccess --release --target x86_64-pc-windows-msvc --locked
+target=aarch64-pc-windows-msvc
+cargo xwin build -p moon --features uiaccess --release --target "$target" --locked
 ```
 
 After development probes have exited, open the verified setup EXE from Downloads

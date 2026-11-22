@@ -20,6 +20,7 @@ public static class MoonInstallNative {
     [DllImport("advapi32.dll")] static extern IntPtr GetSidSubAuthority(IntPtr sid,uint index);
     [DllImport("advapi32.dll")] static extern uint GetLengthSid(IntPtr sid);
     [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+    [DllImport("kernel32.dll",SetLastError=true)] static extern bool IsWow64Process2(IntPtr process,out ushort machine,out ushort nativeMachine);
     [DllImport("kernel32.dll",SetLastError=true)] static extern IntPtr OpenProcess(uint access,bool inherit,uint processId);
     [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool QueryFullProcessImageName(IntPtr process,uint flags,StringBuilder path,ref uint length);
     [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetProcessTimes(IntPtr process,out long created,out long exited,out long kernel,out long user);
@@ -37,7 +38,17 @@ public static class MoonInstallNative {
     [DllImport("kernel32.dll")] static extern bool FreeLibrary(IntPtr module);
     [DllImport("user32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern IntPtr SendMessageTimeout(IntPtr window,uint message,IntPtr wparam,string lparam,uint flags,uint timeout,out UIntPtr result);
     static Exception Error() { return new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error()); }
-    public static string ProgramFilesX64() {
+    public static ushort NativeMachine() {
+        ushort machine,nativeMachine;
+        if(!IsWow64Process2(GetCurrentProcess(),out machine,out nativeMachine))throw Error();
+        return nativeMachine;
+    }
+    public static ushort ProcessMachine(IntPtr process) {
+        ushort machine,nativeMachine;
+        if(!IsWow64Process2(process,out machine,out nativeMachine))throw Error();
+        return machine==0 ? nativeMachine : machine;
+    }
+    public static string NativeProgramFiles() {
         if(!Environment.Is64BitProcess) {
             using(var machine=RegistryKey.OpenBaseKey(RegistryHive.LocalMachine,RegistryView.Registry64))
             using(var windows=machine.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion")) {
@@ -46,7 +57,7 @@ public static class MoonInstallNative {
                 return directory;
             }
         }
-        var folder=new Guid("6d809377-6af0-444b-8957-a3773f02200e");
+        var folder=new Guid("905e63b6-c1bf-494e-b29c-65b732d3d21a"); // FOLDERID_ProgramFiles
         IntPtr path;Marshal.ThrowExceptionForHR(SHGetKnownFolderPath(ref folder,0,IntPtr.Zero,out path));
         try{return Marshal.PtrToStringUni(path);}finally{Marshal.FreeCoTaskMem(path);}
     }
@@ -150,7 +161,17 @@ public static class MoonInstallNative {
 '@
 }
 
-function Get-MoonInstallDirectory { Join-Path ([MoonInstallNative]::ProgramFilesX64()) 'moon' }
+function Get-MoonInstallDirectory { Join-Path ([MoonInstallNative]::NativeProgramFiles()) 'moon' }
+function Get-MoonNativeWindowsTarget {
+    switch ([MoonInstallNative]::NativeMachine()) {
+        0x8664 { 'x86_64-pc-windows-msvc' }
+        0xaa64 { 'aarch64-pc-windows-msvc' }
+        default { throw 'Moon requires 64-bit Windows on an x64 or Arm64 processor.' }
+    }
+}
+function Get-MoonBuildDirectory([ValidateSet('debug','release')][string]$Profile) {
+    Join-Path $PSScriptRoot "..\target\$(Get-MoonNativeWindowsTarget)\$Profile"
+}
 function Get-MoonStartupLinks {
     param([string[]]$Programs,[string]$Directory=([Environment]::GetFolderPath('Startup')))
     if (!(Test-Path -LiteralPath $Directory)) {return}
@@ -1127,12 +1148,17 @@ function Test-MoonSetupCancellation([string]$OperationId) {
 function Get-MoonWebViewRuntime {
     # Microsoft's documented Evergreen runtime identity; Edge browser versions
     # are deliberately not treated as an installed WebView2 runtime.
-    $client='Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
-    foreach ($entry in @(@([Microsoft.Win32.Registry]::CurrentUser,('Software\'+$client)),@([Microsoft.Win32.Registry]::LocalMachine,('Software\WOW6432Node\'+$client)))) {
-        $key=$entry[0].OpenSubKey($entry[1])
-        if (!$key) {continue}
-        try {$version=$null;if ([version]::TryParse([string]$key.GetValue('pv'),[ref]$version) -and $version -gt [version]'0.0.0.0') {return $version.ToString()}}
-        finally {$key.Dispose()}
+    $client='Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+    $machine=[Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine,[Microsoft.Win32.RegistryView]::Registry32)
+    try {
+        foreach ($root in @([Microsoft.Win32.Registry]::CurrentUser,$machine)) {
+            $key=$root.OpenSubKey($client)
+            if (!$key) {continue}
+            try {$version=$null;if ([version]::TryParse([string]$key.GetValue('pv'),[ref]$version) -and $version -gt [version]'0.0.0.0') {return $version.ToString()}}
+            finally {$key.Dispose()}
+        }
+    } finally {
+        $machine.Dispose()
     }
     return $null
 }

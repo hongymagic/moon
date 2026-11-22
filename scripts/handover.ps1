@@ -47,11 +47,11 @@ $powershell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershel
 $names=@('glazewm.exe','zebar.exe','tacky-borders.exe')
 if (!$InventoryPath) {
     $InventoryPath=Join-Path $PSScriptRoot 'window_inventory.exe'
-    if (!(Test-Path -LiteralPath $InventoryPath -PathType Leaf)) {$InventoryPath=Join-Path $PSScriptRoot '..\target\x86_64-pc-windows-msvc\release\examples\window_inventory.exe'}
+    if (!(Test-Path -LiteralPath $InventoryPath -PathType Leaf)) {$InventoryPath=Join-Path (Get-MoonBuildDirectory release) 'examples\window_inventory.exe'}
 }
 if (!$RecoveryPath) {
     $RecoveryPath=Join-Path $PSScriptRoot 'recover_windows.exe'
-    if (!(Test-Path -LiteralPath $RecoveryPath -PathType Leaf)) {$RecoveryPath=Join-Path $PSScriptRoot '..\target\x86_64-pc-windows-msvc\release\examples\recover_windows.exe'}
+    if (!(Test-Path -LiteralPath $RecoveryPath -PathType Leaf)) {$RecoveryPath=Join-Path (Get-MoonBuildDirectory release) 'examples\recover_windows.exe'}
 }
 function Get-PreviousDesktopProcesses {
     @(Get-CimInstance Win32_Process | Where-Object {$_.SessionId -eq $session -and $names -contains $_.Name.ToLowerInvariant()})

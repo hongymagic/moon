@@ -13,9 +13,15 @@ pub fn embed(binary: &str, display_name: &str, manifest_path: &str, uiaccess: bo
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
+    let architecture = match env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
+        Ok("x86_64") => "amd64",
+        Ok("aarch64") => "arm64",
+        other => panic!("unsupported Moon Windows architecture: {other:?}"),
+    };
     let source = fs::read_to_string(manifest_path).expect("read Windows manifest");
     let manifest = source
         .replace("@ASSEMBLY_VERSION@", &format!("{year}.{month}.{day}.{build}"))
+        .replace("@PROCESSOR_ARCHITECTURE@", architecture)
         .replace("@UIACCESS@", if uiaccess { "true" } else { "false" })
         .replace("name=\"moon\"", &format!("name=\"{binary}\""))
         .replace("moon window manager", display_name);

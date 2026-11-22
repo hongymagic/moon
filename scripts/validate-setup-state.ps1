@@ -232,6 +232,18 @@ function Start-Process {
         $payload=Join-Path $temporary 'payload';[void][IO.Directory]::CreateDirectory($payload)
         foreach($file in @('moon.exe','moon-settings.exe','install.ps1','uninstall.ps1','setup.ps1','handover.ps1','verify-uiaccess.ps1','window_inventory.exe','recover_windows.exe')){[IO.File]::WriteAllText((Join-Path $payload $file),'owned existence fixture; never executed')}
         Test-MoonSetupPayload $payload (Join-Path $payload 'moon.exe') (Join-Path $payload 'moon-settings.exe')
+        & {
+            $manifest=Join-Path $payload 'package-manifest.json'
+            [IO.File]::WriteAllText($manifest,'{"target":"aarch64-pc-windows-msvc"}')
+            function Get-MoonNativeWindowsTarget {'aarch64-pc-windows-msvc'}
+            Test-MoonSetupPayload $payload (Join-Path $payload 'moon.exe') (Join-Path $payload 'moon-settings.exe')
+            function Get-MoonNativeWindowsTarget {'x86_64-pc-windows-msvc'}
+            $rejected=$false
+            try {Test-MoonSetupPayload $payload (Join-Path $payload 'moon.exe') (Join-Path $payload 'moon-settings.exe')} catch [PlatformNotSupportedException] {$rejected=$true}
+            if(!$rejected){throw 'Guided setup accepted Arm64 executables on an x64 PC.'}
+            [IO.File]::Delete($manifest)
+        }
+        $checks.Add('Guided preflight accepts the Arm64 package on Arm64 and rejects it on x64 before handover')
         Remove-Item -LiteralPath (Join-Path $payload 'recover_windows.exe')
         $rejected=$false;try{Test-MoonSetupPayload $payload (Join-Path $payload 'moon.exe') (Join-Path $payload 'moon-settings.exe')}catch{$rejected=$true}
         if(!$rejected){throw 'Incomplete first-install payload passed guided preflight.'}

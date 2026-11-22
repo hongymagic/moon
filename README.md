@@ -4,9 +4,11 @@ Moon is a tiling window manager for Windows 11. It arranges your windows as you 
 
 [Get started with Moon](https://moon.hongy.dev) for a visual installation guide, interactive keyboard walkthrough and screenshots.
 
-## Install on Windows 11 x64
+## Install on Windows 11
 
-1. [Download Moon for Windows](https://moon.hongy.dev/download) and double-click the setup EXE from the account where you’ll use Moon.
+Choose the installer that matches **System type** under **Settings → System → About**. [Download x64](https://moon.hongy.dev/download) · [Download Arm64](https://moon.hongy.dev/download?arch=arm64)
+
+1. Double-click the setup EXE from the account where you’ll use Moon.
 2. Choose **Install Moon** and approve the Windows prompt. Setup installs Moon under Program Files and signs the window manager with a certificate on your PC so it can manage elevated windows.
 3. Choose **Open Settings**. If setup offers **Get WebView2**, install Microsoft's Evergreen Runtime and return to setup. To reopen Settings later, search for **Moon** in Start.
 

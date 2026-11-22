@@ -23,6 +23,13 @@ function Get-MoonSetupHandoverArguments {
 }
 function Test-MoonSetupPayload {
     param([string]$PackageDirectory,[string]$Daemon,[string]$Settings,[bool]$Installed=$false)
+    $manifestPath=Join-Path $PackageDirectory 'package-manifest.json'
+    if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
+        $package=Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+        if ($package.target -ceq 'aarch64-pc-windows-msvc' -and (Get-MoonNativeWindowsTarget) -cne $package.target) {
+            throw [PlatformNotSupportedException]::new('This download is for Windows on Arm. Download the x64 installer for this PC.')
+        }
+    }
     foreach($path in @($Daemon,$Settings,(Join-Path $PackageDirectory 'install.ps1'),(Join-Path $PackageDirectory 'uninstall.ps1'),(Join-Path $PackageDirectory 'setup.ps1'))) {
         if (!(Test-Path -LiteralPath $path -PathType Leaf)) {throw "The extracted Moon package is missing: $path"}
     }
@@ -32,7 +39,7 @@ function Test-MoonSetupPayload {
         }
         foreach($file in @('window_inventory.exe','recover_windows.exe')) {
             $path=Join-Path $PackageDirectory $file
-            if (!(Test-Path -LiteralPath $path -PathType Leaf)) {$path=Join-Path $PackageDirectory ('..\target\x86_64-pc-windows-msvc\release\examples\'+$file)}
+            if (!(Test-Path -LiteralPath $path -PathType Leaf)) {$path=Join-Path $PackageDirectory "..\target\$(Get-MoonNativeWindowsTarget)\release\examples\$file"}
             if (!(Test-Path -LiteralPath $path -PathType Leaf)) {throw "The extracted Moon package is missing: $file"}
         }
     }
@@ -126,6 +133,7 @@ if (Test-MoonAdministrator) {
     $ui.Secondary.Visibility='Collapsed';$ui.Secondary.IsDefault=$false;$ui.Secondary.IsCancel=$false
 } elseif ($Mode -eq 'Install') {
     try {Test-MoonSetupPayload $PSScriptRoot $Binary $SettingsBinary $installed}
+    catch [PlatformNotSupportedException] {$context.exitCode=1;$ui.Status.Text=$_.Exception.Message;$ui.Primary.IsEnabled=$false;$ui.Secondary.Content='Close'}
     catch {$context.exitCode=1;Show-MoonSetupProblem 'Download Moon Setup again. If you use the ZIP, extract the whole folder before opening Install Moon.cmd.' $_;$ui.Primary.IsEnabled=$false;$ui.Secondary.Content='Close'}
 }
 $timer=[Windows.Threading.DispatcherTimer]::new();$timer.Interval=[TimeSpan]::FromMilliseconds(350)

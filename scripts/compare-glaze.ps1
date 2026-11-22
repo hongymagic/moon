@@ -1,9 +1,9 @@
 [CmdletBinding()]
 param([switch]$RestoreGlazeForCapture,[string]$InventoryPath,[string]$RecoveryPath,[string]$ReportPath=(Join-Path $env:LOCALAPPDATA 'moon-dev\glaze-enumeration.json'))
 . (Join-Path $PSScriptRoot 'install-common.ps1')
-if (!$InventoryPath) {$InventoryPath=Join-Path $PSScriptRoot '..\target\x86_64-pc-windows-msvc\release\examples\window_inventory.exe'}
+if (!$InventoryPath) {$InventoryPath=Join-Path (Get-MoonBuildDirectory release) 'examples\window_inventory.exe'}
 $InventoryPath=(Resolve-Path -LiteralPath $InventoryPath).ProviderPath
-if (!$RecoveryPath) {$RecoveryPath=Join-Path $PSScriptRoot '..\target\x86_64-pc-windows-msvc\release\examples\recover_windows.exe'}
+if (!$RecoveryPath) {$RecoveryPath=Join-Path (Get-MoonBuildDirectory release) 'examples\recover_windows.exe'}
 if ($RestoreGlazeForCapture) {$RecoveryPath=(Resolve-Path -LiteralPath $RecoveryPath).ProviderPath}
 $session=[Diagnostics.Process]::GetCurrentProcess().SessionId
 if (@(Get-CimInstance Win32_Process | Where-Object {$_.SessionId -eq $session -and $_.Name -in @('moon.exe','testwin.exe')}).Count) {throw 'Wait for the active moon/testwin validation run to finish before the Glaze comparison.'}

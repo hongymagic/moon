@@ -20,7 +20,7 @@ use windows::{
         Security::{Authorization::*, *},
         Storage::FileSystem::*,
         System::{Com::CoTaskMemFree, IO::*, Pipes::*, Threading::*},
-        UI::Shell::{FOLDERID_ProgramFilesX64, KF_FLAG_DEFAULT, SHGetKnownFolderPath},
+        UI::Shell::{FOLDERID_ProgramFiles, KF_FLAG_DEFAULT, SHGetKnownFolderPath},
     },
     core::{Error, PCWSTR, PWSTR, Result},
 };
@@ -381,7 +381,7 @@ fn installed_executable() -> Result<PathBuf> {
         Err(error) => return Err(error),
     };
     unsafe {
-        let path = SHGetKnownFolderPath(&FOLDERID_ProgramFilesX64, KF_FLAG_DEFAULT, None)?;
+        let path = SHGetKnownFolderPath(&FOLDERID_ProgramFiles, KF_FLAG_DEFAULT, None)?;
         let directory = PathBuf::from(std::ffi::OsString::from_wide(path.as_wide()));
         CoTaskMemFree(Some(path.0.cast()));
         Ok(directory.join("moon").join("moon.exe"))

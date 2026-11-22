@@ -1,16 +1,18 @@
 # Windows distribution package
 
-GitHub Actions publishes a Windows x64 release after a push to `main` passes CI.
+GitHub Actions publishes Windows x64 and Arm64 packages after a push to `main` passes CI.
 The tag uses `YYYY.MM.DD-n`, with the date in Australia/Sydney when the
 release job selects its version. The first release that day starts at `0`.
 The setup EXE, ZIP and their checksums carry the release tag in their names.
 The package manifest, Explorer’s product version and the Moon CLI report the
 same version. Local builds default to the Cargo workspace version.
 
-The release queue serializes version selection and publication. Packaging verifies
-both downloads before the job creates its Git tag. A rerun reuses the tag for that commit,
-finishes a pending draft and compares the uploaded asset names and SHA-256
-digests to the local files before publishing. A completed release is skipped on
+CI runs the integration suite on native x64 and Arm64 Windows runners. The release
+job builds both packages with the x64 runner's MSVC toolsets and verifies both before
+creating the Git tag. The release queue serializes version selection and publication.
+A rerun reuses the tag for that commit, finishes a pending draft and compares
+the uploaded asset names and SHA-256 digests to the local files before publishing.
+A completed release is skipped on
 reruns. If CI finishes out of merge order, the newest released commit on
 `main` retains GitHub's **Latest** designation.
 
@@ -24,13 +26,17 @@ $package = .\scripts\package.ps1 -Binary C:\build\moon.exe `
   -InventoryBinary C:\build\examples\window_inventory.exe `
   -RecoveryBinary C:\build\examples\recover_windows.exe `
   -RustLibraryNotices (Join-Path (rustc --print sysroot) 'share/doc/rust/COPYRIGHT-library.html') `
-  -Version 0.1.0 -OutputDirectory C:\releases
+  -Version 0.1.0 -Target aarch64-pc-windows-msvc -OutputDirectory C:\releases
 ```
 
+`-Target` defaults to `x86_64-pc-windows-msvc`. Build all four binaries for the
+same target and use `--features uiaccess` for the daemon. Build the frontend
+before building Settings if its bundled assets have changed.
+
 From WSL, `just package <moon> <settings> <inventory> <recovery> <output> [version]`
-converts these explicit paths for Windows. The default version is `0.1.0`.
-Build the frontend before building Settings, the daemon with `--features
-uiaccess`, and the inventory/recovery examples for `x86_64-pc-windows-msvc`.
+converts the explicit paths for Windows. It uses the local architecture and
+defaults to version `0.1.0`. Set `MOON_WINDOWS_TARGET=aarch64-pc-windows-msvc`
+when packaging Arm64 binaries from an x64 PC.
 The installer signs its protected copies locally; packaging does not require or
 create a machine-trusted signing certificate.
 
@@ -42,7 +48,7 @@ GitHub release bundles include the compiler’s standard-library notices under
 `licenses/Rust-library.html`. The Evergreen WebView2 runtime is a separately detected prerequisite; the
 WebView2 loader is statically linked by the pinned Rust dependency.
 
-Validation requires x64 PE application images, matching product/version/original
+Validation requires PE32+ application images for the selected target, matching product/version/original
 filename resources and multi-size icon resource 101, `asInvoker` manifests,
 `PerMonitorV2`, UIAccess for the daemon and ordinary permissions for Settings.
 The ordinary and delay-import tables of all four executables are checked for
@@ -53,8 +59,8 @@ can instead be supplied with `-StageDirectory`; unexpected files and links are
 rejected. If it already contains `package-manifest.json`, every recorded hash,
 size, entry, and package identity is verified before repackaging.
 
-Release packaging writes `moon-<version>-windows-x64-setup.exe`,
-`moon-<version>-windows-x64.zip`, a `.sha256` file for each download,
+Release packaging writes `moon-<version>-windows-<arch>-setup.exe`,
+`moon-<version>-windows-<arch>.zip`, a `.sha256` file for each download,
 the extracted package directory and an external `.manifest.json`. The internal manifest lists sorted
 payload paths, exact lengths, SHA-256 hashes, and executable identities. It does
 not attempt to hash itself; the ZIP hash covers the manifest too. The archive is
@@ -63,8 +69,12 @@ outputs are never overwritten. Cleanup attempts every temporary and partially
 published path owned by the failed invocation; a locked leftover is reported
 without masking the original failure or skipping the remaining paths.
 
-`scripts/build-setup-exe.ps1` uses the x64 C# compiler supplied with Windows’
-.NET Framework. It embeds the verified ZIP in the EXE and gives it Moon’s icon
+`scripts/build-setup-exe.ps1` uses the C# compiler supplied with Windows’
+.NET Framework. The Arm64 package uses an AnyCPU launcher that runs natively
+on Windows 11 with the built-in .NET Framework 4.8.1. Its payload contains native
+Arm64 executables. [Microsoft .NET Framework release notes](https://devblogs.microsoft.com/dotnet/announcing-dotnet-framework-481/)
+
+The launcher embeds the verified ZIP and includes Moon’s icon
 and an `asInvoker` manifest. Double-clicking the EXE checks the embedded ZIP,
 extracts it to a private working folder and opens the same setup window as
 **Install Moon.cmd**. Setup asks for Windows approval when installation needs it.
@@ -87,7 +97,8 @@ It compares the EXE’s embedded ZIP with the release ZIP and exercises setup an
 cleanup with a harmless test script.
 
 ```powershell
-.\scripts\validate-setup-exe.ps1 -InstallerPath $package.installer -ArchivePath $package.archive -Version $package.version
+.\scripts\validate-setup-exe.ps1 -InstallerPath $package.installer -ArchivePath $package.archive `
+  -Version $package.version -Target $package.target
 ```
 
 Manifest JSON uses ordered fields, ordinal path ordering, UTF-8 without a BOM,

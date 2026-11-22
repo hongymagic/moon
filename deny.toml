@@ -1,7 +1,7 @@
 [graph]
 # The shipped application is Windows-only. Linux runs the portable core tests;
 # it does not build the settings host's GTK/WebKit dependencies.
-targets = ["x86_64-pc-windows-msvc"]
+targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"]
 
 [advisories]
 version = 2
