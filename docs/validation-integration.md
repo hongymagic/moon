@@ -11,6 +11,11 @@ Run `just integration` to reproduce the scenario. On a Windows build machine:
 ./scripts/integration.ps1 -BuildDirectory ./target/x86_64-pc-windows-msvc/release
 ```
 
+The hosted Arm64 job uses `-AllowBackgroundDesktop`. If Windows refuses to
+activate the suite's own test window, the suite records the foreground-only
+scenarios it could not run. The job checks window placement, workspace
+changes, restart, recovery and the installer on native Arm64.
+
 The script writes `target/integration-results.json` when `-BuildDirectory` is
 used. Process logs are retained in the printed temporary directory. The recorded
 local run is also copied to `target/integration-results.json` and

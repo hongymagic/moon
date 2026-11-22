@@ -18,14 +18,14 @@ public static class MoonTestForeground {
 }
 '@
 }
-function Set-MoonTestForeground([long]$Window,[uint32]$HelperProcessId) {
-    if (![MoonTestForeground]::Request($Window,$HelperProcessId,0x8060,0)) {throw 'Windows refused to activate the owned test window.'}
+function Try-Set-MoonTestForeground([long]$Window,[uint32]$HelperProcessId) {
+    if (![MoonTestForeground]::Request($Window,$HelperProcessId,0x8060,0)) {return $false}
     $deadline=[DateTime]::UtcNow.AddSeconds(5)
     do {
-        if ([MoonTestForeground]::GetForegroundWindow().ToInt64() -eq $Window) {return}
+        if ([MoonTestForeground]::GetForegroundWindow().ToInt64() -eq $Window) {return $true}
         Start-Sleep -Milliseconds 50
     } while ([DateTime]::UtcNow -lt $deadline)
-    throw 'The owned test window did not become the foreground window.'
+    return $false
 }
 function Grant-MoonTestForeground([uint32]$HelperProcessId,[uint32]$ProcessId) {
     $foreground=[MoonTestForeground]::GetForegroundWindow().ToInt64()

@@ -109,7 +109,9 @@ jobs:
       # Keep the static CRT setting on target code, away from host proc macros.
       - run: cargo clippy --workspace --all-targets --target $env:WINDOWS_TARGET --locked -- -D warnings
       - run: cargo test --workspace --target $env:WINDOWS_TARGET --locked
-      - run: cargo build --workspace --release --target $env:WINDOWS_TARGET --locked
+      - name: Build release applications
+        id: release_apps
+        run: cargo build --workspace --release --target $env:WINDOWS_TARGET --locked
       - name: Setup ownership and recovery
         shell: powershell
         run: |
@@ -123,16 +125,16 @@ jobs:
           ./scripts/setup.ps1 -CompileOnly
       - name: Real window integration
         shell: pwsh
-        run: ./scripts/integration.ps1 -BuildDirectory "$PWD/target/$env:WINDOWS_TARGET/release"
+        run: ./scripts/integration.ps1 -BuildDirectory "$PWD/target/$env:WINDOWS_TARGET/release" -AllowBackgroundDesktop:($env:WINDOWS_TARGET -eq 'aarch64-pc-windows-msvc')
       - name: Pre-existing window workspace assignments
         shell: powershell
         run: ./scripts/integration.ps1 -BuildDirectory "$PWD/target/$env:WINDOWS_TARGET/release" -StartupAssignmentOnly -ReportPath "$PWD/target/startup-assignment-results.json"
       - name: Workspace carousel integration
         shell: powershell
-        run: ./scripts/carousel-integration.ps1 -BuildDirectory "$PWD/target/$env:WINDOWS_TARGET/release" -ReportPath "$PWD/target/carousel-integration-results.json"
+        run: ./scripts/carousel-integration.ps1 -BuildDirectory "$PWD/target/$env:WINDOWS_TARGET/release" -ReportPath "$PWD/target/carousel-integration-results.json" -AllowBackgroundDesktop:($env:WINDOWS_TARGET -eq 'aarch64-pc-windows-msvc')
       - name: Build and exercise the Windows installer
         # Exercise the Arm64 launcher natively before the x64 release runner publishes it.
-        if: github.event_name == 'pull_request' || matrix.arch == 'arm64'
+        if: ${{ !cancelled() && steps.release_apps.outcome == 'success' && (github.event_name == 'pull_request' || matrix.arch == 'arm64') }}
         shell: powershell
         run: |
           cargo build --locked --release --target $env:WINDOWS_TARGET -p moon --features moon/uiaccess
@@ -161,6 +163,7 @@ jobs:
             target/integration-results.json
             target/startup-assignment-results.json
             target/carousel-integration-results.json
+            target/carousel-integration-results.json.failure.json
             target/integration-logs/
             target/install-recovery-checks.json
             target/upgrade-snapshot-checks.json
