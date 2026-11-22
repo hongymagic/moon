@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param([Parameter(Mandatory)][string]$BuildDirectory,[string]$ReportPath,[switch]$Measure)
 . (Join-Path $PSScriptRoot 'install-common.ps1')
+. (Join-Path $PSScriptRoot 'test-window-foreground.ps1')
 $ErrorActionPreference='Stop'
 if(!$ReportPath){$ReportPath=Join-Path $env:LOCALAPPDATA 'moon-dev\carousel-integration.json'}
 $moon=Join-Path $BuildDirectory 'moon.exe'
@@ -102,6 +103,8 @@ try {
  if($Measure){$startArguments+='--surfaces'}
  $ready=Moon -Words $startArguments;$owned=[int]$ready.process_id
  Wait-Workspace 4 $false
+ Set-MoonTestForeground (Moon -Words @('query','world')).focused $helper.Id
+ Grant-MoonTestForeground $helper.Id $owned
  Record 'Workspace motion preserves the ordinary four-window tiled layout'
  $null=Moon -Words @('move-to-workspace','2')
  $null=Moon -Words @('move-to-workspace','2')
@@ -117,9 +120,11 @@ try {
  }
  Record 'Whole-workspace switches settle to exact native frames and cloak state'
  $hidden=@(Moon -Words @('query','windows')|Where-Object {!$_.visible})[0]
+ Grant-MoonTestForeground $helper.Id $PID
  if(![MoonCarouselIntegration]::SetForegroundWindow([IntPtr][long]$hidden.id)){throw 'Windows refused foreground for the owned hidden-workspace fixture.'}
  Wait-MoonCondition -Description 'external window focus activates its containing workspace' -Condition {(Moon -Words @('query','world')).focused -eq [long]$hidden.id}
  Wait-Workspace 2
+ Grant-MoonTestForeground $helper.Id $owned
  Record 'Focusing an owned window activates the workspace containing it'
  $activeBefore=(Moon -Words @('query','world')).active|ConvertTo-Json -Compress
  $null=Moon -Words @('focus','left');$null=Moon -Words @('focus','right')

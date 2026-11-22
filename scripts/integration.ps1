@@ -11,6 +11,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+. (Join-Path $PSScriptRoot 'test-window-foreground.ps1')
 if (@($GuardOnly,$StartupAssignmentOnly,$BindingEffectsOnly | Where-Object { $_ }).Count -gt 1) { throw 'Choose only one focused integration mode.' }
 if (!$ExtensionPath) { $ExtensionPath = Join-Path $PSScriptRoot '..\examples\workspace-state.ps1' }
 if ($BuildDirectory) {
@@ -470,13 +471,18 @@ try {
     Assert-Placements
     Record-Pass 'minimize restores the same tree slot'
 
+    $focusSource=(Invoke-Moon query windows | Where-Object visible | Sort-Object {$_.rect.x} -Descending | Select-Object -First 1).id
+    Set-MoonTestForeground $focusSource $helper.Id
+    Wait-Until -Description 'Moon observes the owned foreground window' -Condition { [long](Invoke-Moon query world).focused -eq [long]$focusSource }
+    Grant-MoonTestForeground $helper.Id $ownedDaemon
 
     foreach ($command in @(@('focus','left'),@('move','right'),@('resize','width','+2%'),@('toggle-direction'))) {
         $null = Invoke-Moon @command
         Assert-Placements
         if ($command[0] -eq 'focus') {
             Wait-Until -Description 'focus command activates the owned helper' -Seconds 5 -Condition {
-                [MoonIntegrationNative]::GetForegroundWindow().ToInt64() -eq [long](Invoke-Moon query world).focused
+                $focused=[long](Invoke-Moon query world).focused
+                $focused -ne $focusSource -and $originals.ContainsKey([string]$focused) -and [MoonIntegrationNative]::GetForegroundWindow().ToInt64() -eq $focused
             }
         }
     }
