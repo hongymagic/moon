@@ -5,13 +5,17 @@ import { GET } from "../app/download/route";
 const releases = "https://github.com/hongymagic/moon/releases";
 const fallback = `${releases}/latest`;
 
-function publishedRelease(tag: string, suffixes = [".zip", "-setup.exe"]) {
+function publishedRelease(
+  tag: string,
+  suffixes = [".zip", "-setup.exe"],
+  architecture = "x64",
+) {
   return {
     tag_name: tag,
     draft: false,
     prerelease: false,
     assets: suffixes.map((suffix) => {
-      const name = `moon-${tag}-windows-x64${suffix}`;
+      const name = `moon-${tag}-windows-${architecture}${suffix}`;
       return {
         name,
         state: "uploaded",
@@ -46,6 +50,43 @@ test("prefers the setup EXE and honours explicit ZIP downloads", async () => {
     );
     upstream.mock.restore();
   }
+});
+
+test("selects the requested architecture and format from a dual-architecture release", async () => {
+  const tag = "2026.11.22-0";
+  const x64 = publishedRelease(tag);
+  const arm64 = publishedRelease(tag, undefined, "arm64");
+  mock.method(globalThis, "fetch", async () =>
+    Response.json({ ...x64, assets: [...x64.assets, ...arm64.assets] }),
+  );
+  for (const [architecture, release] of [
+    ["x64", x64],
+    ["arm64", arm64],
+  ] as const) {
+    assert.equal(
+      (await download(`?arch=${architecture}`)).headers.get("Location"),
+      release.assets[1].browser_download_url,
+    );
+    assert.equal(
+      (await download(`?arch=${architecture}&format=zip`)).headers.get("Location"),
+      release.assets[0].browser_download_url,
+    );
+  }
+});
+
+test("never substitutes x64 assets for an Arm64 request", async () => {
+  const tag = "2026.11.22-0";
+  const x64 = publishedRelease(tag);
+  const [armZip] = publishedRelease(tag, [".zip"], "arm64").assets;
+  let assets = x64.assets;
+  mock.method(globalThis, "fetch", async () => Response.json({ ...x64, assets }));
+  assert.equal((await download("?arch=arm64")).headers.get("Location"), fallback);
+  assert.equal((await download("?arch=unknown")).headers.get("Location"), fallback);
+  assets = [...assets, armZip];
+  assert.equal(
+    (await download("?arch=arm64")).headers.get("Location"),
+    armZip.browser_download_url,
+  );
 });
 
 test("serves the ZIP for older releases and incomplete installer uploads", async () => {

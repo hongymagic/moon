@@ -28,8 +28,8 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: apps/settings/package.json
-      - name: Test release version allocation
-        run: bun test ./scripts/release-version.test.ts
+      - name: Test release version allocation and download routing
+        run: bun test ./scripts/release-version.test.ts ./apps/website/tests/download.test.ts
       - run: bun install --frozen-lockfile
         working-directory: apps/settings
       - run: bun run check && bun run build
@@ -88,16 +88,30 @@ jobs:
       - run: cargo deny check
       - run: cargo audit
   windows:
-    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-2025
+            target: x86_64-pc-windows-msvc
+          - arch: arm64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
+    env:
+      WINDOWS_TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       # Keep the static CRT setting on target code, away from host proc macros.
-      - run: cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc --locked -- -D warnings
-      - run: cargo test --workspace --target x86_64-pc-windows-msvc --locked
-      - run: cargo build --workspace --release --target x86_64-pc-windows-msvc --locked
+      - run: cargo clippy --workspace --all-targets --target $env:WINDOWS_TARGET --locked -- -D warnings
+      - run: cargo test --workspace --target $env:WINDOWS_TARGET --locked
+      - name: Build release applications
+        id: release_apps
+        run: cargo build --workspace --release --target $env:WINDOWS_TARGET --locked
       - name: Setup ownership and recovery
         shell: powershell
         run: |
@@ -108,38 +122,50 @@ jobs:
           ./scripts/validate-setup-state.ps1 -ReportPath "$PWD/target/setup-state-checks.json"
           ./scripts/validate-startup.ps1 -ReportPath "$PWD/target/startup-preference-checks.json"
           ./scripts/validate-install-shell.ps1 -ReportPath "$PWD/target/install-shell-checks.json"
+          ./scripts/setup.ps1 -CompileOnly
       - name: Real window integration
         shell: pwsh
-        run: ./scripts/integration.ps1 -BuildDirectory "$PWD/target/x86_64-pc-windows-msvc/release"
+        run: ./scripts/integration.ps1 -BuildDirectory "$PWD/target/$env:WINDOWS_TARGET/release" -AllowBackgroundDesktop:($env:WINDOWS_TARGET -eq 'aarch64-pc-windows-msvc')
       - name: Pre-existing window workspace assignments
+        if: ${{ !cancelled() && steps.release_apps.outcome == 'success' }}
         shell: powershell
-        run: ./scripts/integration.ps1 -BuildDirectory "$PWD/target/x86_64-pc-windows-msvc/release" -StartupAssignmentOnly -ReportPath "$PWD/target/startup-assignment-results.json"
+        run: ./scripts/integration.ps1 -BuildDirectory "$PWD/target/$env:WINDOWS_TARGET/release" -StartupAssignmentOnly -ReportPath "$PWD/target/startup-assignment-results.json"
       - name: Workspace carousel integration
+        if: ${{ !cancelled() && steps.release_apps.outcome == 'success' }}
         shell: powershell
-        run: ./scripts/carousel-integration.ps1 -BuildDirectory "$PWD/target/x86_64-pc-windows-msvc/release" -ReportPath "$PWD/target/carousel-integration-results.json"
+        run: ./scripts/carousel-integration.ps1 -BuildDirectory "$PWD/target/$env:WINDOWS_TARGET/release" -ReportPath "$PWD/target/carousel-integration-results.json" -AllowBackgroundDesktop:($env:WINDOWS_TARGET -eq 'aarch64-pc-windows-msvc')
       - name: Build and exercise the Windows installer
-        if: github.event_name == 'pull_request'
+        # Exercise the Arm64 launcher natively before the x64 release runner publishes it.
+        if: ${{ !cancelled() && steps.release_apps.outcome == 'success' && (github.event_name == 'pull_request' || matrix.arch == 'arm64') }}
         shell: powershell
         run: |
-          cargo build --locked --release --target x86_64-pc-windows-msvc -p moon --features moon/uiaccess
+          cargo build --locked --release --target $env:WINDOWS_TARGET -p moon --features moon/uiaccess
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          cargo build --locked --release --target x86_64-pc-windows-msvc -p moon-win --example window_inventory --example recover_windows
+          cargo build --locked --release --target $env:WINDOWS_TARGET -p moon-win --example window_inventory --example recover_windows
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          $build = "$PWD\target\x86_64-pc-windows-msvc\release"
-          $version = (Get-Item "$build\moon.exe").VersionInfo.ProductVersion
-          $package = .\scripts\package.ps1 -Version $version -OutputDirectory "$env:RUNNER_TEMP\moon-dist" `
-            -Binary "$build\moon.exe" -SettingsBinary "$build\moon-settings.exe" `
-            -InventoryBinary "$build\examples\window_inventory.exe" -RecoveryBinary "$build\examples\recover_windows.exe"
-          .\scripts\validate-setup-exe.ps1 -InstallerPath $package.installer -ArchivePath $package.archive -Version $version
+          $build = "$PWD\target\$env:WINDOWS_TARGET\release"
+          $inputs = @{
+            Target = $env:WINDOWS_TARGET
+            Version = (Get-Item "$build\moon.exe").VersionInfo.ProductVersion
+            Binary = "$build\moon.exe"
+            SettingsBinary = "$build\moon-settings.exe"
+            InventoryBinary = "$build\examples\window_inventory.exe"
+            RecoveryBinary = "$build\examples\recover_windows.exe"
+          }
+          $package = .\scripts\package.ps1 @inputs -OutputDirectory "$env:RUNNER_TEMP\moon-dist"
+          .\scripts\validate-setup-exe.ps1 -InstallerPath $package.installer -ArchivePath $package.archive `
+            -Version $package.version -Target $package.target -ReportPath "$PWD/target/setup-exe-checks.json"
+          .\scripts\validate-package.ps1 @inputs -ReportPath "$PWD/target/package-checks.json"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
-          name: windows-test-results
+          name: windows-${{ matrix.arch }}-test-results
           retention-days: 7
           path: |
             target/integration-results.json
             target/startup-assignment-results.json
             target/carousel-integration-results.json
+            target/carousel-integration-results.json.failure.json
             target/integration-logs/
             target/install-recovery-checks.json
             target/upgrade-snapshot-checks.json
@@ -147,6 +173,8 @@ jobs:
             target/setup-state-checks.json
             target/startup-preference-checks.json
             target/install-shell-checks.json
+            target/setup-exe-checks.json
+            target/package-checks.json
           if-no-files-found: ignore
   fuzz:
     runs-on: ubuntu-24.04

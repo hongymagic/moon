@@ -7,10 +7,12 @@ param(
     [string]$ReportPath = (Join-Path $env:LOCALAPPDATA 'moon-dev\integration-results.json'),
     [switch]$GuardOnly,
     [switch]$StartupAssignmentOnly,
-    [switch]$BindingEffectsOnly
+    [switch]$BindingEffectsOnly,
+    [switch]$AllowBackgroundDesktop
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+. (Join-Path $PSScriptRoot 'test-window-foreground.ps1')
 if (@($GuardOnly,$StartupAssignmentOnly,$BindingEffectsOnly | Where-Object { $_ }).Count -gt 1) { throw 'Choose only one focused integration mode.' }
 if (!$ExtensionPath) { $ExtensionPath = Join-Path $PSScriptRoot '..\examples\workspace-state.ps1' }
 if ($BuildDirectory) {
@@ -69,6 +71,7 @@ public static class MoonIntegrationNative {
     [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
+    [DllImport("user32.dll",SetLastError=true)] public static extern bool PostMessageW(IntPtr hwnd, uint message, IntPtr wparam, IntPtr lparam);
     [DllImport("user32.dll",SetLastError=true)] static extern bool GetWindowRect(IntPtr hwnd, out Rect rect);
     [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
     [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hwnd, int command);
@@ -201,12 +204,12 @@ function Invoke-PublicRequest([hashtable]$Request) {
     } finally { $pipe.Dispose() }
 }
 
-function Assert-EffectIdentity([long]$Id) {
+function Assert-HelperIdentity([long]$Id) {
     $helper.Refresh()
-    if ($helper.HasExited -or !$originals.ContainsKey([string]$Id) -or ![MoonIntegrationNative]::IsWindow([IntPtr]$Id) -or [MoonIntegrationNative]::Owner($Id) -ne $helper.Id) { throw 'An owned binding-effect window identity changed.' }
+    if ($helper.HasExited -or !$originals.ContainsKey([string]$Id) -or ![MoonIntegrationNative]::IsWindow([IntPtr]$Id) -or [MoonIntegrationNative]::Owner($Id) -ne $helper.Id) { throw 'An owned test window identity changed.' }
 }
 function Focus-EffectWindow([long]$Id) {
-    Assert-EffectIdentity $Id
+    Assert-HelperIdentity $Id
     $placement = @(Invoke-Moon query windows | Where-Object { [long]$_.id -eq $Id })
     if ($placement.Count -ne 1 -or !$placement[0].visible) { throw 'Refused to focus an inactive binding-effect window.' }
     if (![MoonIntegrationNative]::SetForegroundWindow([IntPtr]$Id)) { throw 'Windows refused owned binding-effect foreground.' }
@@ -227,7 +230,7 @@ function Assert-EffectWorkspace([string]$Name,[hashtable]$Members,[long]$Expecte
         if ($placements.Count -ne 4) { return $false }
         foreach ($entry in $world.windows.PSObject.Properties) {
             if (!$Members.ContainsKey($entry.Name) -or $world.workspaces[$entry.Value.workspace].name -ne $Members[$entry.Name]) { return $false }
-            Assert-EffectIdentity ([long]$entry.Name)
+            Assert-HelperIdentity ([long]$entry.Name)
             $placement = @($placements | Where-Object { [string]$_.id -eq $entry.Name })
             if ($placement.Count -ne 1 -or $placement[0].visible -ne ($Members[$entry.Name] -eq $Name)) { return $false }
         }
@@ -239,7 +242,7 @@ function Assert-EffectWorkspace([string]$Name,[hashtable]$Members,[long]$Expecte
 function Save-EffectStep([string]$Name) {
     $world = Invoke-Moon query world
     $native = foreach ($key in $originals.Keys) {
-        Assert-EffectIdentity ([long]$key)
+        Assert-HelperIdentity ([long]$key)
         [pscustomobject]@{id=[long]$key;frame=[MoonIntegrationNative]::Frame([long]$key);cloak=[MoonIntegrationNative]::Cloaked([long]$key)}
     }
     $effectSteps.Add([pscustomobject]@{name=$Name;active=$world.active;focused=$world.focused;paused=$world.paused;workspaces=$world.workspaces;native=@($native)})
@@ -339,7 +342,7 @@ function Invoke-BindingEffects {
     $treeBefore=(Invoke-Moon query world).workspaces | ConvertTo-Json -Depth 64 -Compress
     $null=Invoke-Moon pause
     if (!(Invoke-Moon query world).paused -or @(Invoke-Moon query windows).Count -ne 0) { throw 'Pause did not disable placement effects.' }
-    Assert-EffectIdentity $anchor
+    Assert-HelperIdentity $anchor
     $outer=[MoonIntegrationNative]::Outer($anchor)
     $offset=[pscustomobject]@{Left=($tiled.Left+17);Top=($tiled.Top+11);Right=($tiled.Right+17);Bottom=($tiled.Bottom+11)}
     if (![MoonIntegrationNative]::SetWindowPos([IntPtr]$anchor,[IntPtr]::Zero,($outer.Left+17),($outer.Top+11),0,0,0x15)) { throw 'Could not move the owned paused fixture.' }
@@ -470,13 +473,29 @@ try {
     Assert-Placements
     Record-Pass 'minimize restores the same tree slot'
 
+    $orderedTiles=@(Invoke-Moon query windows | Where-Object visible | Sort-Object {$_.rect.x})
+    $focusSource=$orderedTiles[-1].id
+    $foregroundAvailable=Try-Set-MoonTestForeground $focusSource $helper.Id
+    if ($foregroundAvailable) {
+        Wait-Until -Description 'Moon observes the owned foreground window' -Condition { [long](Invoke-Moon query world).focused -eq [long]$focusSource }
+        Grant-MoonTestForeground $helper.Id $ownedDaemon
+    } else {
+        if (!$AllowBackgroundDesktop) {throw 'Windows refused to activate the owned test window.'}
+        $focusSource=[long](Invoke-Moon query world).focused
+        $reason='This runner did not grant foreground activation to its own test window.'
+        $results.Add([pscustomobject]@{name='native foreground and borderless fullscreen';skipped=$true;reason=$reason})
+        Write-Host "SKIP native foreground and borderless fullscreen. $reason"
+    }
+    $focusDirection=if($focusSource -eq $orderedTiles[0].id){'right'}else{'left'}
 
-    foreach ($command in @(@('focus','left'),@('move','right'),@('resize','width','+2%'),@('toggle-direction'))) {
+    foreach ($command in @(@('focus',$focusDirection),@('move','right'),@('resize','width','+2%'),@('toggle-direction'))) {
         $null = Invoke-Moon @command
         Assert-Placements
         if ($command[0] -eq 'focus') {
-            Wait-Until -Description 'focus command activates the owned helper' -Seconds 5 -Condition {
-                [MoonIntegrationNative]::GetForegroundWindow().ToInt64() -eq [long](Invoke-Moon query world).focused
+            Wait-Until -Description 'focus command selects an owned helper' -Seconds 5 -Condition {
+                $focused=[long](Invoke-Moon query world).focused
+                $focused -ne $focusSource -and $originals.ContainsKey([string]$focused) -and
+                    (!$foregroundAvailable -or [MoonIntegrationNative]::GetForegroundWindow().ToInt64() -eq $focused)
             }
         }
     }
@@ -491,35 +510,37 @@ try {
     Assert-Placements
     Record-Pass 'floating and fullscreen transitions'
 
-    # Simulate a game's native borderless fullscreen transition on our own helper.
-    $null = Invoke-Moon workspace 1
-    $state = Invoke-Moon query world
-    $nativeId = [long]$state.focused
-    $nativeHandle = [IntPtr]$nativeId
-    Wait-Until -Description "native fullscreen fixture foreground must be owned helper $nativeId" -Seconds 5 -Condition {
-        [MoonIntegrationNative]::GetForegroundWindow().ToInt64() -eq $nativeId
-    }
-    $originalStyle = [MoonIntegrationNative]::GetWindowStyle($nativeHandle, -16)
-    $nativeMonitor = @($state.monitors | Where-Object { $_.id -eq $state.active_monitor })[0]
-    $beforeNative = [MoonIntegrationNative]::Frame($nativeId)
-    try {
-        $borderless = [IntPtr](($originalStyle.ToInt64() -band (-bnot [long]0x00CF0000)) -bor [long]2147483648)
-        [void][MoonIntegrationNative]::SetWindowStyle($nativeHandle, -16, $borderless)
-        $positioned = [MoonIntegrationNative]::SetWindowPos($nativeHandle, [IntPtr]::Zero, $nativeMonitor.bounds.x, $nativeMonitor.bounds.y, $nativeMonitor.bounds.width, $nativeMonitor.bounds.height, 0x24)
-        if (!$positioned) { throw "Native fullscreen placement failed: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())" }
-        $probe = [pscustomobject]@{ id=$nativeId; foreground=[MoonIntegrationNative]::GetForegroundWindow().ToInt64(); style=[MoonIntegrationNative]::GetWindowStyle($nativeHandle,-16).ToInt64(); frame=[MoonIntegrationNative]::Frame($nativeId); bounds=$nativeMonitor.bounds }
-        [IO.File]::WriteAllText((Join-Path $testDirectory 'native-fullscreen-probe.json'),($probe | ConvertTo-Json -Depth 8),$utf8)
-        Wait-Until -Description 'native borderless fullscreen is observed' -Condition { [bool](Invoke-Moon query world).native_fullscreen }
-        $nativeState = Invoke-Moon query world
-        if ($nativeState.windows.PSObject.Properties[[string]$nativeId].Value.fullscreen) { throw 'Native fullscreen incorrectly changed the manual fullscreen flag' }
+    if ($foregroundAvailable) {
+        # Simulate a game's native borderless fullscreen transition on our own helper.
+        $null = Invoke-Moon workspace 1
+        $state = Invoke-Moon query world
+        $nativeId = [long]$state.focused
+        $nativeHandle = [IntPtr]$nativeId
+        Wait-Until -Description "native fullscreen fixture foreground must be owned helper $nativeId" -Seconds 5 -Condition {
+            [MoonIntegrationNative]::GetForegroundWindow().ToInt64() -eq $nativeId
+        }
+        $originalStyle = [MoonIntegrationNative]::GetWindowStyle($nativeHandle, -16)
+        $nativeMonitor = @($state.monitors | Where-Object { $_.id -eq $state.active_monitor })[0]
+        $beforeNative = [MoonIntegrationNative]::Frame($nativeId)
+        try {
+            $borderless = [IntPtr](($originalStyle.ToInt64() -band (-bnot [long]0x00CF0000)) -bor [long]2147483648)
+            [void][MoonIntegrationNative]::SetWindowStyle($nativeHandle, -16, $borderless)
+            $positioned = [MoonIntegrationNative]::SetWindowPos($nativeHandle, [IntPtr]::Zero, $nativeMonitor.bounds.x, $nativeMonitor.bounds.y, $nativeMonitor.bounds.width, $nativeMonitor.bounds.height, 0x24)
+            if (!$positioned) { throw "Native fullscreen placement failed: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())" }
+            $probe = [pscustomobject]@{ id=$nativeId; foreground=[MoonIntegrationNative]::GetForegroundWindow().ToInt64(); style=[MoonIntegrationNative]::GetWindowStyle($nativeHandle,-16).ToInt64(); frame=[MoonIntegrationNative]::Frame($nativeId); bounds=$nativeMonitor.bounds }
+            [IO.File]::WriteAllText((Join-Path $testDirectory 'native-fullscreen-probe.json'),($probe | ConvertTo-Json -Depth 8),$utf8)
+            Wait-Until -Description 'native borderless fullscreen is observed' -Condition { [bool](Invoke-Moon query world).native_fullscreen }
+            $nativeState = Invoke-Moon query world
+            if ($nativeState.windows.PSObject.Properties[[string]$nativeId].Value.fullscreen) { throw 'Native fullscreen incorrectly changed the manual fullscreen flag' }
+            Assert-Placements
+        } finally {
+            [void][MoonIntegrationNative]::SetWindowStyle($nativeHandle, -16, $originalStyle)
+            [void][MoonIntegrationNative]::SetWindowPos($nativeHandle, [IntPtr]::Zero, $beforeNative.Left, $beforeNative.Top, ($beforeNative.Right-$beforeNative.Left), ($beforeNative.Bottom-$beforeNative.Top), 0x24)
+        }
+        Wait-Until -Description 'native fullscreen exit returns to tiling' -Condition { !(Invoke-Moon query world).native_fullscreen }
         Assert-Placements
-    } finally {
-        [void][MoonIntegrationNative]::SetWindowStyle($nativeHandle, -16, $originalStyle)
-        [void][MoonIntegrationNative]::SetWindowPos($nativeHandle, [IntPtr]::Zero, $beforeNative.Left, $beforeNative.Top, ($beforeNative.Right-$beforeNative.Left), ($beforeNative.Bottom-$beforeNative.Top), 0x24)
+        Record-Pass 'native borderless fullscreen preserves manual state'
     }
-    Wait-Until -Description 'native fullscreen exit returns to tiling' -Condition { !(Invoke-Moon query world).native_fullscreen }
-    Assert-Placements
-    Record-Pass 'native borderless fullscreen preserves manual state'
 
     $null = Invoke-Moon move-to-workspace 2 --follow
     Assert-Placements
@@ -562,8 +583,18 @@ try {
     Record-Pass 'restart preserves workspace trees focus and exact frames'
 
     $null = Invoke-Moon workspace 2
-    $null = Invoke-Moon close
-    Wait-Until -Description 'closed window disappears from world' -Condition { (Invoke-Moon query stats).managed_windows -eq 3 }
+    $destinationWindows=@(Invoke-Moon query windows | Where-Object visible)
+    if ($destinationWindows.Count -ne 1) {throw 'Expected one owned window on the destination workspace.'}
+    $closing=[long]$destinationWindows[0].id
+    Assert-HelperIdentity $closing
+    if ($foregroundAvailable) {
+        $null = Invoke-Moon close
+    } elseif (![MoonIntegrationNative]::PostMessageW([IntPtr]$closing,0x10,[IntPtr]::Zero,[IntPtr]::Zero)) {
+        throw [ComponentModel.Win32Exception]::new()
+    }
+    Wait-Until -Description 'the selected window closes and disappears from the world' -Condition {
+        ![MoonIntegrationNative]::IsWindow([IntPtr]$closing) -and (Invoke-Moon query stats).managed_windows -eq 3
+    }
     $null = Invoke-Moon workspace 1
     Assert-Placements
     Record-Pass 'window close reflows survivors'

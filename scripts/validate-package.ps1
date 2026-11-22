@@ -6,6 +6,7 @@ param(
     [Parameter(Mandatory)][string]$InventoryBinary,
     [Parameter(Mandatory)][string]$RecoveryBinary,
     [string]$Version='0.1.0',
+    [string]$Target='x86_64-pc-windows-msvc',
     [string]$ReportPath
 )
 Set-StrictMode -Version Latest
@@ -14,7 +15,7 @@ $package=Join-Path $PSScriptRoot 'package.ps1'
 $temporary=Join-Path ([IO.Path]::GetTempPath()) ('moon-package-tests-'+[guid]::NewGuid().ToString('N'))
 [void][IO.Directory]::CreateDirectory($temporary)
 $checks=[Collections.Generic.List[string]]::new()
-$inputs=@{Binary=$Binary;SettingsBinary=$SettingsBinary;InventoryBinary=$InventoryBinary;RecoveryBinary=$RecoveryBinary;Version=$Version;Development=$true}
+$inputs=@{Binary=$Binary;SettingsBinary=$SettingsBinary;InventoryBinary=$InventoryBinary;RecoveryBinary=$RecoveryBinary;Version=$Version;Target=$Target;Development=$true}
 $before=@{};foreach($path in @($Binary,$SettingsBinary,$InventoryBinary,$RecoveryBinary)){$before[$path]=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash}
 function Assert-Rejected([string]$Name,[hashtable]$Arguments,[string]$Pattern) {
     $errorRecord=$null
@@ -39,7 +40,7 @@ try {
     $first=& $package @inputs -OutputDirectory (Join-Path $temporary 'first')
     if(!$first.archive_verified -or $first.kind -ne 'development'){throw 'Development package was not labeled or verified.'}
     $checks.Add('Complete development bundle validates and every ZIP entry passes SHA-256 readback')
-    $second=& $package -StageDirectory $first.directory -OutputDirectory (Join-Path $temporary 'second') -Version $Version -Development
+    $second=& $package -StageDirectory $first.directory -OutputDirectory (Join-Path $temporary 'second') -Version $Version -Target $Target -Development
     if($first.sha256 -ne $second.sha256 -or (Get-FileHash $first.manifest).Hash -ne (Get-FileHash $second.manifest).Hash){throw 'Identical staged payload did not produce identical ZIP and manifest bytes.'}
     $checks.Add('Repackaging identical staged inputs produces identical manifest and ZIP hashes')
     $existsError=$null
@@ -54,9 +55,12 @@ try {
     $invalid=Join-Path $temporary 'invalid.exe';[IO.File]::WriteAllText($invalid,'Not an executable.')
     $invalidInputs=$inputs.Clone();$invalidInputs.InventoryBinary=$invalid;$invalidInputs.OutputDirectory=Join-Path $temporary 'invalid-output'
     Assert-Rejected 'A non-PE recovery/inventory executable is rejected' $invalidInputs 'Not a Windows executable'
+    $wrongTarget=$inputs.Clone();$wrongTarget.Target=if($Target -eq 'x86_64-pc-windows-msvc'){'aarch64-pc-windows-msvc'}else{'x86_64-pc-windows-msvc'}
+    $wrongTarget.OutputDirectory=Join-Path $temporary 'architecture-output'
+    Assert-Rejected 'Executables cannot be packaged for the other Windows architecture' $wrongTarget "Expected a Windows executable for $($wrongTarget.Target)"
 
     $stage=$second.directory
-    $staged=@{StageDirectory=$stage;Version=$Version;Development=$true;OutputDirectory=(Join-Path $temporary 'tampered-output')}
+    $staged=@{StageDirectory=$stage;Version=$Version;Target=$Target;Development=$true;OutputDirectory=(Join-Path $temporary 'tampered-output')}
     $document=Join-Path $stage 'examples/README.md';$saved=[IO.File]::ReadAllBytes($document)
     try {
         [IO.File]::AppendAllText($document,'Changed after staging.')
@@ -100,6 +104,7 @@ try {
     # its first file publication. Lock one owned file to exercise cleanup failure.
     $instrumentedDirectory=Join-Path $temporary 'instrumented';[void][IO.Directory]::CreateDirectory($instrumentedDirectory)
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'install-common.ps1') -Destination $instrumentedDirectory
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'package-target.ps1') -Destination $instrumentedDirectory
     $source=[IO.File]::ReadAllText($package)
     $rootLine='$repository=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot ''..''))'
     $publishLine='[IO.File]::Move($pair[0],$pair[1]);$published.Add($pair[1])'
@@ -117,7 +122,7 @@ try {
     $instrumented=Join-Path $instrumentedDirectory 'package.ps1';[IO.File]::WriteAllText($instrumented,$source,[Text.UTF8Encoding]::new($false))
     $partial=Join-Path $temporary 'partial-output';$publicationError=$null;$cleanupWarnings=@()
     try {
-        try {& $instrumented -StageDirectory $first.directory -OutputDirectory $partial -Version $Version -Development -WarningVariable cleanupWarnings -WarningAction SilentlyContinue | Out-Null}catch{$publicationError=$_}
+        try {& $instrumented -StageDirectory $first.directory -OutputDirectory $partial -Version $Version -Target $Target -Development -WarningVariable cleanupWarnings -WarningAction SilentlyContinue | Out-Null}catch{$publicationError=$_}
         if(!$publicationError -or $publicationError.ToString() -notmatch 'Owned injected publication failure' -or !$cleanupWarnings.Count){throw 'Cleanup failure masked the original publication error or did not report the locked file.'}
         if(@(Get-ChildItem -LiteralPath $partial -File).Count){throw 'A locked directory prevented cleanup of other published artifacts.'}
         $checks.Add('Publication failure retains its primary error and cleans other artifacts despite a locked file')

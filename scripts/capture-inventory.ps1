@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param([string]$InventoryPath,[string]$ReportPath=(Join-Path $env:LOCALAPPDATA 'moon-dev\window-inventory.json'))
 . (Join-Path $PSScriptRoot 'install-common.ps1')
-if (!$InventoryPath) {$InventoryPath=Join-Path $PSScriptRoot '..\target\x86_64-pc-windows-msvc\release\examples\window_inventory.exe'}
+if (!$InventoryPath) {$InventoryPath=Join-Path (Get-MoonBuildDirectory release) 'examples\window_inventory.exe'}
 $native=(Invoke-MoonNative (Resolve-Path -LiteralPath $InventoryPath).ProviderPath).Output | ConvertFrom-Json
 $glazePath=Join-Path $env:ProgramFiles 'glzr.io\GlazeWM\cli\glazewm.exe'
 $glaze=$null; $glazeError=$null

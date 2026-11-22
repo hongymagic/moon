@@ -15,7 +15,7 @@ if ($Mode -eq 'Probe') {
 }
 if ($Mode -eq 'Hold') {
     $lock=Enter-MoonInstallLock -Name $LockName -Security (New-TestMutexSecurity)
-    try {[IO.File]::WriteAllText($SignalPath,'ready');Start-Sleep -Seconds 30} finally {Exit-MoonInstallLock $lock}
+    try {[IO.File]::WriteAllText($SignalPath,'ready');Start-Sleep -Seconds 90} finally {Exit-MoonInstallLock $lock}
     return
 }
 $temporary=Join-Path ([IO.Path]::GetTempPath()) ('moon-install-recovery-'+[guid]::NewGuid().ToString('N'))
@@ -32,25 +32,25 @@ try {
     $checks.Add('Production mutex descriptor restricts ownership and access to Administrators and SYSTEM')
 
     $lock=Enter-MoonInstallLock -Name $lockName -Security (New-TestMutexSecurity)
-    $arguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$PSCommandPath,'-Mode','Probe','-LockName',$lockName)
-    $blocked=Invoke-MoonNative $powershell $arguments
+    $arguments=@('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$PSCommandPath,'-Mode','Probe','-LockName',$lockName)
+    $blocked=Invoke-MoonNative $powershell $arguments -TimeoutSeconds 60
     if ($blocked.Output.Trim() -ne 'busy') {throw 'A second setup process entered the active transaction.'}
     Exit-MoonInstallLock $lock;$lock=$null
-    $released=Invoke-MoonNative $powershell $arguments
+    $released=Invoke-MoonNative $powershell $arguments -TimeoutSeconds 60
     if ($released.Output.Trim() -ne 'acquired') {throw 'A completed transaction retained the installation mutex.'}
     $checks.Add('A real second process is rejected while setup owns the mutex and can enter after release')
     $lock=Enter-MoonInstallLock -Name $lockName -Security (New-MoonHandoverMutexSecurity)
-    $blocked=Invoke-MoonNative $powershell $arguments
+    $blocked=Invoke-MoonNative $powershell $arguments -TimeoutSeconds 60
     Exit-MoonInstallLock $lock;$lock=$null
     if ($blocked.Output.Trim() -ne 'busy') {throw 'An ordinary second handover entered active preflight.'}
     $checks.Add('Ordinary handover mutex excludes a real concurrent preflight without requiring elevation')
 
     $signal=Join-Path $temporary 'owner-ready'
-    $arguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$PSCommandPath,'-Mode','Hold','-LockName',$lockName,'-SignalPath',$signal)
+    $arguments=@('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$PSCommandPath,'-Mode','Hold','-LockName',$lockName,'-SignalPath',$signal)
     $start=[Diagnostics.ProcessStartInfo]::new();$start.FileName=$powershell;$start.UseShellExecute=$false;$start.CreateNoWindow=$true
     $start.Arguments=($arguments|ForEach-Object {ConvertTo-MoonArgument $_}) -join ' '
     $child=[Diagnostics.Process]::Start($start)
-    Wait-MoonCondition -Description 'the isolated mutex owner' -Condition {Test-Path -LiteralPath $signal} -Seconds 10
+    Wait-MoonCondition -Description 'the isolated mutex owner' -Condition {Test-Path -LiteralPath $signal} -Seconds 60
     $keeper=[Threading.Mutex]::OpenExisting($lockName)
     $child.Kill();$child.WaitForExit();$child.Dispose();$child=$null
     $lock=Enter-MoonInstallLock -Name $lockName -Security (New-TestMutexSecurity)

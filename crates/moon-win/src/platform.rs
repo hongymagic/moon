@@ -1049,6 +1049,71 @@ pub fn run_test_windows(count: usize) -> Result<()> {
     const KEY_COUNTS_MESSAGE: u32 = WM_APP + 93;
     const CHARACTER_COUNT_MESSAGE: u32 = WM_APP + 94;
     const MOUSE_UP_COUNT_MESSAGE: u32 = WM_APP + 95;
+    const ACTIVATE_MESSAGE: u32 = WM_APP + 96;
+    const GRANT_FOREGROUND_MESSAGE: u32 = WM_APP + 97;
+    fn activate_test_window(handle: HWND) -> bool {
+        unsafe {
+            if GetForegroundWindow() == handle || SetForegroundWindow(handle).as_bool() {
+                return true;
+            }
+            // A fresh desktop may require input before it grants foreground rights.
+            // Send one click only if the fixture still owns the client-area point.
+            let mut area = RECT::default();
+            if GetClientRect(handle, &mut area).is_err() {
+                return false;
+            }
+            let mut target = POINT { x: area.right / 2, y: area.bottom / 2 };
+            let mut previous = POINT::default();
+            if !ClientToScreen(handle, &mut target).as_bool()
+                || GetAncestor(WindowFromPoint(target), GA_ROOT) != handle
+                || GetCursorPos(&mut previous).is_err()
+                || [
+                    VK_LBUTTON,
+                    VK_RBUTTON,
+                    VK_MBUTTON,
+                    VK_XBUTTON1,
+                    VK_XBUTTON2,
+                    VK_SHIFT,
+                    VK_CONTROL,
+                    VK_MENU,
+                ]
+                .iter()
+                .any(|key| GetAsyncKeyState(i32::from(key.0)) < 0)
+            {
+                return false;
+            }
+            let left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+            let top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+            let width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+            let height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+            if width < 2 || height < 2 {
+                return false;
+            }
+            let movement = |point: POINT| MOUSEINPUT {
+                dx: ((i64::from(point.x) - i64::from(left)) * 65535 / i64::from(width - 1))
+                    .clamp(0, 65535) as i32,
+                dy: ((i64::from(point.y) - i64::from(top)) * 65535 / i64::from(height - 1))
+                    .clamp(0, 65535) as i32,
+                dwFlags: MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+                ..Default::default()
+            };
+            let input = [
+                movement(target),
+                MOUSEINPUT { dwFlags: MOUSEEVENTF_LEFTDOWN, ..Default::default() },
+                MOUSEINPUT { dwFlags: MOUSEEVENTF_LEFTUP, ..Default::default() },
+                movement(previous),
+            ]
+            .map(|mi| INPUT { r#type: INPUT_MOUSE, Anonymous: INPUT_0 { mi } });
+            let size = size_of::<INPUT>() as i32;
+            let sent = SendInput(&input, size);
+            if sent == 2 {
+                SendInput(&input[2..], size);
+            } else if sent == 1 || sent == 3 {
+                SendInput(&input[3..], size);
+            }
+            sent == input.len() as u32
+        }
+    }
     unsafe fn placement_entry(handle: HWND) -> Result<(i64, RECT)> {
         unsafe {
             let mut counter = 0;
@@ -1133,6 +1198,19 @@ pub fn run_test_windows(count: usize) -> Result<()> {
             }
             CHARACTER_COUNT_MESSAGE => LRESULT(CHARACTER_EVENTS.load(Ordering::Relaxed) as isize),
             MOUSE_UP_COUNT_MESSAGE => LRESULT(MOUSE_UPS.load(Ordering::Relaxed) as isize),
+            ACTIVATE_MESSAGE => LRESULT(activate_test_window(handle) as isize),
+            GRANT_FOREGROUND_MESSAGE => {
+                let granted = u32::try_from(wparam.0).is_ok_and(|pid| {
+                    pid != 0
+                        && pid != u32::MAX
+                        && unsafe {
+                            GetWindowThreadProcessId(GetForegroundWindow(), None)
+                                == GetCurrentThreadId()
+                                && AllowSetForegroundWindow(pid).is_ok()
+                        }
+                });
+                LRESULT(granted as isize)
+            }
             WM_LBUTTONUP => {
                 MOUSE_UPS.fetch_add(1, Ordering::Relaxed);
                 unsafe { DefWindowProcW(handle, message, wparam, lparam) }

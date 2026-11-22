@@ -1,6 +1,7 @@
 [CmdletBinding()]
-param([Parameter(Mandatory)][string]$BuildDirectory,[string]$ReportPath,[switch]$Measure)
+param([Parameter(Mandatory)][string]$BuildDirectory,[string]$ReportPath,[switch]$Measure,[switch]$AllowBackgroundDesktop)
 . (Join-Path $PSScriptRoot 'install-common.ps1')
+. (Join-Path $PSScriptRoot 'test-window-foreground.ps1')
 $ErrorActionPreference='Stop'
 if(!$ReportPath){$ReportPath=Join-Path $env:LOCALAPPDATA 'moon-dev\carousel-integration.json'}
 $moon=Join-Path $BuildDirectory 'moon.exe'
@@ -39,7 +40,7 @@ function Moon([string[]]$Words) {
   foreach($item in $parsed){Write-Output $item}
  } else {$text}
 }
-function Wait-Workspace([int]$VisibleCount,[bool]$RequireForeground=$true) {
+function Wait-Workspace([int]$VisibleCount,[bool]$RequireForeground=$foregroundAvailable) {
  Wait-MoonCondition -Description "$VisibleCount visible windows with exact native frames and no transition overlay" -Condition {
   $stats=Moon -Words @('query','stats');if($stats.carousel_active){return $false}
   $placements=@(Moon -Words @('query','windows'));$visible=@($placements|Where-Object visible)
@@ -102,6 +103,12 @@ try {
  if($Measure){$startArguments+='--surfaces'}
  $ready=Moon -Words $startArguments;$owned=[int]$ready.process_id
  Wait-Workspace 4 $false
+ $foregroundAvailable=Try-Set-MoonTestForeground (Moon -Words @('query','world')).focused $helper.Id
+ if($foregroundAvailable){Grant-MoonTestForeground $helper.Id $owned}
+ else {
+  if(!$AllowBackgroundDesktop -or $Measure){throw 'Windows refused to activate the owned carousel test window.'}
+  Write-Host 'SKIP native foreground and external activation. This runner did not grant foreground activation to its own test window.'
+ }
  Record 'Workspace motion preserves the ordinary four-window tiled layout'
  $null=Moon -Words @('move-to-workspace','2')
  $null=Moon -Words @('move-to-workspace','2')
@@ -116,11 +123,15 @@ try {
   Wait-Workspace 2
  }
  Record 'Whole-workspace switches settle to exact native frames and cloak state'
- $hidden=@(Moon -Words @('query','windows')|Where-Object {!$_.visible})[0]
- if(![MoonCarouselIntegration]::SetForegroundWindow([IntPtr][long]$hidden.id)){throw 'Windows refused foreground for the owned hidden-workspace fixture.'}
- Wait-MoonCondition -Description 'external window focus activates its containing workspace' -Condition {(Moon -Words @('query','world')).focused -eq [long]$hidden.id}
- Wait-Workspace 2
- Record 'Focusing an owned window activates the workspace containing it'
+ if($foregroundAvailable){
+  $hidden=@(Moon -Words @('query','windows')|Where-Object {!$_.visible})[0]
+  Grant-MoonTestForeground $helper.Id $PID
+  if(![MoonCarouselIntegration]::SetForegroundWindow([IntPtr][long]$hidden.id)){throw 'Windows refused foreground for the owned hidden-workspace fixture.'}
+  Wait-MoonCondition -Description 'external window focus activates its containing workspace' -Condition {(Moon -Words @('query','world')).focused -eq [long]$hidden.id}
+  Wait-Workspace 2
+  Grant-MoonTestForeground $helper.Id $owned
+  Record 'Focusing an owned window activates the workspace containing it'
+ }
  $activeBefore=(Moon -Words @('query','world')).active|ConvertTo-Json -Compress
  $null=Moon -Words @('focus','left');$null=Moon -Words @('focus','right')
  if((Moon -Words @('query','stats')).carousel_active -or ((Moon -Words @('query','world')).active|ConvertTo-Json -Compress) -ne $activeBefore){throw 'Focus inside a workspace incorrectly started a workspace transition.'}
@@ -153,7 +164,7 @@ try {
   foreach($edge in @('Left','Top','Right','Bottom')){if([Math]::Abs($frame.$edge-$original[[string]$h].$edge)-gt 1){throw 'Exit did not restore original owned window frames.'}}
  }
  Record 'Exit restores all original frames and visibility'
- $report=[pscustomobject]@{passed=$true;checks=$checks.ToArray();animation_active_observed=$activeObserved;moon_sha256=(Get-FileHash $moon -Algorithm SHA256).Hash;config=$config;measurement=[pscustomobject]@{enabled=[bool]$Measure;bar_and_borders=[bool]$Measure;monitors=$measurementMonitors;switches=$measurements.ToArray();clock_scope='Direct IPC request through disappearance of the owned overlay HWND; not hook-to-placement or compositor presentation latency'}}
+ $report=[pscustomobject]@{passed=$true;checks=$checks.ToArray();foreground_checked=$foregroundAvailable;animation_active_observed=$activeObserved;moon_sha256=(Get-FileHash $moon -Algorithm SHA256).Hash;config=$config;measurement=[pscustomobject]@{enabled=[bool]$Measure;bar_and_borders=[bool]$Measure;monitors=$measurementMonitors;switches=$measurements.ToArray();clock_scope='Direct IPC request through disappearance of the owned overlay HWND; not hook-to-placement or compositor presentation latency'}}
  [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($ReportPath)))
  [IO.File]::WriteAllText($ReportPath,($report|ConvertTo-Json -Depth 12),[Text.UTF8Encoding]::new($false));$report|ConvertTo-Json -Depth 12
 }catch{

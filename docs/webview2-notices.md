@@ -1,6 +1,6 @@
 # Microsoft WebView2 SDK notices
 
-Moon Settings links the x64 loader from Microsoft.Web.WebView2 1.0.3800.47 using webview2-com-sys 0.39.1. These notices accompany that loader. [Microsoft's SDK package](https://www.nuget.org/packages/Microsoft.Web.WebView2/1.0.3800.47)
+Moon Settings links the x64 or Arm64 loader from Microsoft.Web.WebView2 1.0.3800.47 using webview2-com-sys 0.39.1. These notices accompany both builds. [Microsoft's SDK package](https://www.nuget.org/packages/Microsoft.Web.WebView2/1.0.3800.47)
 
 ## LICENSE.txt
 

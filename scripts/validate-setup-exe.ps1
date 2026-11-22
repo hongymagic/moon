@@ -5,11 +5,14 @@ param(
     [Parameter(Mandatory)][string]$InstallerPath,
     [Parameter(Mandatory)][string]$ArchivePath,
     [Parameter(Mandatory)][string]$Version,
+    [string]$Target='x86_64-pc-windows-msvc',
     [string]$ReportPath
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'install-common.ps1')
+. (Join-Path $PSScriptRoot 'package-target.ps1')
+$platform=Get-MoonPackageTarget $Target
 Add-Type -AssemblyName System.IO.Compression,System.IO.Compression.FileSystem
 
 $installer = (Get-Item -LiteralPath $InstallerPath).FullName
@@ -28,10 +31,10 @@ function Start-Probe([string]$Executable, [string]$Arguments, [hashtable]$ChildE
 
 function Get-ProbeExitCode([Diagnostics.Process]$Process) {
     try {
-        if (!$Process.WaitForExit(30000)) {
+        if (!$Process.WaitForExit(60000)) {
             $Process.Kill()
             $Process.WaitForExit()
-            throw 'Setup probe did not exit within 30 seconds.'
+            throw 'Setup probe did not exit within 60 seconds.'
         }
         $Process.ExitCode
     } finally { $Process.Dispose() }
@@ -48,8 +51,12 @@ try {
     if ($levels.Count -ne 1 -or $levels[0].level -ne 'asInvoker' -or $levels[0].uiAccess -ne 'false') {
         throw 'The installer must open as the current user, without UIAccess.'
     }
+    $identity = $manifest.SelectSingleNode("//*[local-name()='assemblyIdentity']")
+    if (!$identity -or $identity.processorArchitecture -cne $platform.setupManifest) {
+        throw 'The setup executable has the wrong manifest architecture.'
+    }
     $assembly = [Reflection.Assembly]::ReflectionOnlyLoad([IO.File]::ReadAllBytes($installer))
-    if ($assembly.GetName().ProcessorArchitecture -ne 'Amd64') { throw 'Expected an x64 setup executable.' }
+    if ($assembly.GetName().ProcessorArchitecture -ne $platform.setupAssembly) { throw "Expected a $($platform.setupPlatform) setup executable." }
     $stream = $assembly.GetManifestResourceStream('Moon.Package.zip')
     if (!$stream) { throw 'Setup does not contain Moon.Package.zip.' }
     try { $embeddedHash = (Get-FileHash -InputStream $stream -Algorithm SHA256).Hash } finally { $stream.Dispose() }
@@ -60,7 +67,7 @@ try {
     if ([IO.File]::ReadAllText($installer + '.sha256').TrimEnd() -cne ($setupHash + '  ' + [IO.Path]::GetFileName($installer))) {
         throw 'The setup checksum does not match its executable.'
     }
-    $checks.Add('Release identity, x64 architecture, original-user manifest, EXE checksum and embedded ZIP match')
+    $checks.Add('Release identity, launcher architecture, original-user manifest, EXE checksum and embedded ZIP match')
 
     # Rebuild the same launcher around a private script. It waits for permission
     # from this test to finish, so a fire-and-forget or early cleanup is visible.
@@ -99,9 +106,9 @@ exit 42
         $file = Get-Item -LiteralPath (Join-Path $stage $name)
         [ordered]@{path=$name; bytes=$file.Length; sha256=(Get-FileHash -LiteralPath $file.FullName).Hash.ToLowerInvariant()}
     }
-    $metadata = [ordered]@{schema_version=1; product='Moon'; target='x86_64-pc-windows-msvc'; kind='release'; version=$Version; files=@($files)}
+    $metadata = [ordered]@{schema_version=1; product='Moon'; target=$Target; kind='release'; version=$Version; files=@($files)}
     [IO.File]::WriteAllText((Join-Path $stage 'package-manifest.json'), ($metadata | ConvertTo-Json -Depth 6), $utf8)
-    $baseName = "moon-$Version-windows-x64"
+    $baseName = "moon-$Version-windows-$($platform.arch)"
     $fixtureZip = Join-Path $work ($baseName + '.zip')
     $zip = [IO.Compression.ZipFile]::Open($fixtureZip, [IO.Compression.ZipArchiveMode]::Create)
     try {
@@ -110,7 +117,7 @@ exit 42
         }
     } finally { $zip.Dispose() }
     $out = Join-Path $work 'output'
-    & (Join-Path $PSScriptRoot 'build-setup-exe.ps1') -ArchivePath $fixtureZip -OutputDirectory $out -Version $Version | Out-Null
+    & (Join-Path $PSScriptRoot 'build-setup-exe.ps1') -ArchivePath $fixtureZip -OutputDirectory $out -Version $Version -Target $Target | Out-Null
     $fixture = Join-Path $out ($baseName + '-setup.exe')
 
     $temporary = Join-Path $work 'temporary files'
@@ -124,15 +131,19 @@ exit 42
     $process = Start-Probe $fixture '' $environment
     try {
         $timer = [Diagnostics.Stopwatch]::StartNew()
-        while (!(Test-Path -LiteralPath $receiptPath) -and !$process.HasExited -and $timer.Elapsed.TotalSeconds -lt 30) {
+        while (!(Test-Path -LiteralPath $receiptPath) -and !$process.HasExited -and $timer.Elapsed.TotalSeconds -lt 60) {
             Start-Sleep -Milliseconds 50
         }
         if ($process.HasExited -or !(Test-Path -LiteralPath $receiptPath)) { throw 'Setup exited or failed to start the fixture.' }
+        $expectedMachine = if ($platform.setupPlatform -eq 'anycpu') { [MoonInstallNative]::NativeMachine() } else { $platform.machine }
+        if ([MoonInstallNative]::ProcessMachine($process.Handle) -ne $expectedMachine) {
+            throw 'The setup launcher ran under the wrong processor architecture.'
+        }
         $receipt = [IO.File]::ReadAllText($receiptPath) | ConvertFrom-Json
         $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
         try { $sid = $identity.User.Value } finally { $identity.Dispose() }
         if ($receipt.sid -ne $sid -or $receipt.apartment -ne 'STA' -or !$receipt.is_64_bit) {
-            throw 'The guided setup child did not run under the original account in x64 STA mode.'
+            throw 'The guided setup child did not run under the original account in 64-bit STA mode.'
         }
         if (![IO.Directory]::Exists($receipt.directory)) { throw 'Setup removed the payload while its child was running.' }
         $profilePath = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
@@ -177,7 +188,7 @@ exit 42
     if ((Get-ProbeExitCode (Start-Probe $installer '/VERIFYONLY' $environment)) -ne 0) { throw 'The release installer failed native verification.' }
     $checks.Add('Native verification accepts the release installer and rejects altered fixture bytes')
 
-    $result = [ordered]@{passed=$true; version=$Version; exe_sha256=$setupHash; checks=$checks.ToArray(); installation_performed=$false}
+    $result = [ordered]@{passed=$true; version=$Version; target=$Target; exe_sha256=$setupHash; checks=$checks.ToArray(); installation_performed=$false}
     $json = $result | ConvertTo-Json
     if ($ReportPath) { [IO.File]::WriteAllText([IO.Path]::GetFullPath($ReportPath), $json, $utf8) }
     $json

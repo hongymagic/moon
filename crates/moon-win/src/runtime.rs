@@ -541,7 +541,7 @@ mod internal_child_tests {
         }
     }
     fn await_exit(child: &mut InternalChild) -> std::process::ExitStatus {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
             if let Some(status) = child.try_wait().unwrap() {
                 return status;

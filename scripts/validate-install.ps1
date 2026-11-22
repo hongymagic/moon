@@ -1,6 +1,5 @@
 [CmdletBinding()]
 param([string]$Binary)
-if (!$Binary) {$Binary=Join-Path $PSScriptRoot '..\target\x86_64-pc-windows-msvc\debug\moon.exe'}
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 foreach ($file in @('install-common.ps1','install.ps1','uninstall.ps1','verify-uiaccess.ps1','verify-elevated.ps1','handover.ps1','capture-inventory.ps1','compare-glaze.ps1')) {
@@ -9,6 +8,7 @@ foreach ($file in @('install-common.ps1','install.ps1','uninstall.ps1','verify-u
     if ($errors.Count) {throw ($errors | Out-String)}
 }
 . (Join-Path $PSScriptRoot 'install-common.ps1')
+if (!$Binary) {$Binary=Join-Path (Get-MoonBuildDirectory debug) 'moon.exe'}
 $temporary=Join-Path ([IO.Path]::GetTempPath()) ('moon-install-check-'+[guid]::NewGuid().ToString('N'))
 [void][IO.Directory]::CreateDirectory($temporary)
 $certificate=$null

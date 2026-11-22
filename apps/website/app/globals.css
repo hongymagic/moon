@@ -252,6 +252,11 @@ h1 em {
 .platform-info span {
   color: #8e9285;
 }
+.platform-info a {
+  color: var(--copper);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
 .platform-info {
   display: flex;
 }

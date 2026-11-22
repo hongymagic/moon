@@ -23,7 +23,9 @@ try {
         $source="[CmdletBinding()]`n"+$ast.ParamBlock.Extent.Text+"`n@{entered=`$true}|ConvertTo-Json -Compress`n"
         [IO.File]::WriteAllText($probe,$source,[Text.UTF8Encoding]::new($false))
         $powershell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-        $result=(Invoke-MoonNative $powershell @('-NoProfile','-ExecutionPolicy','Bypass','-File',$probe)).Output | ConvertFrom-Json
+        try {
+            $result=(Invoke-MoonNative $powershell @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$probe) -TimeoutSeconds 60).Output | ConvertFrom-Json
+        } catch {throw "Parameter probe for $($file.Name) failed: $($_.Exception.Message)"}
         if (!$result.entered) {throw ($file.Name+' parameter defaults failed before body entry.')}
         $entered++
     }

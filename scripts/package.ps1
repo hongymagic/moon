@@ -10,11 +10,14 @@ param(
     [Parameter(Mandatory,ParameterSetName='Staged')][string]$StageDirectory,
     [Parameter(Mandatory)][string]$OutputDirectory,
     [Parameter(Mandatory)][ValidatePattern('\A(?:[0-9]+\.[0-9]+\.[0-9]+|[0-9]{4}\.[0-9]{2}\.[0-9]{2}-(?:0|[1-9][0-9]*))\z')][string]$Version,
+    [string]$Target='x86_64-pc-windows-msvc',
     [switch]$Development
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'install-common.ps1')
+. (Join-Path $PSScriptRoot 'package-target.ps1')
+$platform=Get-MoonPackageTarget $Target
 Add-Type -AssemblyName System.IO.Compression,System.IO.Compression.FileSystem
 if(!('MoonPackageResource' -as [type])) {
     Add-Type -TypeDefinition @'
@@ -46,7 +49,7 @@ public static class MoonPackageResource {
 $repository=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $utf8=[Text.UTF8Encoding]::new($false)
 $mode=if($Development){'development'}else{'release'}
-$name='moon-'+$Version+'-windows-x64'+$(if($Development){'-development'}else{''})
+$name="moon-$Version-windows-$($platform.arch)"+$(if($Development){'-development'}else{''})
 
 # Explicit payload: setup chooses handover on first install, whose verification
 # and recovery dependencies must travel with it. No arbitrary repository files.
@@ -97,10 +100,10 @@ function Assert-PackagePe([string]$Path) {
         $stream.Position=60;$offset=$reader.ReadUInt32()
         if($offset -gt $stream.Length-26){throw "Invalid PE header: $Path"}
         $stream.Position=$offset
-        if($reader.ReadUInt32() -ne 0x4550 -or $reader.ReadUInt16() -ne 0x8664){throw "Expected an x64 Windows executable: $Path"}
+        if($reader.ReadUInt32() -ne 0x4550 -or $reader.ReadUInt16() -ne $platform.machine){throw "Expected a Windows executable for $Target`: $Path"}
         $stream.Position=$offset+6;$sectionCount=$reader.ReadUInt16()
         $stream.Position=$offset+20;$optionalSize=$reader.ReadUInt16();$flags=$reader.ReadUInt16()
-        if(($flags -band 2) -eq 0 -or ($flags -band 0x2000) -ne 0 -or $reader.ReadUInt16() -ne 0x20b){throw "Invalid x64 application image: $Path"}
+        if(($flags -band 2) -eq 0 -or ($flags -band 0x2000) -ne 0 -or $reader.ReadUInt16() -ne 0x20b){throw "Invalid 64-bit application image: $Path"}
         $optional=[long]$offset+24
         if($optionalSize -lt 128 -or $sectionCount -eq 0 -or $sectionCount -gt 96 -or $optional+$optionalSize+40*$sectionCount -gt $stream.Length){throw "Invalid PE section/directory bounds: $Path"}
         $stream.Position=$optional+60;$headers=$reader.ReadUInt32()
@@ -161,7 +164,7 @@ function Read-PackageIdentity([string]$Path,[string]$Product,[string]$Filename,[
     $execution=$manifest.SelectSingleNode("//*[local-name()='requestedExecutionLevel']")
     $architecture=$manifest.SelectSingleNode("//*[local-name()='assemblyIdentity']")
     $dpi=$manifest.SelectSingleNode("//*[local-name()='dpiAwareness']")
-    if(!$execution -or $execution.level -ne 'asInvoker' -or !$architecture -or $architecture.processorArchitecture -ne 'amd64' -or !$dpi -or $dpi.InnerText -ne 'PerMonitorV2') {
+    if(!$execution -or $execution.level -ne 'asInvoker' -or !$architecture -or $architecture.processorArchitecture -cne $platform.manifest -or !$dpi -or $dpi.InnerText -ne 'PerMonitorV2') {
         throw "The $Filename manifest does not have the required architecture, DPI, and permission declarations."
     }
     $expected=if($UiAccess){'true'}else{'false'}
@@ -192,7 +195,7 @@ if($PSCmdlet.ParameterSetName -eq 'Staged') {
         Assert-PackageFile $previousManifest
         if((Get-Item -LiteralPath $previousManifest).Length -gt 1048576){throw 'Staged manifest is too large.'}
         $previous=Get-Content -Raw -LiteralPath $previousManifest | ConvertFrom-Json
-        if($previous.schema_version -ne 1 -or $previous.product -ne 'Moon' -or $previous.version -ne $Version -or $previous.target -ne 'x86_64-pc-windows-msvc' -or $previous.kind -ne $mode){throw 'Staged manifest identity does not match the requested package.'}
+        if($previous.schema_version -ne 1 -or $previous.product -ne 'Moon' -or $previous.version -ne $Version -or $previous.target -cne $Target -or $previous.kind -ne $mode){throw 'Staged manifest identity does not match the requested package.'}
         if(@($previous.files).Count -ne $sources.Count+1){throw 'Staged manifest does not describe the complete payload.'}
         $seen=@{}
         foreach($entry in $previous.files) {
@@ -252,7 +255,7 @@ try {
         }
     }
     $readme=@"
-Moon $Version for Windows 11 x64
+Moon $Version for Windows 11 ($($platform.arch))
 
 Extract the entire ZIP to one folder before opening Install Moon.cmd.
 Setup requests Windows approval when needed and preserves your personal settings.
@@ -278,7 +281,7 @@ creation itself does not install, sign, start, or trust any application.
         $path=Join-Path $payload $file
         [ordered]@{path=$file;bytes=(Get-Item -LiteralPath $path).Length;sha256=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant();identity=$(if($identities.ContainsKey($file)){$identities[$file]}else{$null});imports=$(if($imports.ContainsKey($file)){@($imports[$file])}else{$null})}
     })
-    $manifest=[ordered]@{schema_version=1;product='Moon';version=$Version;target='x86_64-pc-windows-msvc';kind=$mode;files=$files}
+    $manifest=[ordered]@{schema_version=1;product='Moon';version=$Version;target=$Target;kind=$mode;files=$files}
     $manifestPath=Join-Path $payload 'package-manifest.json'
     [IO.File]::WriteAllText($manifestPath,(($manifest|ConvertTo-Json -Depth 8).Replace("`r`n","`n")+"`n"),$utf8)
     $expected=@{}
@@ -317,14 +320,14 @@ creation itself does not install, sign, start, or trust any application.
     $outsideManifest=Join-Path $temporary 'manifest.json';[IO.File]::Copy($manifestPath,$outsideManifest)
     $filesToPublish=@(@($zipPath,$finalZip),@($outsideManifest,$finalManifest),@($checksumPath,$finalChecksum))
     if(!$Development) {
-        $setup=& (Join-Path $PSScriptRoot 'build-setup-exe.ps1') -ArchivePath $zipPath -Version $Version -OutputDirectory $temporary
+        $setup=& (Join-Path $PSScriptRoot 'build-setup-exe.ps1') -ArchivePath $zipPath -Version $Version -Target $Target -OutputDirectory $temporary
         $filesToPublish+=@(@($setup.installer,$finalInstaller),@($setup.checksum,($finalInstaller+'.sha256')))
     }
     [IO.Directory]::Move($payload,$finalStage);$published.Add($finalStage)
     foreach($pair in $filesToPublish) {
         [IO.File]::Move($pair[0],$pair[1]);$published.Add($pair[1])
     }
-    $report=[pscustomobject]@{kind=$mode;version=$Version;directory=$finalStage;archive=$finalZip;manifest=$finalManifest;checksum=$finalChecksum;sha256=$zipHash;payload_files=$files.Count;archive_verified=$true;cleanup_leftovers=@()}
+    $report=[pscustomobject]@{kind=$mode;version=$Version;target=$Target;directory=$finalStage;archive=$finalZip;manifest=$finalManifest;checksum=$finalChecksum;sha256=$zipHash;payload_files=$files.Count;archive_verified=$true;cleanup_leftovers=@()}
     if(!$Development){$report | Add-Member -NotePropertyMembers @{installer=$finalInstaller;installer_checksum=($finalInstaller+'.sha256');installer_sha256=$setup.sha256}}
 } catch {
     $primaryError=$_

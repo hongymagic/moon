@@ -322,7 +322,7 @@ from first-launch prerequisites. Package validation checks the actual executable
 imports; the WebView2 Evergreen Runtime remains a checked Settings prerequisite.
 The implementation follows [Rust's runtime-linkage contract](https://doc.rust-lang.org/reference/linkage.html#static-and-dynamic-c-runtimes).
 
-The shipping dependency audit targets Windows x64. Cargo's cross-platform lockfile
+The shipping dependency audit targets Windows x64 and Arm64. Cargo's cross-platform lockfile
 also records Wry/Tao's unused Linux GTK dependencies; a lockfile-wide audit reports
 RUSTSEC-2024-0370 (proc-macro-error) and RUSTSEC-2024-0429 (glib), neither present in
 the Windows dependency graph. No advisory is suppressed. The portable Linux tests
