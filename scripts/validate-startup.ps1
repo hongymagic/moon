@@ -12,7 +12,11 @@ $state=[pscustomobject]@{version=1;install_id=('a'*32);owner_sid=$owner;task_nam
 $target='C:\Program Files\moon\moon.exe'
 $originalSddl='O:BAG:SYD:(A;;FA;;;BA)(A;;FA;;;SY)(A;;FR;;;'+$owner+')'
 $script:fixtureSddl=$originalSddl;$script:securityFlags=$null
-$action=[pscustomobject]@{Type=0;Path=(Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe');Arguments=('-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand '+[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes((Get-MoonTaskLaunchScript $target (Get-MoonLaunchArguments $state)))))}
+function ConvertTo-TestTaskArguments([string]$Launch) {
+    '-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand '+[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Launch))
+}
+$launchScript=Get-MoonTaskLaunchScript $target (Get-MoonLaunchArguments $state)
+$action=[pscustomobject]@{Type=0;Path=(Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe');Arguments=(ConvertTo-TestTaskArguments $launchScript)}
 $actions=[pscustomobject]@{Count=1;Value=$action}
 $actions|Add-Member ScriptMethod Item {param($index) if($index -ne 1){throw 'Unexpected action index.'};$this.Value}
 $script:taskFixture=[pscustomobject]@{Enabled=$true;Definition=[pscustomobject]@{Actions=$actions;RegistrationInfo=[pscustomobject]@{Description="moon installation $($state.install_id); owner $owner"};Principal=[pscustomobject]@{RunLevel=0;UserId=$owner}}}
@@ -48,6 +52,17 @@ try {
     Set-MoonTaskEnabled $state $target $true
     if(!$taskFixture.Enabled){throw 'Enabling startup did not persist.'}
     $checks.Add('Actual ownership adapter and public Enabled setter support both directions without task replacement')
+    $lfScript=$launchScript.Replace("`r`n","`n")
+    foreach($newline in @("`n","`r`n")) {
+        $action.Arguments=ConvertTo-TestTaskArguments ($lfScript.Replace("`n",$newline))
+        Assert-MoonRegisteredTask $taskFixture $state $target
+    }
+    $action.Arguments=ConvertTo-TestTaskArguments ($lfScript.Replace('start --background','start'))
+    $refused=$false
+    try {Assert-MoonRegisteredTask $taskFixture $state $target} catch {$refused=$_.Exception.Message -like '*expected moon launch operation*'}
+    if(!$refused){throw 'The startup check accepted a changed launch command.'}
+    $action.Arguments=ConvertTo-TestTaskArguments $launchScript
+    $checks.Add('Startup ownership accepts LF and CRLF encodings and rejects a changed launch command')
     $originalPath=$action.Path;$action.Path='C:\unrelated.exe';$refused=$false
     try{Set-MoonTaskEnabled $state $target $false}catch{$refused=$true}
     if(!$refused -or !$taskFixture.Enabled){throw 'An unrelated task action was changed.'};$action.Path=$originalPath
@@ -60,7 +75,7 @@ try {
     [IO.File]::WriteAllText((Join-Path $directory 'installation.json'),'private fixture')
     # The real helper resolves moon.exe beneath the mock installation directory.
     $target=Join-Path $directory 'moon.exe'
-    $action.Arguments='-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand '+[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes((Get-MoonTaskLaunchScript $target (Get-MoonLaunchArguments $state))))
+    $action.Arguments=ConvertTo-TestTaskArguments (Get-MoonTaskLaunchScript $target (Get-MoonLaunchArguments $state))
     $status=Set-MoonStartupEnabled $false
     if(!$status.available -or $status.enabled -or $status.message -notmatch 'does not stop'){throw 'Disabled startup status is not accurate.'}
     $status=Set-MoonStartupEnabled $true

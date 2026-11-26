@@ -768,7 +768,9 @@ function Assert-MoonOwnedTask($Task,$State,[string]$Target) {
     $launch=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($Matches[1]))
     $legacy="Start-Process -FilePath '$($Target.Replace("'","''"))' -ArgumentList 'start --background' -WindowStyle Hidden"
     $expected=Get-MoonTaskLaunchScript $Target (Get-MoonLaunchArguments $State)
-    if ($launch -ne $expected -and ((Get-MoonConfiguredPath $State) -or $launch -ne $legacy)) { throw 'The startup task points outside the expected moon launch operation.' }
+    # The task embeds a PowerShell here-string. WSL checkouts and Windows packages can encode its lines differently.
+    $matchesLaunch=$launch.Replace("`r`n","`n") -eq $expected.Replace("`r`n","`n")
+    if (!$matchesLaunch -and ((Get-MoonConfiguredPath $State) -or $launch -ne $legacy)) { throw 'The startup task points outside the expected moon launch operation.' }
     $principal=$Task.Principal.UserId
     if ($principal -notmatch '^S-1-') { $principal=([Security.Principal.NTAccount]::new($principal)).Translate([Security.Principal.SecurityIdentifier]).Value }
     if ($principal -ne $State.owner_sid) { throw 'Unexpected startup task user.' }
