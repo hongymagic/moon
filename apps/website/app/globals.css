@@ -104,7 +104,6 @@ footer {
 .hero-actions,
 .hero-guide,
 .download-button,
-.platform-info,
 .text-link,
 .footer-links,
 .footer-links a {
@@ -207,7 +206,8 @@ h1 em {
   letter-spacing: -0.015em;
 }
 .hero-actions {
-  gap: 26px;
+  flex-wrap: wrap;
+  gap: 8px 18px;
   margin-top: 30px;
 }
 .download-button {
@@ -244,21 +244,12 @@ h1 em {
   transform: translateY(2px);
 }
 .platform-info {
+  display: flex;
+  align-items: center;
   gap: 9px;
   font: 400 10.5px/1.5 var(--mono);
   color: #a8ab9f;
   margin-top: 17px;
-}
-.platform-info span {
-  color: #8e9285;
-}
-.platform-info a {
-  color: var(--copper);
-  text-decoration: underline;
-  text-underline-offset: 3px;
-}
-.platform-info {
-  display: flex;
 }
 
 .lunar-plate {
@@ -857,7 +848,7 @@ footer .wordmark img {
     padding-block: 54px;
   }
   .hero-actions {
-    gap: 14px;
+    column-gap: 14px;
   }
   .download-button {
     padding-inline: 14px;
@@ -973,7 +964,6 @@ footer .wordmark img {
   }
   .hero-actions {
     margin-top: 20px;
-    gap: 23px;
   }
   .download-button {
     min-height: 47px;
@@ -1048,9 +1038,7 @@ footer .wordmark img {
 }
 @media (max-width: 380px) {
   .hero-actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 4px 14px;
+    row-gap: 4px;
   }
   .hero-guide,
   .download-button {

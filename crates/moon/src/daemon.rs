@@ -1366,6 +1366,9 @@ impl Daemon {
         ) || rechecked_suspension == Some(true)
         {
             self.carousel.suspend();
+            if let Some(surfaces) = &mut self.surfaces {
+                surfaces.hide_bars();
+            }
         } else {
             self.carousel.cancel();
         }

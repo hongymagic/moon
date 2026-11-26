@@ -25,11 +25,12 @@ function Wordmark() {
   );
 }
 
-function DownloadLink() {
+function DownloadLink({ architecture }: { architecture: "x64" | "Arm64" }) {
+  const href = architecture === "Arm64" ? "/download?arch=arm64" : "/download";
   return (
-    <a className="download-button" href="/download">
+    <a className="download-button" href={href}>
       <ArrowDownToLine size={18} />
-      Download for x64
+      Download for {architecture}
     </a>
   );
 }
@@ -99,14 +100,14 @@ export default function Home() {
                 two.
               </p>
               <div className="hero-actions">
-                <DownloadLink />
+                <DownloadLink architecture="x64" />
+                <DownloadLink architecture="Arm64" />
                 <a className="hero-guide" href="#quick-start">
                   Quick start <ArrowDown size={16} />
                 </a>
               </div>
               <div className="platform-info">
-                <Monitor size={14} /> Windows 11 <span>·</span>{" "}
-                <a href="/download?arch=arm64">Download for Arm64</a>
+                <Monitor size={14} /> Windows 11
               </div>
             </div>
             <LunarPlate />
