@@ -82,6 +82,14 @@ jobs:
             name="moon-$VERSION-windows-$arch"
             sha256sum --check "$name-setup.exe.sha256" "$name.zip.sha256"
             files+=("$name-setup.exe" "$name-setup.exe.sha256" "$name.zip" "$name.zip.sha256" "$name.manifest.json")
+            for suffix in -setup.exe .zip; do
+              alias="moon-windows-$arch$suffix"
+              cp -- "$name$suffix" "$alias"
+              read -r digest _ < "$name$suffix.sha256"
+              printf '%s *%s\n' "$digest" "$alias" > "$alias.sha256"
+              sha256sum --check "$alias.sha256"
+              files+=("$alias" "$alias.sha256")
+            done
           done
           sha256sum --binary "${files[@]}" | sort > expected.sha256
 
@@ -111,3 +119,14 @@ jobs:
           promote=true
           if [[ -n "$latest" ]] && git merge-base --is-ancestor "$GITHUB_SHA" "$latest"; then promote=false; fi
           gh release edit "$VERSION" --draft=false --latest="$promote"
+      - name: Verify the four live website downloads
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for delay in 0 5 15 30; do
+            sleep "$delay"
+            if gh release view --json tagName,assets | bun scripts/verify-website-downloads.ts; then exit 0; fi
+          done
+          exit 1
