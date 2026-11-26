@@ -4,6 +4,8 @@ use std::{fs, path::PathBuf};
 
 #[cfg(windows)]
 mod daemon;
+#[cfg(windows)]
+mod gaming;
 #[cfg(any(windows, test))]
 mod journal;
 #[cfg(any(windows, test))]
@@ -13,7 +15,7 @@ mod workspace_shortcuts;
 pub struct Options {
     pub config: Option<PathBuf>,
     pub only: Option<String>,
-    pub no_hook: bool,
+    pub hook: Option<bool>,
     pub no_surfaces: bool,
     pub surfaces: bool,
     pub takeover: bool,
@@ -26,7 +28,7 @@ pub struct Options {
 impl Options {
     #[cfg(any(windows, test))]
     pub fn hook_enabled(&self) -> bool {
-        !self.no_hook && self.only.is_none()
+        self.hook.unwrap_or(self.only.is_none())
     }
 }
 
@@ -128,7 +130,8 @@ fn parse_args(arguments: Vec<String>) -> Result<(Options, Vec<String>)> {
                         .to_owned(),
                 )
             }
-            "--no-hook" => options.no_hook = true,
+            "--hook" => options.hook = Some(true),
+            "--no-hook" => options.hook = Some(false),
             "--no-surfaces" => options.no_surfaces = true,
             "--surfaces" => options.surfaces = true,
             "--takeover" => options.takeover = true,
@@ -180,7 +183,7 @@ pub fn load_config(options: &Options) -> Result<Config> {
 /// Read-only installer preflight; the current daemon keeps its committed state.
 #[cfg(any(windows, test))]
 pub fn restart_config(options: &Options) -> Result<Config> {
-    if options.only.is_some() || options.no_hook || options.no_surfaces {
+    if options.only.is_some() || options.hook == Some(false) || options.no_surfaces {
         bail!(
             "This Moon session uses --only, --no-hook or --no-surfaces and cannot be transferred by setup. Exit this diagnostic session before installing."
         );
@@ -317,7 +320,7 @@ fn window_request(words: &[String], catalog: &serde_json::Value) -> Result<serde
 fn print_help() {
     println!(
         "moon {} — Windows 11 window manager\n\n\
-moon [start] [--background] [--only PROCESS] [--no-hook] [--no-surfaces] [--takeover]\n\
+moon [start] [--background] [--only PROCESS] [--hook|--no-hook] [--no-surfaces] [--takeover]\n\
 moon doctor                  Check capabilities and competing managers\n\
 moon settings                Open Moon Settings\n\
 moon overview                Search and arrange managed windows\n\
@@ -333,6 +336,8 @@ moon move-to-workspace NAME [--follow]\n\
 moon recent-workspace        Return to previous workspace\n\
 moon toggle-direction|toggle-floating|toggle-fullscreen|close\n\
 moon focus-monitor|move-to-monitor|move-workspace left|right|up|down\n\
+moon game-mode start|end\\n\\
+moon query games\\n\\
 moon pause|reload|restart|exit|restore|cheatsheet\n\
 moon exec COMMAND            Launch through the ordinary desktop shell\n\n\
 Use --config PATH to select a config file. No file is required.\n\

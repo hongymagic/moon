@@ -31,6 +31,12 @@ Open two ordinary app windows on the same workspace, then try these default shor
 
 Click the crescent in the bar for your current shortcuts. To stop Moon and restore your windows, press **Ctrl + Alt + Shift + F12**.
 
+## Play a game
+
+On a fullscreen game that Windows recognises, Moon gives the game its shortcuts and clears the bar, borders and tiling on that monitor. Use **Alt + Tab** to reach another app and press it again to return. Your ordinary Moon shortcuts work in the other app.
+
+For a windowed game or a title Windows misses, open **Settings → Rules → Add game**, choose its executable and save. The tray also lets you start game mode for the last active app or end it for the current instance. [Gaming controls and examples](docs/gaming-mode.md)
+
 ## Make it yours
 
 Open Settings to change shortcuts, workspace names and icons, gaps, or border colors. Choose **Save changes** to apply your changes. Under **General**, you can also choose whether Moon launches when you sign in.

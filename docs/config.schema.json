@@ -149,6 +149,29 @@
       },
       "type": "object"
     },
+    "GameRule": {
+      "enum": [
+        "always",
+        "never"
+      ],
+      "type": "string"
+    },
+    "GamingConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "automatic": {
+          "default": true,
+          "description": "Recognise foreground fullscreen games using Windows Game Mode.",
+          "type": "boolean"
+        },
+        "pass-every-key": {
+          "default": false,
+          "description": "Release the dedicated emergency restore hotkey while playing.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "Gaps": {
       "additionalProperties": false,
       "properties": {
@@ -274,10 +297,22 @@
       "additionalProperties": false,
       "properties": {
         "commands": {
+          "default": [],
           "items": {
             "type": "string"
           },
           "type": "array"
+        },
+        "game-mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GameRule"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Overrides automatic detection for windows matched by this rule."
         },
         "matches": {
           "items": {
@@ -287,7 +322,6 @@
         }
       },
       "required": [
-        "commands",
         "matches"
       ],
       "type": "object"
@@ -515,6 +549,13 @@
     },
     "focus-follows-cursor": {
       "type": "boolean"
+    },
+    "gaming": {
+      "$ref": "#/$defs/GamingConfig",
+      "default": {
+        "automatic": true,
+        "pass-every-key": false
+      }
     },
     "gaps": {
       "$ref": "#/$defs/GapsOverride"

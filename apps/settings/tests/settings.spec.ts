@@ -644,6 +644,56 @@ test("sequential rule edits retain commands and every matcher in the submitted p
   });
 });
 
+test("game settings save a selected executable, per-app overrides and shortcut passthrough", async ({
+  page,
+}) => {
+  const personal = structuredClone(personalRule);
+  const host = await open(page, { rules: [personal] });
+  await navigate(page, "General");
+  await page.getByLabel("Detect fullscreen games", { exact: true }).uncheck();
+  await page.getByLabel("Pass every key to the game", { exact: true }).check();
+  await page.getByRole("button", { name: "Manage game rules" }).click();
+  await page.getByLabel("Game mode", { exact: true }).selectOption("never");
+  await page.getByRole("button", { name: "Add game", exact: true }).click();
+  const game = page.locator(".list-card").last();
+  await expect(game.getByLabel("Game mode", { exact: true })).toHaveValue(
+    "always",
+  );
+  const chooser = page.waitForEvent("filechooser");
+  await game.getByRole("button", { name: "Choose an executable…" }).click();
+  await (
+    await chooser
+  ).setFiles({
+    name: "Race.EXE",
+    mimeType: "application/octet-stream",
+    buffer: Buffer.from([]),
+  });
+  await expect(game.getByLabel("App name", { exact: true })).toHaveValue(
+    "Race",
+  );
+  await page.getByRole("button", { name: "Save changes", exact: true }).click();
+  await expect.poll(() => saveCalls(host).length).toBe(1);
+  const edits = saveCalls(host)[0]!.params.edits;
+  expect(edits).toEqual(
+    expect.arrayContaining([
+      { op: "set", path: ["gaming", "automatic"], value: false },
+      { op: "set", path: ["gaming", "pass-every-key"], value: true },
+      {
+        op: "set",
+        path: ["rules"],
+        value: [
+          { ...personal, "game-mode": "never" },
+          {
+            commands: [],
+            "game-mode": "always",
+            matches: [{ process: { equals: "Race" } }],
+          },
+        ],
+      },
+    ]),
+  );
+});
+
 test("workspace rename and icon survive reordering", async ({ page }) => {
   const host = await open(page, {
     workspaces: [{ name: "Work", icon: "W" }, { name: "Play" }],

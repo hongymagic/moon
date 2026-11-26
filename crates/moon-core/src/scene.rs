@@ -96,7 +96,8 @@ pub fn derive_with_bar_bounds<E>(
         )
     };
     for monitor in &world.monitors {
-        let fullscreen = world.native_fullscreen.is_some_and(|(_, id)| id == monitor.id)
+        let fullscreen = world.games.covers(monitor.id)
+            || world.native_fullscreen.is_some_and(|(_, id)| id == monitor.id)
             || plan.placements.iter().any(|p| {
                 p.visible
                     && p.fullscreen

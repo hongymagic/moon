@@ -32,6 +32,8 @@ pub struct Config {
     pub aliases: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     pub rules: Vec<Rule>,
+    #[serde(default)]
+    pub gaming: GamingConfig,
     pub bar: BarConfig,
     pub borders: BorderConfig,
     pub palette: BTreeMap<String, String>,
@@ -161,9 +163,34 @@ fn weather_interval() -> u32 {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Rule {
+    /// Overrides automatic detection for windows matched by this rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game_mode: Option<GameRule>,
+    #[serde(default)]
     pub commands: Vec<String>,
     pub matches: Vec<WindowMatch>,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum GameRule {
+    Always,
+    Never,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct GamingConfig {
+    /// Recognise foreground fullscreen games using Windows Game Mode.
+    pub automatic: bool,
+    /// Release the dedicated emergency restore hotkey while playing.
+    pub pass_every_key: bool,
+}
+impl Default for GamingConfig {
+    fn default() -> Self {
+        Self { automatic: true, pass_every_key: false }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct WindowMatch {
@@ -192,6 +219,12 @@ impl Matcher {
         }
         Ok(())
     }
+    pub fn matches_process(&self, name: &str) -> bool {
+        self.equals.as_ref().map_or_else(
+            || self.matches(name),
+            |value| executable_stem(value).eq_ignore_ascii_case(executable_stem(name)),
+        )
+    }
     pub fn matches(&self, text: &str) -> bool {
         if let Some(value) = &self.equals {
             return text.eq_ignore_ascii_case(value);
@@ -205,9 +238,15 @@ impl Matcher {
         false
     }
 }
+/// Windows preserves the executable extension's letter case.
+pub fn executable_stem(name: &str) -> &str {
+    name.rsplit_once('.')
+        .filter(|(_, extension)| extension.eq_ignore_ascii_case("exe"))
+        .map_or(name, |(stem, _)| stem)
+}
 impl WindowMatch {
     pub fn matches(&self, process: &str, class: &str, title: &str) -> bool {
-        self.process.as_ref().is_none_or(|m| m.matches(process))
+        self.process.as_ref().is_none_or(|m| m.matches_process(process))
             && self.class.as_ref().is_none_or(|m| m.matches(class))
             && self.title.as_ref().is_none_or(|m| m.matches(title))
     }
@@ -268,6 +307,11 @@ impl Config {
         })?;
         config.validate().map_err(ConfigError::from)?;
         Ok(config)
+    }
+    pub fn game_rule(&self, process: &str, class: &str, title: &str) -> Option<GameRule> {
+        self.rules.iter().rev().find_map(|rule| {
+            rule.game_mode.filter(|_| rule.matches.iter().any(|m| m.matches(process, class, title)))
+        })
     }
     pub fn validate(&self) -> Result<(), String> {
         if !["dark", "light", "system"].contains(&self.theme.as_str()) {
@@ -557,6 +601,12 @@ pub struct KeyChord {
     pub key: u32,
     /// Alt, Shift, Ctrl, and Win occupy bits 0 through 3, respectively.
     pub modifiers: u8,
+}
+
+impl KeyChord {
+    pub fn is_task_switch(self) -> bool {
+        self.key == 0x09 && matches!(self.modifiers, 1 | 3)
+    }
 }
 
 pub fn parse_chord(chord: &str) -> Result<KeyChord, String> {

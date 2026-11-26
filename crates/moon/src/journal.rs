@@ -35,6 +35,9 @@ pub struct Journal {
     pub successor: Option<u32>,
     pub windows: BTreeMap<WindowId, OriginalWindow>,
     pub world: serde_json::Value,
+    #[cfg(windows)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub game_overrides: crate::gaming::Overrides,
 }
 
 impl Journal {
@@ -46,6 +49,8 @@ impl Journal {
             successor: None,
             windows: BTreeMap::new(),
             world: serde_json::Value::Null,
+            #[cfg(windows)]
+            game_overrides: Default::default(),
         }
     }
 
@@ -227,6 +232,14 @@ pub fn restore(path: &Path, force: bool) -> Result<usize> {
     if !force && runtime::process_matches(journal.owner, journal.owner_birth)? {
         bail!("moon is still running; use `moon exit` before restoring its windows");
     }
+    // Original placements predate game recognition. Keep an application's
+    // current native fullscreen frame when Moon exits or the watchdog recovers.
+    let games: moon_core::gaming::Games = journal
+        .world
+        .get("games")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    let saved_windows = journal.world.get("windows");
     let mut restored = 0;
     let mut failures = Vec::new();
     journal.windows.retain(|_, window| {
@@ -248,9 +261,23 @@ pub fn restore(path: &Path, force: bool) -> Result<usize> {
             ));
             return true;
         }
-        let result = match &window.native {
-            Some(native) => platform::restore_placement(window.id, native),
-            None => platform::restore(window.id, window.rect),
+        let game_owns_frame = games.sessions.get(&window.id).is_some_and(|game| {
+            game.process_id == window.process_id && game.process_birth == window.process_birth
+        }) && !saved_windows
+            .and_then(|ws| ws.get(window.id.0.to_string()))
+            .and_then(|w| w.get("fullscreen"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+            && platform::fullscreen_monitor(window.id).ok().flatten().is_some();
+        let result = if game_owns_frame {
+            platform::set_border_color(
+                window.id,
+                window.native.as_ref().and_then(|p| p.border_color),
+            )
+        } else if let Some(native) = &window.native {
+            platform::restore_placement(window.id, native)
+        } else {
+            platform::restore(window.id, window.rect)
         };
         match result {
             Ok(()) => {

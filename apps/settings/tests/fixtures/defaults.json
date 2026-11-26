@@ -24,6 +24,10 @@
     "terracotta": "#9d4b28",
     "text": "#262326"
   },
+  "gaming": {
+    "automatic": true,
+    "pass-every-key": false
+  },
   "gaps": {
     "inner": 16,
     "outer": 32

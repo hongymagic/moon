@@ -60,6 +60,9 @@ pub struct World {
     pub paused: bool,
     #[serde(default)]
     pub native_fullscreen: Option<(WindowId, MonitorId)>,
+    // The daemon validates saved session identities before applying restart effects.
+    #[serde(default)]
+    pub games: crate::gaming::Games,
     pub mode: String,
     pub revision: u64,
     // Preserve automatic assignments across a temporarily disconnected display.
@@ -74,6 +77,7 @@ pub enum Event {
     WindowChanged(WindowInfo),
     WindowSuspended { id: WindowId, suspended: bool },
     NativeFullscreen(Option<(WindowId, MonitorId)>),
+    GamesChanged(crate::gaming::Games),
     PlacementRejected(WindowId),
     MonitorsChanged(Vec<Monitor>),
     Command(Command),
@@ -95,6 +99,8 @@ pub enum Control {
     Restart,
     Exit,
     Restore,
+    StartGame,
+    EndGame,
     CheatSheet,
     Settings,
     Overview,
@@ -157,6 +163,7 @@ impl World {
             recent_workspace: None,
             paused: false,
             native_fullscreen: None,
+            games: Default::default(),
             mode: "default".into(),
             revision: 0,
             disconnected_workspaces: previous
@@ -253,7 +260,7 @@ impl World {
         // AppBar registration may already remove the bar from rcWork.
         let bar_bottom = monitor.bounds.y
             + (f64::from(self.config.bar_height_on(&monitor.name)) * monitor.scale).round() as i32;
-        let bar = if self.config.bar_enabled_on(&monitor.name) {
+        let bar = if self.config.bar_enabled_on(&monitor.name) && !self.games.covers(monitor.id) {
             (bar_bottom - monitor.work_area.y).max(0)
         } else {
             0
@@ -275,6 +282,9 @@ impl World {
         let mut placements = Vec::with_capacity(self.windows.len());
         for workspace in &self.workspaces {
             let Some(monitor) = self.monitor(workspace.monitor) else { continue };
+            if self.games.covers(monitor.id) {
+                continue;
+            }
             let gaps = self.config.gaps_for(workspace.id.index(), &monitor.name);
             let gap = (f64::from(gaps.inner) * monitor.scale).round() as i32;
             let area = self.tiling_area(workspace.id);
@@ -283,6 +293,9 @@ impl World {
             for (&id, window) in
                 self.windows.iter().filter(|(_, w)| w.workspace == workspace.id && !w.suspended)
             {
+                if self.games.sessions.contains_key(&id) {
+                    continue;
+                }
                 let fullscreen =
                     window.fullscreen || self.native_fullscreen == Some((id, monitor.id));
                 let rect = if fullscreen {
@@ -301,20 +314,35 @@ impl World {
                 });
             }
         }
-        Plan { placements, focus: self.focused, ..Plan::default() }
+        let focus =
+            self.focused.filter(|id| self.games.foreground.is_none() && !self.game_protected(*id));
+        Plan { placements, focus, ..Plan::default() }
+    }
+    pub fn game_protected(&self, id: WindowId) -> bool {
+        self.games.sessions.contains_key(&id)
+            || self
+                .windows
+                .get(&id)
+                .is_some_and(|w| self.games.covers(self.workspaces[w.workspace.index()].monitor))
     }
     fn layout_tree<'a>(&self, workspace: &'a Workspace) -> std::borrow::Cow<'a, Tree> {
-        let suspended: Vec<_> = self
+        // Keep the saved slot, but give desktop siblings its space and skip it
+        // during directional navigation while the game owns its window.
+        let excluded: Vec<_> = self
             .windows
             .iter()
-            .filter(|(_, w)| w.workspace == workspace.id && w.suspended && !w.floating)
+            .filter(|(id, w)| {
+                w.workspace == workspace.id
+                    && !w.floating
+                    && (w.suspended || self.games.sessions.contains_key(id))
+            })
             .map(|(&id, _)| id)
             .collect();
-        if suspended.is_empty() {
+        if excluded.is_empty() {
             return std::borrow::Cow::Borrowed(&workspace.tree);
         }
         let mut tree = workspace.tree.clone();
-        for id in suspended {
+        for id in excluded {
             tree.remove(id);
         }
         std::borrow::Cow::Owned(tree)
@@ -391,11 +419,18 @@ impl World {
     fn fallback_focus(&self, workspace: WorkspaceId) -> Option<WindowId> {
         self.workspaces[workspace.index()]
             .focused
-            .filter(|id| self.windows.get(id).is_some_and(|w| !w.suspended))
+            .filter(|id| {
+                !self.games.sessions.contains_key(id)
+                    && self.windows.get(id).is_some_and(|w| !w.suspended)
+            })
             .or_else(|| {
                 self.windows
                     .iter()
-                    .filter(|(_, w)| w.workspace == workspace && !w.suspended)
+                    .filter(|(id, w)| {
+                        w.workspace == workspace
+                            && !w.suspended
+                            && !self.games.sessions.contains_key(id)
+                    })
                     .max_by_key(|(_, w)| w.last_focus)
                     .map(|(&id, _)| id)
             })
@@ -567,7 +602,8 @@ impl World {
                             direction,
                             &|id| {
                                 let window = &self.windows[&id];
-                                (!window.suspended).then_some(window.last_focus)
+                                (!window.suspended && !self.games.sessions.contains_key(&id))
+                                    .then_some(window.last_focus)
                             },
                         );
                     }
@@ -705,6 +741,8 @@ impl World {
             Command::Reload => effects.control = Some(Control::Reload),
             Command::Restart => effects.control = Some(Control::Restart),
             Command::Exit => effects.control = Some(Control::Exit),
+            Command::StartGame => effects.control = Some(Control::StartGame),
+            Command::EndGame => effects.control = Some(Control::EndGame),
             Command::Restore => effects.control = Some(Control::Restore),
             Command::CheatSheet => effects.control = Some(Control::CheatSheet),
             Command::Settings => effects.control = Some(Control::Settings),
@@ -789,6 +827,8 @@ pub fn reduce(world: &World, event: Event) -> Result<Transition, String> {
                     next.windows.get_mut(&id).unwrap().floating_rect = area.centered(size);
                 }
                 if let Some(window) = next.windows.get(&id)
+                    && next.games.foreground.is_none()
+                    && !next.game_protected(id)
                     && next.workspace_visible(window.workspace)
                 {
                     next.set_focus(Some(id));
@@ -836,6 +876,7 @@ pub fn reduce(world: &World, event: Event) -> Result<Transition, String> {
                 }
             }
         }
+        Event::GamesChanged(games) => next.games = games,
         Event::NativeFullscreen(fullscreen) => {
             next.native_fullscreen = fullscreen;
         }
@@ -845,6 +886,9 @@ pub fn reduce(world: &World, event: Event) -> Result<Transition, String> {
             use crate::command::WindowAction;
             let window =
                 next.windows.get(&id).ok_or("Window is no longer managed; refresh the overview")?;
+            if next.game_protected(id) {
+                return Err("End game mode before changing this window".into());
+            }
             if next.paused || window.suspended {
                 return Err("Window actions are unavailable while Moon is paused or the window is suspended".into());
             }
@@ -881,6 +925,7 @@ pub fn reduce(world: &World, event: Event) -> Result<Transition, String> {
             rebuilt.revision = next.revision;
             rebuilt.paused = next.paused;
             rebuilt.native_fullscreen = next.native_fullscreen;
+            rebuilt.games = next.games.clone();
             for old in &next.workspaces {
                 if let Ok(id) = rebuilt.workspace_named(&old.name) {
                     rebuilt.workspaces[id.index()].tree = old.tree.clone();

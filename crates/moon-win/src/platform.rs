@@ -258,7 +258,8 @@ pub fn process_name(pid: u32) -> Result<String> {
         let _ = CloseHandle(handle);
         result?;
         let path = String::from_utf16_lossy(&buffer[..length as usize]);
-        Ok(path.rsplit(['\\', '/']).next().unwrap_or(&path).trim_end_matches(".exe").to_owned())
+        let name = path.rsplit(['\\', '/']).next().unwrap_or(&path);
+        Ok(moon_core::config::executable_stem(name).to_owned())
     }
 }
 
@@ -426,9 +427,31 @@ pub fn window_at_point(position: moon_core::geometry::Point) -> Option<WindowId>
 }
 
 pub fn native_fullscreen() -> Result<Option<(WindowId, MonitorId)>> {
-    let Some(id) = foreground() else {
+    fullscreen_at(foreground())
+}
+
+pub fn fullscreen_at(foreground: Option<WindowId>) -> Result<Option<(WindowId, MonitorId)>> {
+    let Some(id) = foreground else {
         return Ok(None);
     };
+    Ok(fullscreen_monitor(id)?.map(|monitor| (id, monitor)))
+}
+
+pub fn window_monitor(id: WindowId) -> Option<MonitorId> {
+    unsafe {
+        let monitor = MonitorFromWindow(hwnd(id), MONITOR_DEFAULTTONULL);
+        let mut info = MONITORINFOEXW::default();
+        info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
+        GetMonitorInfoW(monitor, &mut info.monitorInfo)
+            .as_bool()
+            .then(|| monitor_id(&info.szDevice))
+    }
+}
+pub fn root_owner(id: WindowId) -> WindowId {
+    window_id(unsafe { GetAncestor(hwnd(id), GA_ROOTOWNER) })
+}
+
+pub fn fullscreen_monitor(id: WindowId) -> Result<Option<MonitorId>> {
     unsafe {
         let handle = hwnd(id);
         // Explorer can foreground its new desktop during a shell restart. Its
@@ -451,7 +474,7 @@ pub fn native_fullscreen() -> Result<Option<(WindowId, MonitorId)>> {
             && (frame.y - bounds.y).abs() <= 1
             && (frame.right() - bounds.right()).abs() <= 1
             && (frame.bottom() - bounds.bottom()).abs() <= 1;
-        Ok(matches.then_some((id, monitor_id(&info.szDevice))))
+        Ok(matches.then_some(monitor_id(&info.szDevice)))
     }
 }
 

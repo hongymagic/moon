@@ -22,6 +22,8 @@ type LiveShortcuts = {
   mode: string;
   paused: boolean;
   emergency: string;
+  emergency_enabled?: boolean;
+  game_focused?: boolean;
   bindings: { chord: string; commands: string[] }[];
 };
 type Overview = {
@@ -863,6 +865,17 @@ function describeCommand(command: string): string {
 }
 function paintShortcuts(): void {
   if (!shortcutPanel?.isConnected) return;
+  const recoveryKey = document.querySelector<HTMLElement>("#recovery-key");
+  const recoveryText = document.querySelector<HTMLElement>(
+    "#recovery-description",
+  );
+  if (recoveryKey && recoveryText) {
+    const released = shortcuts?.emergency_enabled === false;
+    recoveryKey.hidden = released;
+    recoveryText.textContent = released
+      ? "Game mode passes the emergency shortcut through. Choose Quit moon in the tray to restore your windows."
+      : "Restore original window positions and stop Moon:";
+  }
   shortcutPanel.replaceChildren();
   const heading = document.querySelector("#shortcut-status-heading");
   if (heading)
@@ -891,7 +904,7 @@ function paintShortcuts(): void {
     el(
       "p",
       shortcuts.hook_enabled ? "note" : "notice",
-      `Mode: ${shortcuts.mode}${!shortcuts.hook_enabled ? " · Configured shortcuts are disabled for this Moon session. The recovery shortcut above remains available." : shortcuts.paused ? " · Moon is paused; only the available recovery controls are listed." : " · These shortcuts are active on your desktop now."}`,
+      `Mode: ${shortcuts.mode}${shortcuts.game_focused ? " · The game receives Moon’s shortcuts." : !shortcuts.hook_enabled ? " · Configured shortcuts are disabled for this Moon session. The recovery shortcut above remains available." : shortcuts.paused ? " · Moon is paused; only the available recovery controls are listed." : " · These shortcuts are active on your desktop now."}`,
     ),
   );
   const terms = shortcutFilter.toLocaleLowerCase().trim().split(/\s+/);
@@ -928,7 +941,9 @@ function paintShortcuts(): void {
         "empty",
         shortcutFilter.trim()
           ? "No current shortcuts match. Try a key, action, or workspace name."
-          : "No shortcuts are active in this mode. The recovery shortcut above is always available.",
+          : shortcuts.game_focused
+            ? "Return to a desktop app to use your Moon shortcuts."
+            : "No shortcuts are active in this mode. The recovery shortcut above is always available.",
       ),
     );
   else shortcutPanel.append(list);
@@ -953,10 +968,22 @@ function renderShortcutHelp(parent: HTMLElement): void {
   heading.id = "shortcut-status-heading";
   parent.append(heading);
   const recovery = el("div", "notice");
+  const description = el(
+    "div",
+    "",
+    "Restore original window positions and stop Moon:",
+  );
+  description.id = "recovery-description";
+  const recoveryKey = el(
+    "kbd",
+    "",
+    readableChord(shortcuts?.emergency ?? "ctrl+alt+shift+f12"),
+  );
+  recoveryKey.id = "recovery-key";
   recovery.append(
     el("strong", "", "Always a way back"),
-    el("div", "", "Restore original window positions and stop Moon:"),
-    el("kbd", "", readableChord(shortcuts?.emergency ?? "ctrl+alt+shift+f12")),
+    description,
+    recoveryKey,
   );
   const toolbar = el("div", "toolbar live-help-toolbar");
   const search = el("input", "search");
@@ -2036,6 +2063,7 @@ function createWindowRule(selected: DesktopWindow): void {
       ["workspace", "Place in a workspace"],
       ["float", "Keep floating"],
       ["ignore", "Leave unmanaged"],
+      ["game", "Use game mode"],
     ]) {
       const option = el("option", "", title);
       option.value = value!;
@@ -2092,7 +2120,9 @@ function createWindowRule(selected: DesktopWindow): void {
                 ? "set-floating"
                 : "ignore";
           const rule = {
-            commands: [command],
+            ...(action.value === "game"
+              ? { "game-mode": "always", commands: [] }
+              : { commands: [command] }),
             matches: [{ process: { equals: app.value } }],
           };
           const rules = personalRules();
@@ -2739,6 +2769,24 @@ function renderGeneral(): void {
     ["workspace-animation"],
     { type: "checkbox" },
   );
+  const gaming = section("Gaming");
+  field(
+    gaming,
+    "Detect fullscreen games",
+    "Use Windows Game Mode to give a fullscreen game its keys and hide Moon on its monitor.",
+    ["gaming", "automatic"],
+    { type: "checkbox" },
+  );
+  field(
+    gaming,
+    "Pass every key to the game",
+    "Also release Ctrl + Alt + Shift + F12 during play. To stop Moon, use its tray menu.",
+    ["gaming", "pass-every-key"],
+    { type: "checkbox" },
+  );
+  gaming.append(
+    button("Manage game rules", () => switchPage("Rules"), "quiet"),
+  );
   const behavior = section("Focus & movement");
   field(
     behavior,
@@ -2775,7 +2823,7 @@ function renderGeneral(): void {
     el(
       "div",
       "",
-      "Press Ctrl + Alt + Shift + F12 to restore your windows and stop Moon. Your original window positions are kept for recovery.",
+      "Use the Moon tray menu to quit and restore your windows. Ctrl + Alt + Shift + F12 also restores them whenever the emergency shortcut is enabled.",
     ),
   );
   content.append(note);
@@ -3650,6 +3698,7 @@ function commonRuleAction(commands: Json[]): {
   action: string;
   workspace: string;
 } {
+  if (commands.length === 0) return { action: "default", workspace: "" };
   if (commands.length !== 1) return { action: "custom", workspace: "" };
   const command = String(commands[0]);
   if (["set-floating", "set-tiling", "ignore"].includes(command))
@@ -3774,7 +3823,7 @@ function renderShortcuts(): void {
     el(
       "div",
       "notice",
-      "Use a key chord such as alt+shift+h. Add one command per line. Clearing all commands disables that shortcut. The emergency recovery shortcut is always available.",
+      "Use a key chord such as alt+shift+h. Add one command per line. Clearing all commands disables that shortcut. General → Gaming controls whether to release the emergency shortcut during play.",
     ),
   );
   const toolbar = el("div", "toolbar");
@@ -3871,25 +3920,33 @@ function personalRules(): Json[] {
 function renderRules(): void {
   const rules = personalRules();
   const toolbar = el("div", "toolbar");
+  function addRule(game: boolean): void {
+    stage(
+      ["rules"],
+      [
+        ...personalRules(),
+        {
+          ...(game ? { "game-mode": "always" } : {}),
+          commands: game ? [] : ["set-floating"],
+          matches: [{ process: { equals: "" } }],
+        },
+      ],
+    );
+    renderPage();
+    content
+      .querySelector<HTMLInputElement>(
+        '.list-card:last-child input[placeholder="e.g. Code or Arc"]',
+      )
+      ?.focus();
+  }
   toolbar.append(
     el(
       "p",
       "note",
       `${rules.length} personal ${rules.length === 1 ? "rule" : "rules"}`,
     ),
-    button("Add rule", () => {
-      stage(
-        ["rules"],
-        [
-          ...rules,
-          {
-            commands: ["set-floating"],
-            matches: [{ process: { equals: "" } }],
-          },
-        ],
-      );
-      renderPage();
-    }),
+    button("Add game", () => addRule(true)),
+    button("Add rule", () => addRule(false)),
   );
   content.append(toolbar);
   if (!rules.length)
@@ -3921,13 +3978,27 @@ function renderRules(): void {
     card.append(head);
     const update = (changed: Obj) => {
       const next = clone(personalRules());
-      next[index] = { ...object(next[index]), ...changed };
+      const value = { ...object(next[index]), ...changed };
+      if (value["game-mode"] === null) delete value["game-mode"];
+      next[index] = value;
       stage(["rules"], next);
       const commandInput = card.querySelector<HTMLTextAreaElement>("textarea");
       if (changed.commands && commandInput)
         commandInput.value = array(changed.commands).join("\n");
     };
     const fields = el("div", "fields");
+    fields.append(
+      selectControl(
+        "Game mode",
+        String(rule["game-mode"] ?? "auto"),
+        [
+          ["auto", "Automatic"],
+          ["always", "Always for this app"],
+          ["never", "Never for this app"],
+        ],
+        (value) => update({ "game-mode": value === "auto" ? null : value }),
+      ),
+    );
     const behavior = commonRuleAction(array(rule.commands));
     const workspaceNames = array(draft.workspaces).map((value) =>
       String(object(value).name),
@@ -3948,6 +4019,7 @@ function renderRules(): void {
         "App behavior",
         behavior.action,
         [
+          ["default", "Use normal placement"],
           ["workspace", "Place in a workspace"],
           ["set-floating", "Keep floating"],
           ["set-tiling", "Keep tiled"],
@@ -3959,11 +4031,14 @@ function renderRules(): void {
           advanced.open = value === "custom";
           if (value !== "custom")
             update({
-              commands: [
-                value === "workspace"
-                  ? `move-to-workspace ${JSON.stringify(destination)}`
-                  : value,
-              ],
+              commands:
+                value === "default"
+                  ? []
+                  : [
+                      value === "workspace"
+                        ? `move-to-workspace ${JSON.stringify(destination)}`
+                        : value,
+                    ],
             });
         },
       ),
@@ -4024,12 +4099,28 @@ function renderRules(): void {
           { placeholder: "e.g. Code or Arc" },
         );
         primaryApp = app;
+        const executable = el("input");
+        executable.type = "file";
+        executable.accept = ".exe";
+        executable.hidden = true;
+        executable.addEventListener("change", () => {
+          const file = executable.files?.[0];
+          const input = app.querySelector("input");
+          if (file && input) {
+            input.value = file.name.replace(/\.exe$/i, "");
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+          }
+        });
+        card.append(
+          executable,
+          button("Choose an executable…", () => executable.click(), "quiet"),
+        );
         card.append(
           app,
           el(
             "p",
             "note",
-            "Use the app’s process name without .exe. Matching ignores ASCII letter case. For window titles, classes or patterns, expand the conditions below.",
+            "Use the app’s executable name, with or without .exe. Matching ignores ASCII letter case. For window titles, classes or patterns, expand the conditions below.",
           ),
         );
       }
@@ -4405,7 +4496,7 @@ const searchIndex: [string, string, string][] = [
   [
     "Rules",
     "App rules",
-    "process class title match regex floating workspace ignore",
+    "process class title match regex floating workspace ignore game gaming fullscreen passthrough",
   ],
   ["General", "Launch on sign-in", "startup login automatic launch start"],
   ["Bar", "Bar items", "widgets clock format align actions order weather"],
