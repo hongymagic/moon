@@ -118,6 +118,9 @@ mod tests {
             .unwrap()
             .world;
         }
+        let mut neighbor = w.windows[&WindowId(1)].info.clone();
+        neighbor.id = WindowId(3);
+        w = world::reduce(&w, Event::WindowAdded(neighbor)).unwrap().world;
         let baseline = w.plan();
         let workspaces = w.workspaces.clone();
         let game = WindowId(1);
@@ -148,6 +151,15 @@ mod tests {
         assert!(help.emergency_enabled && help.bindings.iter().any(|b| b.chord == "alt+h"));
         assert!(!help.bindings.iter().any(|b| b.chord == "alt+tab" || b.chord == "alt+shift+tab"));
         assert!(w.games.covers(MonitorId(1)));
+        assert_eq!(w.workspaces, workspaces);
+        // An already tiled game may become covered when the player tabs out.
+        // The desktop window then fills the workspace until the game returns.
+        let mut covered = w.games.clone();
+        covered.sessions.get_mut(&game).unwrap().presenting = false;
+        w = world::reduce(&w, Event::GamesChanged(covered)).unwrap().world;
+        let desktop = WindowId(3);
+        let placement = w.plan().placements.into_iter().find(|p| p.id == desktop).unwrap();
+        assert_eq!(placement.rect, w.tiling_area(w.windows[&desktop].workspace));
         assert_eq!(w.workspaces, workspaces);
         w = world::reduce(&w, Event::GamesChanged(Games::default())).unwrap().world;
         assert_eq!(w.plan(), baseline);

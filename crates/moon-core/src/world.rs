@@ -326,17 +326,23 @@ impl World {
                 .is_some_and(|w| self.games.covers(self.workspaces[w.workspace.index()].monitor))
     }
     fn layout_tree<'a>(&self, workspace: &'a Workspace) -> std::borrow::Cow<'a, Tree> {
-        let suspended: Vec<_> = self
+        // Keep the saved slot, but give desktop siblings its space and skip it
+        // during directional navigation while the game owns its window.
+        let excluded: Vec<_> = self
             .windows
             .iter()
-            .filter(|(_, w)| w.workspace == workspace.id && w.suspended && !w.floating)
+            .filter(|(id, w)| {
+                w.workspace == workspace.id
+                    && !w.floating
+                    && (w.suspended || self.games.sessions.contains_key(id))
+            })
             .map(|(&id, _)| id)
             .collect();
-        if suspended.is_empty() {
+        if excluded.is_empty() {
             return std::borrow::Cow::Borrowed(&workspace.tree);
         }
         let mut tree = workspace.tree.clone();
-        for id in suspended {
+        for id in excluded {
             tree.remove(id);
         }
         std::borrow::Cow::Owned(tree)
@@ -413,11 +419,18 @@ impl World {
     fn fallback_focus(&self, workspace: WorkspaceId) -> Option<WindowId> {
         self.workspaces[workspace.index()]
             .focused
-            .filter(|id| self.windows.get(id).is_some_and(|w| !w.suspended))
+            .filter(|id| {
+                !self.games.sessions.contains_key(id)
+                    && self.windows.get(id).is_some_and(|w| !w.suspended)
+            })
             .or_else(|| {
                 self.windows
                     .iter()
-                    .filter(|(_, w)| w.workspace == workspace && !w.suspended)
+                    .filter(|(id, w)| {
+                        w.workspace == workspace
+                            && !w.suspended
+                            && !self.games.sessions.contains_key(id)
+                    })
                     .max_by_key(|(_, w)| w.last_focus)
                     .map(|(&id, _)| id)
             })
@@ -589,7 +602,8 @@ impl World {
                             direction,
                             &|id| {
                                 let window = &self.windows[&id];
-                                (!window.suspended).then_some(window.last_focus)
+                                (!window.suspended && !self.games.sessions.contains_key(&id))
+                                    .then_some(window.last_focus)
                             },
                         );
                     }
