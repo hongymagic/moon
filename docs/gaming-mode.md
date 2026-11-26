@@ -30,7 +30,7 @@ For one session, focus the game, open Moon’s tray menu and choose **Use game m
 | --- | --- |
 | Focus the game | Passes bindings such as **Alt + 1** and **Alt + arrow** to the app, leaves its window size alone, hides Moon’s bar and borders on that monitor and releases the top strip. |
 | Press **Alt + Tab** | Windows chooses the next app. Both **Alt + Tab** and **Alt + Shift + Tab** continue to use the Windows switcher while the game is open, including a separate press to return. |
-| Use a desktop app | Ordinary Moon shortcuts work again in that app. A fullscreen game still visible on a second monitor keeps its display clear. The bar returns on a display where the game minimises or a foreground desktop app covers it. |
+| Use a desktop app | Ordinary Moon shortcuts work again in that app. A game still visible on a second monitor keeps its display clear. The bar returns on a display where the game minimises or a foreground desktop app covers it. |
 | Close the game | Moon resumes the existing workspace layout and restores the configured task-switcher bindings after the last session ends. An existing manual pause remains in effect. |
 
 **Ctrl + Alt + Shift + F12** still exits Moon and restores windows by default. To give the game that chord too, enable **Pass every key to the game**. Use **Quit moon** from the tray or `moon exit` to stop the running manager. After an interrupted shutdown, `moon restore` can recover the saved window placements.

@@ -88,8 +88,7 @@ impl Drop for StartupRecovery {
 }
 
 fn bindings(world: &World) -> Vec<HookBinding> {
-    moon_core::help::shortcuts(world, true)
-        .bindings
+    moon_core::help::configured_bindings(world)
         .into_iter()
         .map(|binding| HookBinding { chord: binding.chord, commands: binding.commands })
         .collect()
@@ -228,7 +227,6 @@ pub fn run(options: Options) -> Result<()> {
     let mut record = Journal::new(birth);
     let mut world =
         World::new(config.clone(), platform::monitors()?).map_err(anyhow::Error::msg)?;
-    world.native_fullscreen = platform::native_fullscreen()?;
     if path.exists() {
         if options.resume {
             record = Journal::read(&path)?;
@@ -279,6 +277,12 @@ pub fn run(options: Options) -> Result<()> {
         world.config.bar.enabled = false;
         world.config.borders.enabled = false;
     }
+    let mut gaming = crate::gaming::Tracker::default();
+    gaming.resume(&world.games, record.game_overrides.clone());
+    let foreground = platform::foreground();
+    world.native_fullscreen = platform::fullscreen_at(foreground)?;
+    world.games =
+        gaming.observe(&world, foreground, world.native_fullscreen, options.only.as_deref());
     record.world = serde_json::to_value(&world)?;
     // A successor may publish ownership only once its replacement watcher exists.
     let mut watchdog_command = runtime::internal_command()?;
@@ -334,7 +338,7 @@ pub fn run(options: Options) -> Result<()> {
     let mut daemon = Daemon {
         options,
         world,
-        gaming: Default::default(),
+        gaming,
         input_changed: started,
         journal: record,
         journal_writer: Some(journal_writer),
@@ -724,6 +728,7 @@ impl Daemon {
             successor: self.journal.successor,
             windows: self.journal.windows.clone(),
             world: serde_json::to_value(&transition.world)?,
+            game_overrides: self.gaming.manual.clone(),
         };
         let mut originals_changed = false;
         for (&id, window) in &transition.world.windows {
@@ -1141,6 +1146,8 @@ impl Daemon {
             config.borders.enabled = false;
         }
         let started = Instant::now();
+        let reconcile_apps = config.rules != self.world.config.rules
+            || config.gaming.automatic != self.world.config.gaming.automatic;
         let transition = match world::reduce(&self.world, Event::ConfigChanged(Box::new(config))) {
             Ok(transition) => transition,
             Err(error) => {
@@ -1152,17 +1159,27 @@ impl Daemon {
         };
         let mut transition = transition;
         let foreground = platform::foreground();
-        let native = platform::native_fullscreen()?;
+        let native = platform::fullscreen_at(foreground)?;
+        transition.world.native_fullscreen = native;
         transition.world.games = self.gaming.observe(
             &transition.world,
             foreground,
             native,
             self.options.only.as_deref(),
         );
-        transition.plan = transition.world.plan();
-        transition.plan.focus = None;
+        let effective_plan = transition.world.plan();
+        transition.plan.placements = effective_plan.placements;
+        transition.plan.focus =
+            transition.plan.focus.filter(|id| effective_plan.focus == Some(*id));
+        self.hooks.set_game_input(hooks::GameInput::new(
+            foreground,
+            &transition.world.games,
+            transition.world.config.gaming.pass_every_key,
+        ))?;
         self.commit_transition(transition, "config", started)?;
-        self.sync_native_fullscreen()?;
+        if reconcile_apps {
+            self.adopt_existing()?;
+        }
         self.hooks.set_pointer_tracking(
             self.world.config.focus_follows_cursor && self.options.only.is_none(),
         )?;
@@ -1187,12 +1204,26 @@ impl Daemon {
         // A destroy notification can arrive while the HWND is still valid.
         // Retire the tile before querying its visibility or window metadata.
         if kind == 0x8001 || !platform::is_window(id) {
-            if self.world.games.sessions.contains_key(&id) {
-                self.sync_native_fullscreen()?;
-            }
+            self.gaming.forget(id);
             if self.world.windows.contains_key(&id) {
                 self.commit(Event::WindowRemoved(id), "destroy")?;
                 self.journal.windows.remove(&id);
+            }
+            if self.world.games.sessions.contains_key(&id) {
+                let mut games = self.world.games.clone();
+                games.sessions.remove(&id);
+                if games.foreground == Some(id) {
+                    games.foreground = None;
+                }
+                self.hooks.set_game_input(hooks::GameInput::new(
+                    None,
+                    &games,
+                    self.world.config.gaming.pass_every_key,
+                ))?;
+                self.commit(Event::GamesChanged(games), "gaming")?;
+                if platform::foreground() != Some(id) {
+                    self.sync_native_fullscreen()?;
+                }
             }
             return Ok(());
         }
@@ -1203,10 +1234,7 @@ impl Daemon {
         }
         let foreground = platform::foreground();
         if kind == 3 || self.world.games.sessions.contains_key(&id) || foreground == Some(id) {
-            if kind == 3
-                && platform::foreground() == Some(id)
-                && !self.world.windows.contains_key(&id)
-            {
+            if kind == 3 && foreground == Some(id) && !self.world.windows.contains_key(&id) {
                 self.carousel.cancel();
             }
             self.sync_native_fullscreen()?;
@@ -1407,17 +1435,14 @@ impl Daemon {
     }
     fn sync_native_fullscreen(&mut self) -> Result<()> {
         let foreground = platform::foreground();
-        let native = foreground
-            .and_then(|id| platform::fullscreen_monitor(id).ok().flatten().map(|m| (id, m)));
+        let native = platform::fullscreen_at(foreground).unwrap_or(None);
         let games =
             self.gaming.observe(&self.world, foreground, native, self.options.only.as_deref());
-        let playing = games.foreground.is_some();
-        self.hooks.set_game_input(hooks::GameInput {
+        self.hooks.set_game_input(hooks::GameInput::new(
             foreground,
-            playing,
-            session: !games.sessions.is_empty(),
-            release_emergency: playing && self.world.config.gaming.pass_every_key,
-        })?;
+            &games,
+            self.world.config.gaming.pass_every_key,
+        ))?;
         if games != self.world.games {
             self.commit(Event::GamesChanged(games), "gaming")?;
         }

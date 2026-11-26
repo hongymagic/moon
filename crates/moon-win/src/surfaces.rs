@@ -1310,6 +1310,15 @@ impl Canvas {
             } else {
                 requested
             };
+            if self.visible && !visible && is_appbar {
+                if let Some(tooltip) = &mut self.tooltip {
+                    tooltip.update(&[]);
+                }
+                let mut data = self.data.borrow_mut();
+                data.hit_regions.clear();
+                data.hovered = None;
+                data.pressed = None;
+            }
             let resized = self.rect.width != rect.width || self.rect.height != rect.height;
             if is_appbar && resized {
                 self.surface = None;

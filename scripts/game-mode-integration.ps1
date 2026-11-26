@@ -38,6 +38,18 @@ public static class MoonGameFixture {
     [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h,out Rect rect);
     [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern IntPtr SendMessageTimeout(IntPtr h,uint msg,UIntPtr w,IntPtr l,uint flags,uint timeout,out UIntPtr result);
     [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+    [DllImport("user32.dll",SetLastError=true)] static extern bool RegisterHotKey(IntPtr window,int id,uint modifiers,uint key);
+    [DllImport("user32.dll",SetLastError=true)] static extern bool UnregisterHotKey(IntPtr window,int id);
+    public static bool EmergencyAvailable() {
+        const int id=0x4751;
+        if(!RegisterHotKey(IntPtr.Zero,id,7,0x7b)) {
+            int error=Marshal.GetLastWin32Error();
+            if(error!=1409)throw new Win32Exception(error);
+            return false;
+        }
+        if(!UnregisterHotKey(IntPtr.Zero,id))throw new Win32Exception();
+        return true;
+    }
     static uint Owner(IntPtr h) {uint pid; GetWindowThreadProcessId(h,out pid);return pid;}
     public static long Window(string title,uint pid) {
         var h=FindWindow("MoonTestWindow",title);
@@ -99,6 +111,7 @@ cursor-jump=false
 workspace-animation=false
 [gaming]
 automatic=false
+pass-every-key=true
 [bindings]
 "alt+minus"=["pause"]
 [[rules]]
@@ -145,6 +158,7 @@ try {
             @(Query-GameFixture windows | Where-Object {$_}).Count -eq 0
     }
     if ([MoonGameFixture]::Frame($game) -ne $frame) {throw 'Moon moved the explicitly matched windowed game.'}
+    Wait-MoonCondition -Description 'emergency chord released during play' -Condition {[MoonGameFixture]::EmergencyAvailable()}
     Passed 'Game keeps its original window size and owns its monitor, including the reserved top strip'
     $before=[MoonGameFixture]::KeyCounts($game)
     [MoonGameFixture]::Chord($game,$helper.Id,0xbd,$false)
@@ -156,8 +170,10 @@ try {
     [MoonGameFixture]::Chord($game,$helper.Id,9,$false)
     Wait-GameFocus $desktop $false
     Wait-MoonCondition -Description 'bar restored over desktop' -Condition {[MoonGameFixture]::Bars($desktop,$owned) -eq 1}
+    Wait-MoonCondition -Description 'emergency chord reserved again on the desktop' -Condition {![MoonGameFixture]::EmergencyAvailable()}
     [MoonGameFixture]::Chord($desktop,$helper.Id,9,$false)
     Wait-GameFocus $game $true
+    Passed 'Pass every key releases the emergency hotkey during play and restores it on the desktop'
     Passed 'Two separate native Alt+Tab presses take focus from game to desktop and back'
     [MoonGameFixture]::Chord($game,$helper.Id,9,$false)
     Wait-GameFocus $desktop $false
@@ -172,6 +188,23 @@ try {
     Passed 'Desktop shortcuts resume while Alt+Shift+Tab still reaches Windows'
     if (!(Try-Set-MoonTestForeground $game $helper.Id)) {throw 'Windows did not reactivate the game before close.'}
     Wait-GameFocus $game $true
+    $null=Invoke-MoonRpc -Method command -Commands @('game-mode end') -DevelopmentPath $moon
+    Wait-GameFocus $game $false
+    Wait-MoonCondition -Description 'one-off end overrides the executable rule' -Condition {
+        @(Query-GameFixture windows | Where-Object id -eq $game).Count -eq 1
+    }
+    $null=Invoke-MoonRpc -Method command -Commands @('restart') -DevelopmentPath $moon
+    Wait-MoonCondition -Description 'restarted daemon owns this test configuration' -Condition {
+        $current=Query-GameFixture stats
+        $current.process_id -ne $owned -and $current.config_path -eq $config -and $current.ready_us -gt 0
+    }
+    $owned=[int](Query-GameFixture stats).process_id
+    Wait-GameFocus $game $false
+    if ((Query-GameFixture games).sessions.([string]$game)) {throw 'Restart lost the per-instance override.'}
+    $null=Invoke-MoonRpc -Method command -Commands @('game-mode start') -DevelopmentPath $moon
+    Wait-GameFocus $game $true
+    if ((Query-GameFixture games).sessions.([string]$game).source -ne 'manual') {throw 'The manual session did not target the focused game.'}
+    Passed 'Ending and restarting game mode overrides an Always rule for this instance'
     if (![MoonTestForeground]::Request($game,$helper.Id,0x10,0)) {
         # WM_CLOSE normally returns zero even on success.
         Wait-MoonCondition -Description 'game window closed' -Condition {![MoonGameFixture]::Window('moon test window 1',$helper.Id)}
@@ -186,7 +219,8 @@ try {
     try {
         if ($owned) {
             $verified=Query-GameFixture stats
-            if ($verified.process_id -ne $owned -or $verified.config_path -ne $config) {throw 'The active daemon changed during game integration.'}
+            if ($verified.config_path -ne $config) {throw 'The active daemon changed during game integration.'}
+            $owned=[int]$verified.process_id
             $null=Invoke-MoonRpc -Method lifecycle -LifecycleAction exit -DevelopmentPath $moon
             Wait-MoonCondition -Description 'owned daemon exit' -Condition {!(Get-Process -Id $owned -ErrorAction SilentlyContinue)}
         }

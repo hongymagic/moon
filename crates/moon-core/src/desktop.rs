@@ -105,7 +105,11 @@ fn condition(
         field,
         operator,
         value: bounded(value, truncated),
-        matched: matcher.matches(actual),
+        matched: if field == "process" {
+            matcher.matches_process(actual)
+        } else {
+            matcher.matches(actual)
+        },
     }
 }
 /// Derive only from committed state and journal identities. All integer tokens

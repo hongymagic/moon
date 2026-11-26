@@ -258,7 +258,8 @@ pub fn process_name(pid: u32) -> Result<String> {
         let _ = CloseHandle(handle);
         result?;
         let path = String::from_utf16_lossy(&buffer[..length as usize]);
-        Ok(path.rsplit(['\\', '/']).next().unwrap_or(&path).trim_end_matches(".exe").to_owned())
+        let name = path.rsplit(['\\', '/']).next().unwrap_or(&path);
+        Ok(moon_core::config::executable_stem(name).to_owned())
     }
 }
 
@@ -426,7 +427,11 @@ pub fn window_at_point(position: moon_core::geometry::Point) -> Option<WindowId>
 }
 
 pub fn native_fullscreen() -> Result<Option<(WindowId, MonitorId)>> {
-    let Some(id) = foreground() else {
+    fullscreen_at(foreground())
+}
+
+pub fn fullscreen_at(foreground: Option<WindowId>) -> Result<Option<(WindowId, MonitorId)>> {
+    let Some(id) = foreground else {
         return Ok(None);
     };
     Ok(fullscreen_monitor(id)?.map(|monitor| (id, monitor)))

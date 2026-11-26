@@ -14,6 +14,8 @@ pub struct Shortcuts {
     pub paused: bool,
     pub hook_enabled: bool,
     pub bindings: Vec<Shortcut>,
+    pub game_focused: bool,
+    pub emergency_enabled: bool,
     pub emergency: &'static str,
 }
 
@@ -24,7 +26,7 @@ impl Shortcuts {
             self.mode,
             if self.paused { " (paused)" } else { "" },
             if self.hook_enabled { "enabled" } else { "disabled for this session" },
-            self.emergency,
+            if self.emergency_enabled { self.emergency } else { "quit Moon from its tray menu" },
         );
         for binding in &self.bindings {
             text.push_str(&format!("{:<24} {}\r\n", binding.chord, binding.commands.join("; ")));
@@ -34,13 +36,13 @@ impl Shortcuts {
 }
 
 /// The same resolver drives the keyboard hook and its live help.
-pub fn shortcuts(world: &World, hook_enabled: bool) -> Shortcuts {
+pub fn configured_bindings(world: &World) -> Vec<Shortcut> {
     let source = if world.mode == "default" {
         &world.config.bindings
     } else {
         world.config.modes.get(&world.mode).unwrap_or(&world.config.bindings)
     };
-    let bindings = source
+    source
         .iter()
         .filter(|(_, texts)| {
             texts.iter().any(|text| {
@@ -65,8 +67,18 @@ pub fn shortcuts(world: &World, hook_enabled: bool) -> Shortcuts {
             })
         })
         .map(|(chord, commands)| Shortcut { chord: chord.clone(), commands: commands.clone() })
-        .collect();
+        .collect()
+}
+pub fn shortcuts(world: &World, hook_enabled: bool) -> Shortcuts {
+    let game_focused = world.games.foreground.is_some();
+    let mut bindings = if game_focused { Vec::new() } else { configured_bindings(world) };
+    if !world.games.sessions.is_empty() {
+        bindings
+            .retain(|b| !crate::config::parse_chord(&b.chord).is_ok_and(|c| c.is_task_switch()));
+    }
     Shortcuts {
+        game_focused,
+        emergency_enabled: !game_focused || !world.config.gaming.pass_every_key,
         mode: world.mode.clone(),
         paused: world.paused,
         hook_enabled,

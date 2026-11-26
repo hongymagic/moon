@@ -7,10 +7,13 @@ use moon_core::{
     world::{WindowInfo, World},
 };
 use moon_win::{platform, runtime};
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    time::{Duration, Instant},
+};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct Identity {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Identity {
     pid: u32,
     birth: u64,
 }
@@ -24,14 +27,37 @@ impl Identity {
             && runtime::process_matches(self.pid, self.birth).unwrap_or(false)
     }
 }
+pub(crate) type Overrides = BTreeMap<WindowId, (Identity, bool)>;
+
 #[derive(Default)]
 pub struct Tracker {
     pub power: bool,
     last_app: Option<(WindowId, Identity)>,
     last_game: Option<WindowId>,
-    manual: BTreeMap<WindowId, (Identity, bool)>,
+    pub(crate) manual: Overrides,
+    leaving_fullscreen: BTreeMap<WindowId, Instant>,
 }
 impl Tracker {
+    pub fn resume(&mut self, games: &Games, overrides: Overrides) {
+        self.manual = overrides;
+        for (&id, game) in &games.sessions {
+            let who = Identity { pid: game.process_id, birth: game.process_birth };
+            if game.source == GameSource::Manual && who.live(id) {
+                self.manual.insert(id, (who, true));
+            }
+        }
+        self.last_game = games.foreground;
+    }
+    pub fn forget(&mut self, id: WindowId) {
+        self.manual.remove(&id);
+        self.leaving_fullscreen.remove(&id);
+        if self.last_app.is_some_and(|(app, _)| app == id) {
+            self.last_app = None;
+        }
+        if self.last_game == Some(id) {
+            self.last_game = None;
+        }
+    }
     pub fn start(&mut self) -> Result<()> {
         let (id, identity) = self
             .last_app
@@ -73,9 +99,24 @@ impl Tracker {
         only: Option<&str>,
     ) -> Games {
         self.manual.retain(|id, (who, _)| who.live(*id));
+        // Ordinary foreground location and title events do not need process
+        // metadata again when no recognition input can start a session.
+        if world.games.sessions.is_empty()
+            && self.manual.is_empty()
+            && !(self.power && world.config.gaming.automatic && native.is_some())
+            && !world.config.rules.iter().any(|r| r.game_mode.is_some())
+            && self.last_app.is_some_and(|(id, who)| {
+                foreground == Some(id) && platform::process_id(id) == who.pid
+            })
+        {
+            return Games::default();
+        }
         let mut games = world.games.clone();
         let front = foreground.and_then(|id| platform::window_info(id).ok());
-        let front_monitor = foreground.and_then(platform::window_monitor);
+        let front_monitor = front
+            .as_ref()
+            .map(|w| w.monitor)
+            .or_else(|| foreground.and_then(platform::window_monitor));
         // A switcher, notification surface or owned popup can briefly take focus.
         let overlay = front.as_ref().is_some_and(|w| {
             ["GameBar", "GameBarFTServer", "GameOverlayUI", "GameBarWidgets"]
@@ -93,16 +134,36 @@ impl Tracker {
             if !who.live(*id) {
                 return false;
             }
-            let Ok(info) = platform::window_info(*id) else { return false };
-            let rule = self.rule(&world.config, &info);
+            let observed;
+            let info = if let Some(info) = front.as_ref().filter(|w| w.id == *id) {
+                info
+            } else if let Ok(info) = platform::window_info(*id) {
+                observed = info;
+                &observed
+            } else {
+                return false;
+            };
+            let rule = self.rule(&world.config, info);
             let mine = foreground == Some(*id);
-            let fullscreen = platform::fullscreen_monitor(*id).ok().flatten().is_some();
+            let fullscreen = native.is_some_and(|(h, _)| h == *id);
+            let minimized = platform::is_minimized(*id);
+            // Exclusive games can leave fullscreen before Windows reports the
+            // next foreground or finishes changing the monitor resolution.
+            let stays_automatic = if !mine || fullscreen || minimized {
+                self.leaving_fullscreen.remove(id);
+                true
+            } else if game.source == GameSource::Windows {
+                self.leaving_fullscreen.entry(*id).or_insert_with(Instant::now).elapsed()
+                    < Duration::from_millis(500)
+            } else {
+                false
+            };
             let manual = self.manual.get(id).is_some_and(|(_, on)| *on);
             game.source = match (manual, rule, game.source) {
                 (true, _, _) => GameSource::Manual,
                 (_, Some(GameRule::Always), _) => GameSource::Rule,
                 (_, None, GameSource::Windows)
-                    if world.config.gaming.automatic && (!mine || fullscreen) =>
+                    if world.config.gaming.automatic && stays_automatic =>
                 {
                     GameSource::Windows
                 }
@@ -112,19 +173,22 @@ impl Tracker {
             let input = mine
                 || front_root == Some(*id)
                 || (overlay && front_monitor == Some(game.monitor) && self.last_game == Some(*id));
-            let visible = !platform::is_minimized(*id)
+            let visible = !minimized
                 && !platform::is_hidden_by_app(*id)
                 && platform::cloaked(*id).unwrap_or(0) == 0
                 && (input || platform::window_on_current_virtual_desktop(*id).unwrap_or(false));
             game.presenting = visible
                 && (input
                     || (foreground.is_none() && game.presenting)
-                    || (fullscreen && front_monitor != Some(game.monitor)));
+                    || (front_monitor != Some(game.monitor)
+                        && platform::window_at_point(info.rect.center())
+                            .is_some_and(|hit| hit == *id || platform::root_owner(hit) == *id)));
             if input {
                 games.foreground = Some(*id);
             }
             true
         });
+        self.leaving_fullscreen.retain(|id, _| games.sessions.contains_key(id));
         // The tray takes foreground itself. A manual start targets the external
         // app captured before that happened, even if another app now has focus.
         let manual_targets: Vec<_> = self

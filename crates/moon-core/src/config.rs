@@ -219,6 +219,12 @@ impl Matcher {
         }
         Ok(())
     }
+    pub fn matches_process(&self, name: &str) -> bool {
+        self.equals.as_ref().map_or_else(
+            || self.matches(name),
+            |value| executable_stem(value).eq_ignore_ascii_case(executable_stem(name)),
+        )
+    }
     pub fn matches(&self, text: &str) -> bool {
         if let Some(value) = &self.equals {
             return text.eq_ignore_ascii_case(value);
@@ -232,9 +238,15 @@ impl Matcher {
         false
     }
 }
+/// Windows preserves the executable extension's letter case.
+pub fn executable_stem(name: &str) -> &str {
+    name.rsplit_once('.')
+        .filter(|(_, extension)| extension.eq_ignore_ascii_case("exe"))
+        .map_or(name, |(stem, _)| stem)
+}
 impl WindowMatch {
     pub fn matches(&self, process: &str, class: &str, title: &str) -> bool {
-        self.process.as_ref().is_none_or(|m| m.matches(process))
+        self.process.as_ref().is_none_or(|m| m.matches_process(process))
             && self.class.as_ref().is_none_or(|m| m.matches(class))
             && self.title.as_ref().is_none_or(|m| m.matches(title))
     }
@@ -589,6 +601,12 @@ pub struct KeyChord {
     pub key: u32,
     /// Alt, Shift, Ctrl, and Win occupy bits 0 through 3, respectively.
     pub modifiers: u8,
+}
+
+impl KeyChord {
+    pub fn is_task_switch(self) -> bool {
+        self.key == 0x09 && matches!(self.modifiers, 1 | 3)
+    }
 }
 
 pub fn parse_chord(chord: &str) -> Result<KeyChord, String> {

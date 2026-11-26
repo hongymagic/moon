@@ -80,10 +80,23 @@ pub struct GameInput {
     pub release_emergency: bool,
 }
 impl GameInput {
+    pub fn new(
+        foreground: Option<WindowId>,
+        games: &moon_core::gaming::Games,
+        pass_every_key: bool,
+    ) -> Self {
+        let playing = games.foreground.is_some();
+        Self {
+            foreground,
+            playing,
+            session: !games.sessions.is_empty(),
+            release_emergency: playing && pass_every_key,
+        }
+    }
     fn forwards(self, foreground: Option<WindowId>, key: u32, modifiers: u8) -> bool {
         self.playing
             || foreground != self.foreground
-            || (self.session && key == u32::from(VK_TAB.0) && matches!(modifiers, 1 | 3))
+            || (self.session && moon_core::config::KeyChord { key, modifiers }.is_task_switch())
     }
 }
 type SharedGameInput = Arc<RwLock<Option<GameInput>>>;
@@ -1014,10 +1027,12 @@ impl Hooks {
                                 }
                             });
                         }
+                        continue;
                     } else if message.message == GAME_POWER {
                         let _ = sender.send(PlatformEvent::System(SystemEvent::GamePower(
                             message.wParam.0 != 0,
                         )));
+                        continue;
                     }
                     if matches!(message.message, GAME_HOTKEY | WM_TIMER) {
                         let release = hook_game

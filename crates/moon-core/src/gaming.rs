@@ -69,6 +69,12 @@ mod tests {
     fn rules_override_windows_and_application_fullscreen_is_required() {
         let config = Config::load("[[rules]]\ngame-mode='always'\nmatches=[{process={equals='runner'}}]\n[[rules]]\ngame-mode='never'\nmatches=[{process={equals='runner'},class={equals='Launcher'}}]").unwrap();
         assert_eq!(config.game_rule("RUNNER", "Play", "Game"), Some(GameRule::Always));
+        assert_eq!(
+            Config::load("[[rules]]\ngame-mode='always'\nmatches=[{process={equals='Race.EXE'}}]")
+                .unwrap()
+                .game_rule("race", "", ""),
+            Some(GameRule::Always)
+        );
         let launcher = config.game_rule("Runner", "Launcher", "");
         assert_eq!(GameSource::detect(launcher, true, true, true, false), None);
         assert_eq!(
@@ -128,6 +134,9 @@ mod tests {
             },
         );
         w = world::reduce(&w, Event::GamesChanged(games.clone())).unwrap().world;
+        assert!(crate::help::shortcuts(&w, true).bindings.is_empty());
+        w.config.gaming.pass_every_key = true;
+        assert!(!crate::help::shortcuts(&w, true).emergency_enabled);
         let sc = scene::derive(&w, &BTreeMap::new(), None);
         assert!(!sc.bars[0].visible && sc.bars[1].visible);
         assert!(sc.borders.iter().all(|b| b.monitor == MonitorId(2)));
@@ -135,6 +144,9 @@ mod tests {
         assert_eq!(w.plan().focus, None);
         games.foreground = None;
         w = world::reduce(&w, Event::GamesChanged(games)).unwrap().world;
+        let help = crate::help::shortcuts(&w, true);
+        assert!(help.emergency_enabled && help.bindings.iter().any(|b| b.chord == "alt+h"));
+        assert!(!help.bindings.iter().any(|b| b.chord == "alt+tab" || b.chord == "alt+shift+tab"));
         assert!(w.games.covers(MonitorId(1)));
         assert_eq!(w.workspaces, workspaces);
         w = world::reduce(&w, Event::GamesChanged(Games::default())).unwrap().world;

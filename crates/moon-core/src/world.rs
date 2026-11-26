@@ -60,8 +60,8 @@ pub struct World {
     pub paused: bool,
     #[serde(default)]
     pub native_fullscreen: Option<(WindowId, MonitorId)>,
-    // Re-observe HWND lifetimes at startup, including a journal handoff.
-    #[serde(default, skip_deserializing)]
+    // The daemon validates saved session identities before applying restart effects.
+    #[serde(default)]
     pub games: crate::gaming::Games,
     pub mode: String,
     pub revision: u64,

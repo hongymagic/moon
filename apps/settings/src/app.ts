@@ -22,6 +22,8 @@ type LiveShortcuts = {
   mode: string;
   paused: boolean;
   emergency: string;
+  emergency_enabled?: boolean;
+  game_focused?: boolean;
   bindings: { chord: string; commands: string[] }[];
 };
 type Overview = {
@@ -863,6 +865,17 @@ function describeCommand(command: string): string {
 }
 function paintShortcuts(): void {
   if (!shortcutPanel?.isConnected) return;
+  const recoveryKey = document.querySelector<HTMLElement>("#recovery-key");
+  const recoveryText = document.querySelector<HTMLElement>(
+    "#recovery-description",
+  );
+  if (recoveryKey && recoveryText) {
+    const released = shortcuts?.emergency_enabled === false;
+    recoveryKey.hidden = released;
+    recoveryText.textContent = released
+      ? "Game mode passes the emergency shortcut through. Choose Quit moon in the tray to restore your windows."
+      : "Restore original window positions and stop Moon:";
+  }
   shortcutPanel.replaceChildren();
   const heading = document.querySelector("#shortcut-status-heading");
   if (heading)
@@ -891,7 +904,7 @@ function paintShortcuts(): void {
     el(
       "p",
       shortcuts.hook_enabled ? "note" : "notice",
-      `Mode: ${shortcuts.mode}${!shortcuts.hook_enabled ? " · Configured shortcuts are disabled for this Moon session. The recovery shortcut above remains available." : shortcuts.paused ? " · Moon is paused; only the available recovery controls are listed." : " · These shortcuts are active on your desktop now."}`,
+      `Mode: ${shortcuts.mode}${shortcuts.game_focused ? " · The game receives Moon’s shortcuts." : !shortcuts.hook_enabled ? " · Configured shortcuts are disabled for this Moon session. The recovery shortcut above remains available." : shortcuts.paused ? " · Moon is paused; only the available recovery controls are listed." : " · These shortcuts are active on your desktop now."}`,
     ),
   );
   const terms = shortcutFilter.toLocaleLowerCase().trim().split(/\s+/);
@@ -928,7 +941,9 @@ function paintShortcuts(): void {
         "empty",
         shortcutFilter.trim()
           ? "No current shortcuts match. Try a key, action, or workspace name."
-          : "No shortcuts are active in this mode. The recovery shortcut above is always available.",
+          : shortcuts.game_focused
+            ? "Return to a desktop app to use your Moon shortcuts."
+            : "No shortcuts are active in this mode. The recovery shortcut above is always available.",
       ),
     );
   else shortcutPanel.append(list);
@@ -953,10 +968,22 @@ function renderShortcutHelp(parent: HTMLElement): void {
   heading.id = "shortcut-status-heading";
   parent.append(heading);
   const recovery = el("div", "notice");
+  const description = el(
+    "div",
+    "",
+    "Restore original window positions and stop Moon:",
+  );
+  description.id = "recovery-description";
+  const recoveryKey = el(
+    "kbd",
+    "",
+    readableChord(shortcuts?.emergency ?? "ctrl+alt+shift+f12"),
+  );
+  recoveryKey.id = "recovery-key";
   recovery.append(
     el("strong", "", "Always a way back"),
-    el("div", "", "Restore original window positions and stop Moon:"),
-    el("kbd", "", readableChord(shortcuts?.emergency ?? "ctrl+alt+shift+f12")),
+    description,
+    recoveryKey,
   );
   const toolbar = el("div", "toolbar live-help-toolbar");
   const search = el("input", "search");
@@ -3796,7 +3823,7 @@ function renderShortcuts(): void {
     el(
       "div",
       "notice",
-      "Use a key chord such as alt+shift+h. Add one command per line. Clearing all commands disables that shortcut. The emergency recovery shortcut is always available.",
+      "Use a key chord such as alt+shift+h. Add one command per line. Clearing all commands disables that shortcut. General → Gaming controls whether to release the emergency shortcut during play.",
     ),
   );
   const toolbar = el("div", "toolbar");
@@ -3893,46 +3920,33 @@ function personalRules(): Json[] {
 function renderRules(): void {
   const rules = personalRules();
   const toolbar = el("div", "toolbar");
+  function addRule(game: boolean): void {
+    stage(
+      ["rules"],
+      [
+        ...personalRules(),
+        {
+          ...(game ? { "game-mode": "always" } : {}),
+          commands: game ? [] : ["set-floating"],
+          matches: [{ process: { equals: "" } }],
+        },
+      ],
+    );
+    renderPage();
+    content
+      .querySelector<HTMLInputElement>(
+        '.list-card:last-child input[placeholder="e.g. Code or Arc"]',
+      )
+      ?.focus();
+  }
   toolbar.append(
     el(
       "p",
       "note",
       `${rules.length} personal ${rules.length === 1 ? "rule" : "rules"}`,
     ),
-    button("Add game", () => {
-      stage(
-        ["rules"],
-        [
-          ...rules,
-          {
-            "game-mode": "always",
-            commands: [],
-            matches: [{ process: { equals: "" } }],
-          },
-        ],
-      );
-      renderPage();
-      Array.from(
-        content.querySelectorAll<HTMLInputElement>(
-          'input[placeholder="e.g. Code or Arc"]',
-        ),
-      )
-        .at(-1)
-        ?.focus();
-    }),
-    button("Add rule", () => {
-      stage(
-        ["rules"],
-        [
-          ...rules,
-          {
-            commands: ["set-floating"],
-            matches: [{ process: { equals: "" } }],
-          },
-        ],
-      );
-      renderPage();
-    }),
+    button("Add game", () => addRule(true)),
+    button("Add rule", () => addRule(false)),
   );
   content.append(toolbar);
   if (!rules.length)
@@ -4106,7 +4120,7 @@ function renderRules(): void {
           el(
             "p",
             "note",
-            "Use the app’s process name without .exe. Matching ignores ASCII letter case. For window titles, classes or patterns, expand the conditions below.",
+            "Use the app’s executable name, with or without .exe. Matching ignores ASCII letter case. For window titles, classes or patterns, expand the conditions below.",
           ),
         );
       }
