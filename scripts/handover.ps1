@@ -116,6 +116,7 @@ if ($Rollback) {
 }
 
 if (!$Binary) {throw 'Provide the UIAccess release executable with -Binary.'}
+Assert-MoonUserEditionAbsent
 foreach ($required in @('install.ps1','uninstall.ps1','setup.ps1','verify-uiaccess.ps1')) {
     if (!(Test-Path -LiteralPath (Join-Path $PSScriptRoot $required) -PathType Leaf)) {throw "Handover bundle is missing $required; no desktop state was changed."}
 }

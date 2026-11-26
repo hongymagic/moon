@@ -395,6 +395,36 @@ fn apply_material(window: &tao::window::Window) -> bool {
     }
 }
 
+fn start_window_manager(config: Option<&std::path::Path>) -> Result<(), String> {
+    use std::{os::windows::process::CommandExt, process::Command};
+    let moon = std::env::current_exe().map_err(|e| e.to_string())?.with_file_name("moon.exe");
+    let running = || {
+        moon_win::ipc::request_to(
+            &json!({"version":1,"id":1,"method":"query","query":"stats"}),
+            None,
+            Some(&moon),
+        )
+        .is_ok_and(|reply| reply["ok"] == true)
+    };
+    if running() {
+        return Ok(());
+    }
+    let mut command = Command::new(&moon);
+    command.args(["start", "--background"]);
+    if let Some(path) = config {
+        command.arg("--config").arg(path);
+    }
+    let output = command.creation_flags(0x0800_0000).output().map_err(|e| e.to_string())?;
+    if output.status.success() || running() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Moon could not start. Close any other window manager and try again.\n\n{}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+}
+
 pub fn run() -> Result<(), String> {
     // Web content never inherits the window manager's UIAccess or an elevated token.
     let token =
@@ -405,6 +435,12 @@ pub fn run() -> Result<(), String> {
     // Appearance reads use UISettings before WebView2 initializes its thread.
     let _apartment = moon_win::platform::Apartment::new().map_err(|e| e.to_string())?;
     let startup = Startup::parse(std::env::args_os().skip(1))?;
+    if startup.launch != crate::startup::Launch::Settings {
+        start_window_manager(startup.config.as_deref())?;
+        if startup.launch == crate::startup::Launch::MoonOnly {
+            return Ok(());
+        }
+    }
     let page = serde_json::to_string(startup.page.name()).map_err(|e| e.to_string())?;
     let path = config_path(startup.config)?;
     let loop_ = EventLoopBuilder::<UserEvent>::with_user_event().build();

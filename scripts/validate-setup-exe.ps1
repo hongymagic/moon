@@ -118,7 +118,7 @@ exit 42
     } finally { $zip.Dispose() }
     $out = Join-Path $work 'output'
     & (Join-Path $PSScriptRoot 'build-setup-exe.ps1') -ArchivePath $fixtureZip -OutputDirectory $out -Version $Version -Target $Target | Out-Null
-    $fixture = Join-Path $out ($baseName + '-setup.exe')
+    $fixture = Join-Path $out ($baseName + '-uiaccess.exe')
 
     $temporary = Join-Path $work 'temporary files'
     [void][IO.Directory]::CreateDirectory($temporary)

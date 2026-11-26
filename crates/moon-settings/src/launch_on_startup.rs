@@ -1,4 +1,4 @@
-//! Read or toggle only the installed owner's validated Limited startup task.
+//! Control the owning user's sign-in entry for either installation type.
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -41,6 +41,82 @@ pub fn set(enabled: bool) -> Result<Value, String> {
 }
 
 #[cfg(windows)]
+fn optional<T>(result: windows_registry::Result<T>) -> Result<Option<T>, String> {
+    use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND};
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(error)
+            if [ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND]
+                .iter()
+                .any(|code| code.to_hresult().0 == error.code().0) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+#[cfg(windows)]
+fn user_startup(enabled: Option<bool>) -> Result<Option<Value>, String> {
+    use windows_registry::CURRENT_USER;
+    const INSTALL: &str = r"Software\MoonWM\UserInstall";
+    let Some(directory) =
+        optional(CURRENT_USER.open(INSTALL).and_then(|k| k.get_string("Directory")))?
+    else {
+        return Ok(None);
+    };
+    let installed = std::path::Path::new(&directory).join("moon-settings.exe");
+    let current = std::env::current_exe().map_err(|e| e.to_string())?;
+    if !installed.is_file()
+        || std::fs::canonicalize(&installed).map_err(|e| e.to_string())?
+            != std::fs::canonicalize(current).map_err(|e| e.to_string())?
+    {
+        return Ok(None);
+    }
+    let expected = format!(r#""{}" --start-moon"#, installed.display());
+    let active =
+        sign_in_preference(r"Software\Microsoft\Windows\CurrentVersion\Run", &expected, enabled)?;
+    Ok(Some(json!({"available":true,"enabled":active,"message": if active {
+        "Moon will launch when you sign in."
+    } else { "Moon will stay closed at sign-in." }})))
+}
+
+#[cfg(windows)]
+fn sign_in_preference(run: &str, expected: &str, requested: Option<bool>) -> Result<bool, String> {
+    use windows_registry::{CURRENT_USER, Transaction};
+    const NAME: &str = "Moon Window Manager";
+    let transaction =
+        requested.map(|_| Transaction::new()).transpose().map_err(|e| e.to_string())?;
+    let mut options = CURRENT_USER.options();
+    options.read();
+    if let Some(tx) = &transaction {
+        options.transaction(tx).write();
+        if requested == Some(true) {
+            options.create();
+        }
+    }
+    let Some(key) = optional(options.open(run))? else { return Ok(false) };
+    let existing = optional(key.get_string(NAME))?;
+    if existing.as_deref().is_some_and(|command| command != expected) {
+        return Err(
+            "Another command uses Moon's sign-in entry. Check Startup apps in Windows Settings."
+                .into(),
+        );
+    }
+    let active = existing.is_some();
+    if let (Some(value), Some(transaction)) = (requested, transaction)
+        && value != active
+    {
+        if value { key.set_string(NAME, expected) } else { key.remove_value(NAME) }
+            .map_err(|e| e.to_string())?;
+        drop(key);
+        transaction.commit().map_err(|e| e.to_string())?;
+        return Ok(value);
+    }
+    Ok(active)
+}
+
+#[cfg(windows)]
 fn run(enabled: Option<bool>) -> Result<Value, String> {
     use base64::{Engine, engine::general_purpose::STANDARD};
     use std::{
@@ -66,6 +142,9 @@ fn run(enabled: Option<bool>) -> Result<Value, String> {
         let path = unsafe { raw.to_string() };
         unsafe { CoTaskMemFree(Some(raw.0.cast())) };
         path.map(PathBuf::from).map_err(|e| e.to_string())
+    }
+    if let Some(status) = user_startup(enabled)? {
+        return Ok(status);
     }
     let helper = folder(&FOLDERID_ProgramFiles)?.join("moon/install-common.ps1");
     if !helper.is_file() {
@@ -143,6 +222,21 @@ try {{
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    #[test]
+    fn user_sign_in_only_changes_its_own_command() {
+        use windows_registry::CURRENT_USER;
+        let root =
+            format!(r"Software\MoonWM-Test-{}", windows::core::GUID::new().unwrap().to_u128());
+        let command = r#""C:\With spaces\moon-settings.exe" --start-moon"#;
+        assert!(!sign_in_preference(&root, command, None).unwrap());
+        assert!(sign_in_preference(&root, command, Some(true)).unwrap());
+        assert!(sign_in_preference(&root, command, None).unwrap());
+        assert!(sign_in_preference(&root, "other", Some(false)).is_err());
+        assert!(!sign_in_preference(&root, command, Some(false)).unwrap());
+        assert!(!sign_in_preference(&root, command, None).unwrap());
+        CURRENT_USER.remove_tree(root).unwrap();
+    }
     #[test]
     fn status_requires_boolean_state_and_preserves_actionable_windows_failure() {
         assert_eq!(

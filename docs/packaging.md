@@ -16,6 +16,39 @@ A completed release is skipped on
 reruns. If CI finishes out of merge order, the newest released commit on
 `main` retains GitHub's **Latest** designation.
 
+## Per-user installer
+
+`scripts/build-user-setup.ps1` builds the default `-setup.exe` with Inno Setup
+7.1.1. The build checks the version, architecture, static C runtime, icon and
+`asInvoker`, `uiAccess=false` manifests of both applications. The x64 setup
+engine also runs on Windows 11 on Arm, where it installs native Arm64 applications.
+The compiler download is pinned by SHA-256 and extracted in portable mode.
+[Inno Setup releases](https://jrsoftware.org/inno-setup/downloads) · [Setup architectures](https://jrsoftware.org/inno-setup/documentation/topic_setup_setuparchitecture.htm)
+
+```powershell
+$compiler = .\scripts\get-inno-setup.ps1 -Directory "$env:TEMP\moon-inno-7.1.1"
+$user = .\scripts\build-user-setup.ps1 -Compiler $compiler -Binary C:\ordinary\moon.exe `
+  -SettingsBinary C:\ordinary\moon-settings.exe -Target x86_64-pc-windows-msvc `
+  -RustLibraryNotices (Join-Path (rustc --print sysroot) 'share/doc/rust/COPYRIGHT-library.html') `
+  -Version 0.1.0 -OutputDirectory C:\releases
+```
+
+Build the ordinary daemon without the `uiaccess` feature. On a clean Windows
+account, `scripts/validate-user-setup.ps1` installs, updates and removes the
+result and checks sign-in preferences, PATH, application permissions and retained
+user files. Silent setup skips launching the desktop manager.
+
+Release builds can sign the default installer, its uninstaller and both bundled
+applications with Microsoft Artifact Signing before computing checksums. Configure
+a public-trust certificate profile and a GitHub OIDC identity for the release
+branch with the Certificate Profile Signer role on that profile. Set the
+repository variables `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`,
+`MOON_SIGNING_ENDPOINT`, `MOON_SIGNING_PROFILE` and `MOON_SIGNING_ACCOUNT`.
+Setting the account enables mandatory timestamped signatures for that build.
+Without a signing account the default installer is unsigned. [Microsoft Artifact Signing](https://learn.microsoft.com/en-us/azure/artifact-signing/quickstart) · [GitHub OIDC configuration](https://github.com/Azure/artifact-signing-action/blob/main/docs/OIDC.md)
+
+## UIAccess distribution
+
 `scripts/package.ps1` packages already-built, explicitly selected executables.
 It never launches them, builds Rust code, requests elevation, changes certificate
 stores, or installs Moon. Run it using Windows PowerShell 5.1 or newer:
@@ -59,7 +92,7 @@ can instead be supplied with `-StageDirectory`; unexpected files and links are
 rejected. If it already contains `package-manifest.json`, every recorded hash,
 size, entry, and package identity is verified before repackaging.
 
-Release packaging writes `moon-<version>-windows-<arch>-setup.exe`,
+UIAccess packaging writes `moon-<version>-windows-<arch>-uiaccess.exe`,
 `moon-<version>-windows-<arch>.zip`, a `.sha256` file for each download,
 the extracted package directory and an external `.manifest.json`. The internal manifest lists sorted
 payload paths, exact lengths, SHA-256 hashes, and executable identities. It does

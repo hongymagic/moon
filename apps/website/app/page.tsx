@@ -129,41 +129,41 @@ export default function Home() {
                 <li>
                   <p>
                     Download and open the <a href="/download">x64 installer</a>{" "}
-                    or <a href="/download?arch=arm64">Arm64 installer</a>. For the{" "}
-                    <a href="/download?format=zip">x64 ZIP</a> or{" "}
-                    <a href="/download?arch=arm64&format=zip">Arm64 ZIP</a>, choose{" "}
-                    <strong>Extract All</strong> in File Explorer, then open{" "}
-                    <strong>Install Moon.cmd</strong> in the extracted folder.
+                    or <a href="/download?arch=arm64">Arm64 installer</a> for
+                    your Windows 11 PC.
                   </p>
                 </li>
                 <li>
                   <p>
-                    Choose <strong>Install Moon</strong> and approve the Windows
-                    prompt.
+                    Choose <strong>Install</strong>. Moon installs for your account
+                    without PowerShell or administrator approval.
                   </p>
                 </li>
                 <li>
                   <p>
-                    If setup offers <strong>Get WebView2</strong>, install the
-                    runtime and return to setup. Choose{" "}
-                    <strong>Open Settings</strong>, then open two app windows on
-                    the same workspace to try tiling.
+                    Exit any other window manager and choose <strong>Open Moon</strong>.
+                    Open two windows on the same workspace to try tiling.
                   </p>
                 </li>
               </ol>
-              <a className="text-link" href={`${docs}/installation.md`}>
-                Installation and recovery guide <ArrowUpRight size={16} />
-              </a>
+              <p>
+                To manage apps running as administrator or update the Program
+                Files edition, use the{" "}
+                <a href={`${docs}/installation.md`}>UIAccess installation guide</a>.
+                This edition is also available as an{" "}
+                <a href="/download?format=zip">x64 ZIP</a> or{" "}
+                <a href="/download?arch=arm64&format=zip">Arm64 ZIP</a>.
+              </p>
             </div>
             <div className="install-stage">
               <div className="stage-pattern" aria-hidden="true" />
               <div className="install-screen">
                 <ScreenPreview
-                  name="Moon installer"
-                  file="/screens/install.webp"
-                  width={775}
-                  height={600}
-                  alt="The Windows installer with the Install Moon button in the lower right."
+                  name="Moon Settings"
+                  file="/screens/appearance.webp"
+                  width={1680}
+                  height={1140}
+                  alt="Moon Settings showing the window border and theme controls."
                 />
               </div>
             </div>

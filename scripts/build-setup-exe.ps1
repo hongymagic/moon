@@ -15,7 +15,7 @@ Add-Type -AssemblyName System.IO.Compression,System.IO.Compression.FileSystem
 $source=(Resolve-Path -LiteralPath $ArchivePath).ProviderPath
 $output=$ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputDirectory)
 [void][IO.Directory]::CreateDirectory($output)
-$name="moon-$Version-windows-$($platform.arch)-setup.exe"
+$name="moon-$Version-windows-$($platform.arch)-uiaccess.exe"
 $destination=Join-Path $output $name
 $checksum=$destination+'.sha256'
 if([IO.File]::Exists($destination) -or [IO.File]::Exists($checksum)){

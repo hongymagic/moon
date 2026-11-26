@@ -139,15 +139,19 @@ jobs:
         shell: powershell
         run: ./scripts/carousel-integration.ps1 -BuildDirectory "$PWD/target/$env:WINDOWS_TARGET/release" -ReportPath "$PWD/target/carousel-integration-results.json" -AllowBackgroundDesktop:($env:WINDOWS_TARGET -eq 'aarch64-pc-windows-msvc')
       - name: Build and exercise the Windows installer
-        # Exercise the Arm64 launcher natively before the x64 release runner publishes it.
         if: ${{ !cancelled() && steps.release_apps.outcome == 'success' && (github.event_name == 'pull_request' || matrix.arch == 'arm64') }}
         shell: powershell
         run: |
+          $build = "$PWD\target\$env:WINDOWS_TARGET\release"
+          $version = (Get-Item "$build\moon.exe").VersionInfo.ProductVersion
+          $compiler = .\scripts\get-inno-setup.ps1 -Directory "$env:RUNNER_TEMP\moon-inno"
+          $notices = Join-Path (rustc --print sysroot) 'share/doc/rust/COPYRIGHT-library.html'
+          $user = .\scripts\build-user-setup.ps1 -Compiler $compiler -Binary "$build\moon.exe" -SettingsBinary "$build\moon-settings.exe" -RustLibraryNotices $notices -Target $env:WINDOWS_TARGET -Version $version -OutputDirectory "$env:RUNNER_TEMP\moon-dist"
+          .\scripts\validate-user-setup.ps1 -Installer $user.installer -Binary "$build\moon.exe" -SettingsBinary "$build\moon-settings.exe"
           cargo build --locked --release --target $env:WINDOWS_TARGET -p moon --features moon/uiaccess
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           cargo build --locked --release --target $env:WINDOWS_TARGET -p moon-win --example window_inventory --example recover_windows
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          $build = "$PWD\target\$env:WINDOWS_TARGET\release"
           $inputs = @{
             Target = $env:WINDOWS_TARGET
             Version = (Get-Item "$build\moon.exe").VersionInfo.ProductVersion
@@ -209,4 +213,5 @@ jobs:
     needs: [settings, core, dependencies, windows, fuzz]
     permissions:
       contents: write
+      id-token: write
     uses: ./.github/workflows/release.yml

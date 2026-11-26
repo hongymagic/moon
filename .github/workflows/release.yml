@@ -16,6 +16,7 @@ jobs:
       queue: max
     permissions:
       contents: write
+      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -39,21 +40,42 @@ jobs:
             -f query='query($owner:String!, $name:String!, $tag:String!) { repository(owner:$owner, name:$name) { release(tagName:$tag) { isDraft tagCommit { oid } } } }' \
             --jq '.data.repository.release | if . == null then "new" elif .tagCommit.oid != env.GITHUB_SHA then error("Release belongs to a different commit") elif .isDraft then "draft" else "published" end')
           echo "state=$state" >> "$GITHUB_OUTPUT"
+      - name: Authenticate the release publisher
+        if: steps.plan.outputs.state != 'published' && vars.MOON_SIGNING_ACCOUNT != ''
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Install the publisher signing client
+        if: steps.plan.outputs.state != 'published' && vars.MOON_SIGNING_ACCOUNT != ''
+        shell: pwsh
+        run: Install-PSResource ArtifactSigning -Version 0.1.22 -Repository PSGallery -Scope CurrentUser -TrustRepository
       - name: Build and verify both Windows distributions
         if: steps.plan.outputs.state != 'published'
         shell: powershell
         env:
           MOON_RELEASE_VERSION: ${{ steps.plan.outputs.version }}
+          MOON_SIGNING_ACCOUNT: ${{ vars.MOON_SIGNING_ACCOUNT }}
+          MOON_SIGNING_ENDPOINT: ${{ vars.MOON_SIGNING_ENDPOINT }}
+          MOON_SIGNING_PROFILE: ${{ vars.MOON_SIGNING_PROFILE }}
         run: |
           $rustNotices = Join-Path (rustc --print sysroot) 'share/doc/rust/COPYRIGHT-library.html'
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $compiler = .\scripts\get-inno-setup.ps1 -Directory "$env:RUNNER_TEMP\moon-inno"
           # The runner's Visual Studio installation includes both MSVC toolsets.
           foreach ($target in 'x86_64-pc-windows-msvc', 'aarch64-pc-windows-msvc') {
+            $build = "$PWD\target\$target\release"
+            cargo build --locked --release --target $target -p moon -p moon-settings
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+            $user = .\scripts\build-user-setup.ps1 -Compiler $compiler -Binary "$build\moon.exe" -SettingsBinary "$build\moon-settings.exe" -RustLibraryNotices $rustNotices -Target $target -Version $env:MOON_RELEASE_VERSION -OutputDirectory "$PWD\dist" -Sign:([bool]$env:MOON_SIGNING_ACCOUNT)
+            if ($target -eq 'x86_64-pc-windows-msvc') {
+              .\scripts\validate-user-setup.ps1 -Installer $user.installer -Binary "$build\moon.exe" -SettingsBinary "$build\moon-settings.exe" -Signed:([bool]$env:MOON_SIGNING_ACCOUNT)
+            }
             cargo build --locked --release --target $target -p moon -p moon-settings --features moon/uiaccess
             if ($LASTEXITCODE) { exit $LASTEXITCODE }
             cargo build --locked --release --target $target -p moon-win --example window_inventory --example recover_windows
             if ($LASTEXITCODE) { exit $LASTEXITCODE }
-            $build = "$PWD\target\$target\release"
             $inputs = @{
               Target = $target
               Version = $env:MOON_RELEASE_VERSION
@@ -80,8 +102,8 @@ jobs:
           files=()
           for arch in x64 arm64; do
             name="moon-$VERSION-windows-$arch"
-            sha256sum --check "$name-setup.exe.sha256" "$name.zip.sha256"
-            files+=("$name-setup.exe" "$name-setup.exe.sha256" "$name.zip" "$name.zip.sha256" "$name.manifest.json")
+            sha256sum --check "$name-setup.exe.sha256" "$name-uiaccess.exe.sha256" "$name.zip.sha256"
+            files+=("$name-setup.exe" "$name-setup.exe.sha256" "$name-uiaccess.exe" "$name-uiaccess.exe.sha256" "$name.zip" "$name.zip.sha256" "$name.manifest.json")
             for suffix in -setup.exe .zip; do
               alias="moon-windows-$arch$suffix"
               cp -- "$name$suffix" "$alias"

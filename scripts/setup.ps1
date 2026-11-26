@@ -132,7 +132,8 @@ if (Test-MoonAdministrator) {
     $ui.Primary.Content='Done';$ui.Primary.IsDefault=$true;$ui.Primary.IsCancel=$true
     $ui.Secondary.Visibility='Collapsed';$ui.Secondary.IsDefault=$false;$ui.Secondary.IsCancel=$false
 } elseif ($Mode -eq 'Install') {
-    try {Test-MoonSetupPayload $PSScriptRoot $Binary $SettingsBinary $installed}
+    try {Assert-MoonUserEditionAbsent;Test-MoonSetupPayload $PSScriptRoot $Binary $SettingsBinary $installed}
+    catch [InvalidOperationException] {$context.exitCode=1;$ui.Status.Text=$_.Exception.Message;$ui.Primary.IsEnabled=$false;$ui.Secondary.Content='Close'}
     catch [PlatformNotSupportedException] {$context.exitCode=1;$ui.Status.Text=$_.Exception.Message;$ui.Primary.IsEnabled=$false;$ui.Secondary.Content='Close'}
     catch {$context.exitCode=1;Show-MoonSetupProblem 'Download Moon Setup again. If you use the ZIP, extract the whole folder before opening Install Moon.cmd.' $_;$ui.Primary.IsEnabled=$false;$ui.Secondary.Content='Close'}
 }

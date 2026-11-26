@@ -5,6 +5,15 @@ use std::{ffi::OsString, path::PathBuf};
 pub struct Startup {
     pub config: Option<PathBuf>,
     pub page: Page,
+    pub launch: Launch,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub enum Launch {
+    #[default]
+    Settings,
+    MoonAndSettings,
+    MoonOnly,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -30,6 +39,12 @@ impl Startup {
         let mut args = args.into_iter();
         while let Some(argument) = args.next() {
             match argument.to_str() {
+                Some("--open-moon") if startup.launch == Launch::Settings => {
+                    startup.launch = Launch::MoonAndSettings;
+                }
+                Some("--start-moon") if startup.launch == Launch::Settings => {
+                    startup.launch = Launch::MoonOnly;
+                }
                 Some("--config") if startup.config.is_none() => {
                     let path = args.next().ok_or("--config needs a file path.")?;
                     if path.is_empty() {
@@ -48,7 +63,7 @@ impl Startup {
                 }
                 _ => {
                     return Err(
-                        "Use each option once: --config <file> and --page general|overview|shortcuts."
+                        "Use --config <file>, --page general|overview|shortcuts, and at most one launch option (--open-moon or --start-moon)."
                             .into(),
                     );
                 }
@@ -83,7 +98,10 @@ mod tests {
 
     #[test]
     fn launch_rejects_unknown_duplicate_or_incomplete_options() {
+        assert_eq!(parse(&["--open-moon"]).unwrap().launch, Launch::MoonAndSettings);
+        assert_eq!(parse(&["--start-moon"]).unwrap().launch, Launch::MoonOnly);
         for args in [
+            vec!["--start-moon", "--open-moon"],
             vec!["--page"],
             vec!["--config"],
             vec!["--config", ""],

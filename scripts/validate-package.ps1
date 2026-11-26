@@ -105,6 +105,7 @@ try {
     $instrumentedDirectory=Join-Path $temporary 'instrumented';[void][IO.Directory]::CreateDirectory($instrumentedDirectory)
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'install-common.ps1') -Destination $instrumentedDirectory
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'package-target.ps1') -Destination $instrumentedDirectory
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'package-image.ps1') -Destination $instrumentedDirectory
     $source=[IO.File]::ReadAllText($package)
     $rootLine='$repository=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot ''..''))'
     $publishLine='[IO.File]::Move($pair[0],$pair[1]);$published.Add($pair[1])'

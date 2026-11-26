@@ -24,6 +24,7 @@ trap {
     Write-Error $_ -ErrorAction Continue
     exit $(if($cancelled){1223}else{1})
 }
+Assert-MoonUserEditionAbsent
 $Binary=(Resolve-Path -LiteralPath $Binary).ProviderPath
 if (!$SettingsBinary) {$SettingsBinary=Join-Path ([IO.Path]::GetDirectoryName($Binary)) 'moon-settings.exe'}
 $SettingsBinary=(Resolve-Path -LiteralPath $SettingsBinary).ProviderPath

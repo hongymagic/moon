@@ -1,13 +1,37 @@
 # Installation and recovery
 
-## Guided setup
+## Install for your account
 
 Choose the x64 or Arm64 installer for Windows 11. Check **System type** under
 **Settings → System → About** for your architecture.
 [Download x64](https://moon.hongy.dev/download) · [Download Arm64](https://moon.hongy.dev/download?arch=arm64)
 
-Double-click the setup EXE in File Explorer from the Windows account where
-you’ll use Moon. To update, open the newer installer the same way. If you’ve
+Open the `-setup.exe` and choose **Install**. Moon installs in
+`%LOCALAPPDATA%\Programs\Moon` and adds its directory to your user PATH.
+The installer, uninstaller and sign-in launcher run without PowerShell or UAC.
+Close any other window manager before selecting **Open Moon**. The Start menu
+entry opens Moon and its settings. Settings uses Microsoft's WebView2 Runtime.
+Optional `exec` bar widgets use Windows PowerShell to run their configured commands.
+
+To update or remove this edition, exit Moon using its tray menu and close
+Moon Settings. Then run the new installer or choose **Moon → Uninstall** in
+Windows Installed apps. Your configuration stays in `%USERPROFILE%\.config\moon`.
+
+An ordinary Moon process can arrange ordinary windows. To manage windows
+running as administrator, use the **UIAccess** edition below. If Moon is already
+installed in Program Files, use that edition for an in-place upgrade. To switch
+editions, first uninstall the existing copy through Installed apps. Windows
+asks for administrator approval once when removing the Program Files edition.
+
+Windows may show **Windows protected your PC** for a download with limited
+publisher or file reputation. The SHA-256 file on the release page lets you
+verify that your download matches the published bytes. Publisher signing
+allows reputation to carry across releases. [Microsoft's SmartScreen guidance](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation)
+
+## Program Files installation with UIAccess
+
+On the release page, choose the `-uiaccess.exe` for your architecture. Open
+it from the Windows account where you’ll use Moon. If you’ve
 been running the x64 build on Windows on Arm, use the Arm64 installer to update
 that installation.
 

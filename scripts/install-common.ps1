@@ -162,6 +162,11 @@ public static class MoonInstallNative {
 }
 
 function Get-MoonInstallDirectory { Join-Path ([MoonInstallNative]::NativeProgramFiles()) 'moon' }
+function Assert-MoonUserEditionAbsent {
+    if (Test-Path -LiteralPath 'HKCU:\Software\MoonWM\UserInstall') {
+        throw [InvalidOperationException]::new('Moon is installed for this account. To switch to UIAccess, first remove Moon from Installed apps. Your personal configuration is kept.')
+    }
+}
 function Get-MoonNativeWindowsTarget {
     switch ([MoonInstallNative]::NativeMachine()) {
         0x8664 { 'x86_64-pc-windows-msvc' }

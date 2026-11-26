@@ -8,13 +8,11 @@ Moon is a tiling window manager for Windows 11. It arranges your windows as you 
 
 Choose the installer that matches **System type** under **Settings → System → About**. [Download x64](https://moon.hongy.dev/download) · [Download Arm64](https://moon.hongy.dev/download?arch=arm64)
 
-1. Double-click the setup EXE from the account where you’ll use Moon.
-2. Choose **Install Moon** and approve the Windows prompt. Setup installs Moon under Program Files and signs the window manager with a certificate on your PC so it can manage elevated windows.
-3. Choose **Open Settings**. If setup offers **Get WebView2**, install Microsoft's Evergreen Runtime and return to setup. To reopen Settings later, search for **Moon** in Start.
+1. Double-click the setup EXE and choose **Install**. It installs Moon for your Windows account without PowerShell or administrator approval.
+2. Exit any other tiling window manager, then select **Open Moon** on the finish page. If Settings needs WebView2, setup offers Microsoft's download.
+3. Search for **Moon** in Start to open it again. You can turn sign-in startup on or off in Moon Settings.
 
-Prefer a ZIP? Choose the `.zip` asset on the release page, use **Extract All**, then double-click **Install Moon.cmd**. Each download has a matching `.sha256` file you can compare with `Get-FileHash` in PowerShell. [Latest release and checksums](https://github.com/hongymagic/moon/releases/latest)
-
-If you already use GlazeWM, Zebar or tacky-borders, setup can stop them and back up their startup configuration during the switch. Read the [handover and recovery guide](docs/installation.md) before installing on that desktop.
+The per-user edition manages ordinary windows. If you need to tile apps running as administrator or update an existing Program Files installation in place, choose the architecture-matched `-uiaccess.exe` on the release page. That edition uses Windows PowerShell and administrator approval and supports desktop handover. [Releases and checksums](https://github.com/hongymagic/moon/releases/latest) · [Installation and migration guide](docs/installation.md)
 
 ## Try it
 
