@@ -429,6 +429,24 @@ pub fn native_fullscreen() -> Result<Option<(WindowId, MonitorId)>> {
     let Some(id) = foreground() else {
         return Ok(None);
     };
+    Ok(fullscreen_monitor(id)?.map(|monitor| (id, monitor)))
+}
+
+pub fn window_monitor(id: WindowId) -> Option<MonitorId> {
+    unsafe {
+        let monitor = MonitorFromWindow(hwnd(id), MONITOR_DEFAULTTONULL);
+        let mut info = MONITORINFOEXW::default();
+        info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
+        GetMonitorInfoW(monitor, &mut info.monitorInfo)
+            .as_bool()
+            .then(|| monitor_id(&info.szDevice))
+    }
+}
+pub fn root_owner(id: WindowId) -> WindowId {
+    window_id(unsafe { GetAncestor(hwnd(id), GA_ROOTOWNER) })
+}
+
+pub fn fullscreen_monitor(id: WindowId) -> Result<Option<MonitorId>> {
     unsafe {
         let handle = hwnd(id);
         // Explorer can foreground its new desktop during a shell restart. Its
@@ -451,7 +469,7 @@ pub fn native_fullscreen() -> Result<Option<(WindowId, MonitorId)>> {
             && (frame.y - bounds.y).abs() <= 1
             && (frame.right() - bounds.right()).abs() <= 1
             && (frame.bottom() - bounds.bottom()).abs() <= 1;
-        Ok(matches.then_some((id, monitor_id(&info.szDevice))))
+        Ok(matches.then_some(monitor_id(&info.szDevice)))
     }
 }
 

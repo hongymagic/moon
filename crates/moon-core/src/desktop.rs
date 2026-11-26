@@ -120,6 +120,7 @@ pub fn catalog(
     // Pausing suppresses effects, not the logical layout shown in the overview.
     let mut preview = world.clone();
     preview.paused = false;
+    preview.games = Default::default();
     let placements: BTreeMap<_, _> =
         preview.plan().placements.into_iter().map(|p| (p.id, p)).collect();
     let mut catalog = Catalog {
@@ -595,6 +596,7 @@ mod tests {
         )
         .world;
         world.config.rules.push(crate::config::Rule {
+            game_mode: None,
             commands: vec!["set-floating".into()],
             matches: vec![
                 crate::config::WindowMatch {

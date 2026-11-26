@@ -126,6 +126,10 @@ jobs:
       - name: Real window integration
         shell: pwsh
         run: ./scripts/integration.ps1 -BuildDirectory "$PWD/target/$env:WINDOWS_TARGET/release" -AllowBackgroundDesktop:($env:WINDOWS_TARGET -eq 'aarch64-pc-windows-msvc')
+      - name: Game shortcuts and native Alt+Tab round trip
+        if: ${{ !cancelled() && steps.release_apps.outcome == 'success' }}
+        shell: powershell
+        run: ./scripts/game-mode-integration.ps1 -BuildDirectory "$PWD/target/$env:WINDOWS_TARGET/release" -ReportPath "$PWD/target/game-mode-results.json" -AllowBackgroundDesktop:($env:WINDOWS_TARGET -eq 'aarch64-pc-windows-msvc')
       - name: Pre-existing window workspace assignments
         if: ${{ !cancelled() && steps.release_apps.outcome == 'success' }}
         shell: powershell
@@ -164,6 +168,7 @@ jobs:
           path: |
             target/integration-results.json
             target/startup-assignment-results.json
+            target/game-mode-results.json
             target/carousel-integration-results.json
             target/carousel-integration-results.json.failure.json
             target/integration-logs/

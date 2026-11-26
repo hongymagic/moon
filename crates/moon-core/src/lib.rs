@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 pub mod desktop;
+pub mod gaming;
 pub mod geometry;
 pub mod help;
 pub mod ids;

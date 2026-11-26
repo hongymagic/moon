@@ -32,6 +32,8 @@ pub struct Config {
     pub aliases: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     pub rules: Vec<Rule>,
+    #[serde(default)]
+    pub gaming: GamingConfig,
     pub bar: BarConfig,
     pub borders: BorderConfig,
     pub palette: BTreeMap<String, String>,
@@ -161,9 +163,34 @@ fn weather_interval() -> u32 {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Rule {
+    /// Overrides automatic detection for windows matched by this rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game_mode: Option<GameRule>,
+    #[serde(default)]
     pub commands: Vec<String>,
     pub matches: Vec<WindowMatch>,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum GameRule {
+    Always,
+    Never,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct GamingConfig {
+    /// Recognise foreground fullscreen games using Windows Game Mode.
+    pub automatic: bool,
+    /// Release the dedicated emergency restore hotkey while playing.
+    pub pass_every_key: bool,
+}
+impl Default for GamingConfig {
+    fn default() -> Self {
+        Self { automatic: true, pass_every_key: false }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct WindowMatch {
@@ -268,6 +295,11 @@ impl Config {
         })?;
         config.validate().map_err(ConfigError::from)?;
         Ok(config)
+    }
+    pub fn game_rule(&self, process: &str, class: &str, title: &str) -> Option<GameRule> {
+        self.rules.iter().rev().find_map(|rule| {
+            rule.game_mode.filter(|_| rule.matches.iter().any(|m| m.matches(process, class, title)))
+        })
     }
     pub fn validate(&self) -> Result<(), String> {
         if !["dark", "light", "system"].contains(&self.theme.as_str()) {

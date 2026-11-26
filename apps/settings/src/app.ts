@@ -2036,6 +2036,7 @@ function createWindowRule(selected: DesktopWindow): void {
       ["workspace", "Place in a workspace"],
       ["float", "Keep floating"],
       ["ignore", "Leave unmanaged"],
+      ["game", "Use game mode"],
     ]) {
       const option = el("option", "", title);
       option.value = value!;
@@ -2092,7 +2093,9 @@ function createWindowRule(selected: DesktopWindow): void {
                 ? "set-floating"
                 : "ignore";
           const rule = {
-            commands: [command],
+            ...(action.value === "game"
+              ? { "game-mode": "always", commands: [] }
+              : { commands: [command] }),
             matches: [{ process: { equals: app.value } }],
           };
           const rules = personalRules();
@@ -2739,6 +2742,24 @@ function renderGeneral(): void {
     ["workspace-animation"],
     { type: "checkbox" },
   );
+  const gaming = section("Gaming");
+  field(
+    gaming,
+    "Detect fullscreen games",
+    "Use Windows Game Mode to give a fullscreen game its keys and hide Moon on its monitor.",
+    ["gaming", "automatic"],
+    { type: "checkbox" },
+  );
+  field(
+    gaming,
+    "Pass every key to the game",
+    "Also release Ctrl + Alt + Shift + F12 during play. To stop Moon, use its tray menu.",
+    ["gaming", "pass-every-key"],
+    { type: "checkbox" },
+  );
+  gaming.append(
+    button("Manage game rules", () => switchPage("Rules"), "quiet"),
+  );
   const behavior = section("Focus & movement");
   field(
     behavior,
@@ -2775,7 +2796,7 @@ function renderGeneral(): void {
     el(
       "div",
       "",
-      "Press Ctrl + Alt + Shift + F12 to restore your windows and stop Moon. Your original window positions are kept for recovery.",
+      "Use the Moon tray menu to quit and restore your windows. Ctrl + Alt + Shift + F12 also restores them whenever the emergency shortcut is enabled.",
     ),
   );
   content.append(note);
@@ -3650,6 +3671,7 @@ function commonRuleAction(commands: Json[]): {
   action: string;
   workspace: string;
 } {
+  if (commands.length === 0) return { action: "default", workspace: "" };
   if (commands.length !== 1) return { action: "custom", workspace: "" };
   const command = String(commands[0]);
   if (["set-floating", "set-tiling", "ignore"].includes(command))
@@ -3877,6 +3899,27 @@ function renderRules(): void {
       "note",
       `${rules.length} personal ${rules.length === 1 ? "rule" : "rules"}`,
     ),
+    button("Add game", () => {
+      stage(
+        ["rules"],
+        [
+          ...rules,
+          {
+            "game-mode": "always",
+            commands: [],
+            matches: [{ process: { equals: "" } }],
+          },
+        ],
+      );
+      renderPage();
+      Array.from(
+        content.querySelectorAll<HTMLInputElement>(
+          'input[placeholder="e.g. Code or Arc"]',
+        ),
+      )
+        .at(-1)
+        ?.focus();
+    }),
     button("Add rule", () => {
       stage(
         ["rules"],
@@ -3921,13 +3964,27 @@ function renderRules(): void {
     card.append(head);
     const update = (changed: Obj) => {
       const next = clone(personalRules());
-      next[index] = { ...object(next[index]), ...changed };
+      const value = { ...object(next[index]), ...changed };
+      if (value["game-mode"] === null) delete value["game-mode"];
+      next[index] = value;
       stage(["rules"], next);
       const commandInput = card.querySelector<HTMLTextAreaElement>("textarea");
       if (changed.commands && commandInput)
         commandInput.value = array(changed.commands).join("\n");
     };
     const fields = el("div", "fields");
+    fields.append(
+      selectControl(
+        "Game mode",
+        String(rule["game-mode"] ?? "auto"),
+        [
+          ["auto", "Automatic"],
+          ["always", "Always for this app"],
+          ["never", "Never for this app"],
+        ],
+        (value) => update({ "game-mode": value === "auto" ? null : value }),
+      ),
+    );
     const behavior = commonRuleAction(array(rule.commands));
     const workspaceNames = array(draft.workspaces).map((value) =>
       String(object(value).name),
@@ -3948,6 +4005,7 @@ function renderRules(): void {
         "App behavior",
         behavior.action,
         [
+          ["default", "Use normal placement"],
           ["workspace", "Place in a workspace"],
           ["set-floating", "Keep floating"],
           ["set-tiling", "Keep tiled"],
@@ -3959,11 +4017,14 @@ function renderRules(): void {
           advanced.open = value === "custom";
           if (value !== "custom")
             update({
-              commands: [
-                value === "workspace"
-                  ? `move-to-workspace ${JSON.stringify(destination)}`
-                  : value,
-              ],
+              commands:
+                value === "default"
+                  ? []
+                  : [
+                      value === "workspace"
+                        ? `move-to-workspace ${JSON.stringify(destination)}`
+                        : value,
+                    ],
             });
         },
       ),
@@ -4024,6 +4085,22 @@ function renderRules(): void {
           { placeholder: "e.g. Code or Arc" },
         );
         primaryApp = app;
+        const executable = el("input");
+        executable.type = "file";
+        executable.accept = ".exe";
+        executable.hidden = true;
+        executable.addEventListener("change", () => {
+          const file = executable.files?.[0];
+          const input = app.querySelector("input");
+          if (file && input) {
+            input.value = file.name.replace(/\.exe$/i, "");
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+          }
+        });
+        card.append(
+          executable,
+          button("Choose an executable…", () => executable.click(), "quiet"),
+        );
         card.append(
           app,
           el(
@@ -4405,7 +4482,7 @@ const searchIndex: [string, string, string][] = [
   [
     "Rules",
     "App rules",
-    "process class title match regex floating workspace ignore",
+    "process class title match regex floating workspace ignore game gaming fullscreen passthrough",
   ],
   ["General", "Launch on sign-in", "startup login automatic launch start"],
   ["Bar", "Bar items", "widgets clock format align actions order weather"],

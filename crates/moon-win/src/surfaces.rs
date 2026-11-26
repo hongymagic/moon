@@ -386,6 +386,8 @@ struct WindowData {
     interaction_dirty: bool,
     preferences_dirty: bool,
     paused: bool,
+    game_active: bool,
+    game_identity: Option<(String, moon_core::gaming::GameSource)>,
     tray_icon: HICON,
     tray_tip: String,
 }
@@ -457,9 +459,18 @@ unsafe extern "system" fn window_proc(
                     let menu = CreatePopupMenu();
                     if let Ok(menu) = menu {
                         let paused = state.borrow().paused;
+                        let game = state.borrow().game_active;
                         for (id, label) in [
                             (6, "Settings…"),
                             (1, if paused { "Resume tiling" } else { "Pause tiling" }),
+                            (
+                                7,
+                                if game {
+                                    "End game mode"
+                                } else {
+                                    "Use game mode for the last app"
+                                },
+                            ),
                             (2, "Reload configuration"),
                             (3, "Open configuration"),
                             (4, "Keybindings"),
@@ -498,6 +509,7 @@ unsafe extern "system" fn window_proc(
                             4 => Some("cheatsheet"),
                             5 => Some("quit"),
                             6 => Some("settings"),
+                            7 => Some(if game { "game-mode end" } else { "game-mode start" }),
                             _ => None,
                         };
                         if let Some(command) = command {
@@ -1887,7 +1899,12 @@ impl Surfaces {
                 data.interaction_dirty = true;
             }
         }
-        self._tray.update(world.paused, error.is_some(), self.preferences.contrast)?;
+        let game = world
+            .games
+            .foreground
+            .and_then(|id| world.games.sessions.get(&id))
+            .or_else(|| world.games.sessions.values().next());
+        self._tray.update(world.paused, error.is_some(), self.preferences.contrast, game)?;
         self.update_native_edges(world, values.get("system.theme").map(String::as_str));
         match self.render(world, values, error) {
             Ok(()) => Ok(()),
@@ -1936,7 +1953,11 @@ impl Surfaces {
                 self.native_edges.insert(*id, edge);
             }
             let edge = self.native_edges.get_mut(id).expect("captured native edge");
-            let desired = if !world.config.borders.enabled || world.paused || window.suspended {
+            let desired = if !world.config.borders.enabled
+                || world.paused
+                || window.suspended
+                || world.game_protected(*id)
+            {
                 edge.original
             } else if window.fullscreen
                 || world.native_fullscreen.is_some_and(|(fullscreen, _)| fullscreen == *id)
@@ -2197,14 +2218,29 @@ impl Tray {
     }
 }
 impl Tray {
-    fn update(&mut self, paused: bool, error: bool, contrast: bool) -> Result<()> {
+    fn update(
+        &mut self,
+        paused: bool,
+        error: bool,
+        contrast: bool,
+        game: Option<&moon_core::gaming::Game>,
+    ) -> Result<()> {
         unsafe {
             let dpi = GetDpiForWindow(self.hwnd).max(96);
             let color = GetSysColor(COLOR_WINDOWTEXT);
             let light_text = (color & 255) + ((color >> 8) & 255) + ((color >> 16) & 255) > 384;
             let resource = if contrast { if light_text { 103 } else { 102 } } else { 101 };
             let appearance = (resource, dpi, paused, error);
-            if self.appearance == Some(appearance) {
+            let game_changed = {
+                let data = self.data.borrow();
+                data.game_active != game.is_some()
+                    || game.is_some_and(|g| {
+                        data.game_identity.as_ref().is_none_or(|(process, source)| {
+                            process != &g.process || *source != g.source
+                        })
+                    })
+            };
+            if self.appearance == Some(appearance) && !game_changed {
                 return Ok(());
             }
             if self.appearance.is_none_or(|old| old.0 != resource || old.1 != dpi) {
@@ -2217,14 +2253,23 @@ impl Tray {
             let icon = {
                 let mut data = self.data.borrow_mut();
                 data.paused = paused;
-                data.tray_tip = if error {
-                    "Moon · Needs attention"
+                data.game_active = game.is_some();
+                data.game_identity = game.map(|g| (g.process.clone(), g.source));
+                data.tray_tip = if let Some(game) = game {
+                    use moon_core::gaming::GameSource;
+                    let reason = match game.source {
+                        GameSource::Windows => "Windows",
+                        GameSource::Manual => "this session",
+                        GameSource::Rule => "app rule",
+                    };
+                    format!("Moon · Game mode · {} ({reason})", game.process)
+                } else if error {
+                    "Moon · Needs attention".into()
                 } else if paused {
-                    "Moon · Tiling paused"
+                    "Moon · Tiling paused".into()
                 } else {
-                    "Moon · Open Settings"
-                }
-                .into();
+                    "Moon · Open Settings".into()
+                };
                 tray_info(self.hwnd, &data)
             };
             let _ = Shell_NotifyIconW(NIM_MODIFY, &icon);

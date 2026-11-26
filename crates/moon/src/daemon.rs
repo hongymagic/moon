@@ -39,6 +39,8 @@ enum Intake {
 struct Daemon {
     options: Options,
     world: World,
+    gaming: crate::gaming::Tracker,
+    input_changed: Instant,
     journal: Journal,
     journal_writer: Option<journal::JournalWriter>,
     path: PathBuf,
@@ -116,8 +118,8 @@ fn add_options(command: &mut process::Command, options: &Options) {
     if let Some(only) = &options.only {
         command.args(["--only", only]);
     }
-    if options.no_hook {
-        command.arg("--no-hook");
+    if let Some(enabled) = options.hook {
+        command.arg(if enabled { "--hook" } else { "--no-hook" });
     }
     if options.no_surfaces {
         command.arg("--no-surfaces");
@@ -294,7 +296,12 @@ pub fn run(options: Options) -> Result<()> {
     runtime::install_shutdown_handler(main)?;
     let (tx, rx) = mpsc::channel();
     let (hook_tx, hook_rx) = mpsc::channel();
-    let hook = Hooks::start(bindings(&world), hook_tx, options.hook_enabled())?;
+    let hook = Hooks::with_input(
+        bindings(&world),
+        hook_tx,
+        options.hook_enabled(),
+        Some(hooks::GameInput { playing: true, ..Default::default() }),
+    )?;
     hook.set_pointer_tracking(world.config.focus_follows_cursor && options.only.is_none())?;
     forward(hook_rx, tx.clone(), main, Intake::Platform);
     let (pipe_tx, pipe_rx) = mpsc::channel();
@@ -327,6 +334,8 @@ pub fn run(options: Options) -> Result<()> {
     let mut daemon = Daemon {
         options,
         world,
+        gaming: Default::default(),
+        input_changed: started,
         journal: record,
         journal_writer: Some(journal_writer),
         path,
@@ -355,6 +364,7 @@ pub fn run(options: Options) -> Result<()> {
         undo_births: BTreeMap::new(),
     };
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
+        daemon.sync_native_fullscreen()?;
         daemon.adopt_existing()?;
         daemon.refresh_surfaces()?;
         daemon.commands(daemon.world.config.hooks.startup.clone())?;
@@ -439,8 +449,10 @@ pub fn run(options: Options) -> Result<()> {
                         }
                         let point = daemon.hooks.take_pointer();
                         if !daemon.session_suspended
+                            && daemon.world.games.foreground.is_none()
                             && daemon.world.config.focus_follows_cursor
                             && let Some(id) = platform::window_at_point(point)
+                            && !daemon.world.game_protected(id)
                             && daemon.world.windows.contains_key(&id)
                             && daemon.world.focused != Some(id)
                             && let Err(error) =
@@ -535,6 +547,12 @@ pub fn run(options: Options) -> Result<()> {
 
 impl Daemon {
     fn dispatch_shortcut(&mut self, shortcut: Shortcut) {
+        if self.session_suspended
+            || self.world.games.foreground.is_some()
+            || shortcut.received < self.input_changed
+        {
+            return;
+        }
         if self.pending_input.len() == 256 {
             self.pending_input.pop_front();
         }
@@ -571,6 +589,9 @@ impl Daemon {
         let mut changed = false;
         for info in platform::enumerate_windows()? {
             if !self.in_scope(&info.process)
+                || self.gaming.excluded(&next, &info)
+                || (foreground != Some(info.id)
+                    && platform::fullscreen_monitor(info.id).ok().flatten().is_some())
                 || next.windows.contains_key(&info.id)
                 || platform::cloaked(info.id).unwrap_or(0) != 0
                 || !platform::can_manage_process(info.process_id)
@@ -687,6 +708,10 @@ impl Daemon {
         started: Instant,
     ) -> Result<()> {
         let reduce_us = started.elapsed().as_micros();
+        if transition.world.games != self.world.games {
+            self.input_changed = Instant::now();
+            self.workspace_shortcuts.clear();
+        }
         let carousel = self.carousel_transitions(&transition.world, &transition.plan, kind);
         let journal_started = Instant::now();
         let previous_mode = self.world.mode.clone();
@@ -744,6 +769,7 @@ impl Daemon {
                 ) || self.world.plan().placements != transition.plan.placements
                     || transition.world.paused
                     || transition.world.native_fullscreen.is_some()
+                    || kind == "gaming"
                     || transition.plan.control.is_some())
             {
                 self.carousel.cancel();
@@ -789,6 +815,8 @@ impl Daemon {
         }
         let apply_us = apply_started.elapsed().as_micros();
         if !self.session_suspended
+            && self.world.games.foreground.is_none()
+            && kind != "gaming"
             && self.world.config.cursor_jump
             && self.world.active_monitor != previous_monitor
             && let Some(monitor) = self.world.monitor(self.world.active_monitor)
@@ -835,6 +863,9 @@ impl Daemon {
         let previous = self.world.plan();
         let mut transitions = Vec::new();
         for monitor in &next.monitors {
+            if next.games.covers(monitor.id) || self.world.games.covers(monitor.id) {
+                continue;
+            }
             let Some(old_monitor) = self.world.monitor(monitor.id) else { continue };
             if old_monitor.bounds != monitor.bounds || old_monitor.work_area != monitor.work_area {
                 continue;
@@ -914,6 +945,11 @@ impl Daemon {
         }
         transitions
     }
+    fn app_owns_frame(&self, id: WindowId) -> bool {
+        self.world.game_protected(id)
+            || (self.world.native_fullscreen.is_some_and(|(native, _)| native == id)
+                && self.world.windows.get(&id).is_some_and(|w| !w.fullscreen))
+    }
     fn apply(&mut self, plan: Plan, require_foreground_for_close: bool) -> Result<()> {
         if !self.session_suspended {
             let live: BTreeSet<_> = plan.placements.iter().map(|p| p.id).collect();
@@ -922,7 +958,7 @@ impl Daemon {
             self.refusals.retain(|id, _| live.contains(id));
             let mut changes = Vec::new();
             for placement in plan.placements {
-                if !self.owns_native_window(placement.id) {
+                if self.app_owns_frame(placement.id) || !self.owns_native_window(placement.id) {
                     continue;
                 }
                 if self.applied.get(&placement.id) == Some(&placement) {
@@ -963,6 +999,8 @@ impl Daemon {
                 }
             }
             if let Some(id) = plan.focus
+                && self.world.games.foreground.is_none()
+                && !self.world.game_protected(id)
                 && self.owns_native_window(id)
                 && !platform::is_minimized(id)
                 && platform::window_on_current_virtual_desktop(id).unwrap_or(false)
@@ -972,6 +1010,9 @@ impl Daemon {
                 self.error = Some(format!("Focus was refused: {error}"));
             }
             for id in plan.close {
+                if self.world.game_protected(id) {
+                    bail!("End game mode before closing this window");
+                }
                 if require_foreground_for_close && platform::foreground() != Some(id) {
                     bail!("The foreground window changed before it could be closed");
                 }
@@ -989,6 +1030,17 @@ impl Daemon {
                 Control::Restart => {
                     self.restart = true;
                     self.quit = true;
+                }
+                Control::StartGame => {
+                    self.check_session_action()?;
+                    self.gaming.start()?;
+                    self.sync_native_fullscreen()?;
+                }
+                Control::EndGame => {
+                    self.check_session_action()?;
+                    let id = self.gaming.end(&self.world.games)?;
+                    self.sync_native_fullscreen()?;
+                    self.window_event(id, 0x8002)?;
                 }
                 Control::Reload => self.reload()?,
                 Control::CheatSheet => self.cheatsheet()?,
@@ -1098,7 +1150,19 @@ impl Daemon {
                 return Ok(());
             }
         };
+        let mut transition = transition;
+        let foreground = platform::foreground();
+        let native = platform::native_fullscreen()?;
+        transition.world.games = self.gaming.observe(
+            &transition.world,
+            foreground,
+            native,
+            self.options.only.as_deref(),
+        );
+        transition.plan = transition.world.plan();
+        transition.plan.focus = None;
         self.commit_transition(transition, "config", started)?;
+        self.sync_native_fullscreen()?;
         self.hooks.set_pointer_tracking(
             self.world.config.focus_follows_cursor && self.options.only.is_none(),
         )?;
@@ -1123,6 +1187,9 @@ impl Daemon {
         // A destroy notification can arrive while the HWND is still valid.
         // Retire the tile before querying its visibility or window metadata.
         if kind == 0x8001 || !platform::is_window(id) {
+            if self.world.games.sessions.contains_key(&id) {
+                self.sync_native_fullscreen()?;
+            }
             if self.world.windows.contains_key(&id) {
                 self.commit(Event::WindowRemoved(id), "destroy")?;
                 self.journal.windows.remove(&id);
@@ -1134,7 +1201,8 @@ impl Daemon {
         if self.world.windows.contains_key(&id) && !self.owns_native_window(id) {
             self.commit(Event::WindowRemoved(id), "stale-window")?;
         }
-        if kind == 3 || (kind == 0x800b && platform::foreground() == Some(id)) {
+        let foreground = platform::foreground();
+        if kind == 3 || self.world.games.sessions.contains_key(&id) || foreground == Some(id) {
             if kind == 3
                 && platform::foreground() == Some(id)
                 && !self.world.windows.contains_key(&id)
@@ -1155,9 +1223,9 @@ impl Daemon {
         if self.world.windows.contains_key(&id) {
             self.sync_suspension(id)?;
         }
-        if kind == 3 {
+        if kind == 3 && self.world.windows.contains_key(&id) {
             if platform::foreground() == Some(id)
-                && self.world.windows.contains_key(&id)
+                && !self.world.game_protected(id)
                 && self.world.focused != Some(id)
             {
                 self.commit(Event::WindowFocused(id), "foreground")?;
@@ -1165,7 +1233,7 @@ impl Daemon {
         } else if (self.world.windows.contains_key(&id) || platform::is_manageable(id))
             && let Ok(info) = platform::window_info(id)
         {
-            if !self.in_scope(&info.process) {
+            if !self.in_scope(&info.process) || self.gaming.excluded(&self.world, &info) {
                 return Ok(());
             }
             if let Some(current) = self.world.windows.get(&id) {
@@ -1183,7 +1251,9 @@ impl Daemon {
                 {
                     self.commit(Event::WindowChanged(info), "window")?;
                 }
-            } else if platform::cloaked(id).unwrap_or(0) == 0
+            } else if (foreground == Some(id)
+                || platform::fullscreen_monitor(id).ok().flatten().is_none())
+                && platform::cloaked(id).unwrap_or(0) == 0
                 && platform::can_manage_process(info.process_id)
             {
                 self.commit(Event::WindowAdded(info), "create")?;
@@ -1245,6 +1315,7 @@ impl Daemon {
         {
             self.report(error);
         }
+        self.sync_native_fullscreen()?;
         let monitors = platform::monitors()?;
         if monitors != self.world.monitors {
             let started = Instant::now();
@@ -1257,7 +1328,6 @@ impl Daemon {
             };
             self.commit_transition(transition, "display", started)?;
         }
-        self.sync_native_fullscreen()?;
         for id in self.world.windows.keys().copied().collect::<Vec<_>>() {
             self.sync_suspension(id)?;
         }
@@ -1265,6 +1335,7 @@ impl Daemon {
             for placement in self.world.plan().placements {
                 if !placement.visible
                     || placement.floating
+                    || self.app_owns_frame(placement.id)
                     || !self.owns_native_window(placement.id)
                 {
                     continue;
@@ -1335,7 +1406,21 @@ impl Daemon {
             .is_some_and(|window| platform::process_id(id) == window.info.process_id)
     }
     fn sync_native_fullscreen(&mut self) -> Result<()> {
-        let native = platform::native_fullscreen()?;
+        let foreground = platform::foreground();
+        let native = foreground
+            .and_then(|id| platform::fullscreen_monitor(id).ok().flatten().map(|m| (id, m)));
+        let games =
+            self.gaming.observe(&self.world, foreground, native, self.options.only.as_deref());
+        let playing = games.foreground.is_some();
+        self.hooks.set_game_input(hooks::GameInput {
+            foreground,
+            playing,
+            session: !games.sessions.is_empty(),
+            release_emergency: playing && self.world.config.gaming.pass_every_key,
+        })?;
+        if games != self.world.games {
+            self.commit(Event::GamesChanged(games), "gaming")?;
+        }
         if let Some((_, monitor)) = native
             && self.world.monitor(monitor).is_none()
         {
@@ -1355,6 +1440,13 @@ impl Daemon {
         Ok(())
     }
     fn system_event(&mut self, event: SystemEvent) -> Result<()> {
+        if let SystemEvent::GamePower(active) = event {
+            self.gaming.power = active;
+            if !self.session_suspended {
+                self.sync_native_fullscreen()?;
+            }
+            return Ok(());
+        }
         let rechecked_suspension = matches!(
             event,
             SystemEvent::SessionUnlocked | SystemEvent::Resumed | SystemEvent::DesktopChanged
@@ -1365,6 +1457,8 @@ impl Daemon {
             SystemEvent::SessionLocked | SystemEvent::Suspended | SystemEvent::SessionEnding
         ) || rechecked_suspension == Some(true)
         {
+            self.hooks.set_game_input(hooks::GameInput { playing: true, ..Default::default() })?;
+            self.workspace_shortcuts.clear();
             self.carousel.suspend();
             if let Some(surfaces) = &mut self.surfaces {
                 surfaces.hide_bars();
@@ -1373,6 +1467,7 @@ impl Daemon {
             self.carousel.cancel();
         }
         match event {
+            SystemEvent::GamePower(_) => unreachable!(),
             SystemEvent::SessionLocked | SystemEvent::Suspended => self.session_suspended = true,
             SystemEvent::SessionEnding => self.quit = true,
             SystemEvent::SessionUnlocked
@@ -1463,6 +1558,7 @@ impl Daemon {
     fn query(&self, query: &str) -> Result<Value> {
         Ok(match query {
             "world" => serde_json::to_value(&self.world)?,
+            "games" => serde_json::to_value(&self.world.games)?,
             "windows" => serde_json::to_value(self.world.plan().placements)?,
             "monitors" => serde_json::to_value(&self.world.monitors)?,
             "config" => serde_json::to_value(&self.world.config)?,

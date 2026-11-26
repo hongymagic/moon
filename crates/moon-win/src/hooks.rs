@@ -7,7 +7,7 @@ use std::{
     cell::{Cell, RefCell},
     collections::HashSet,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, RwLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, Sender},
     },
@@ -21,6 +21,11 @@ use windows::{
             Performance::HardwareCounterProfiling::{
                 DisableThreadProfiling, EnableThreadProfiling, PERFORMANCE_DATA,
                 ReadThreadProfilingData,
+            },
+            Power::{
+                EFFECTIVE_POWER_MODE, EFFECTIVE_POWER_MODE_V2, EffectivePowerModeGameMode,
+                PowerRegisterForEffectivePowerModeNotifications,
+                PowerUnregisterFromEffectivePowerModeNotifications,
             },
             RemoteDesktop::*,
             Threading::{GetCurrentThread, GetCurrentThreadId},
@@ -56,6 +61,7 @@ pub enum SystemEvent {
     DesktopChanged,
     ShellRestarted,
     SessionEnding,
+    GamePower(bool),
 }
 
 #[derive(Clone)]
@@ -64,7 +70,26 @@ struct Binding {
     modifiers: u8,
     commands: Arc<[String]>,
 }
+/// Published by the daemon after classifying the actual foreground. A newly
+/// focused window owns its first key while that classification is pending.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GameInput {
+    pub foreground: Option<WindowId>,
+    pub playing: bool,
+    pub session: bool,
+    pub release_emergency: bool,
+}
+impl GameInput {
+    fn forwards(self, foreground: Option<WindowId>, key: u32, modifiers: u8) -> bool {
+        self.playing
+            || foreground != self.foreground
+            || (self.session && key == u32::from(VK_TAB.0) && matches!(modifiers, 1 | 3))
+    }
+}
+type SharedGameInput = Arc<RwLock<Option<GameInput>>>;
+
 struct State {
+    game: SharedGameInput,
     bindings: Vec<Binding>,
     sender: Sender<PlatformEvent>,
     pressed: [bool; 256],
@@ -76,6 +101,35 @@ thread_local! { static STATE:RefCell<Option<State>> = const { RefCell::new(None)
 const UPDATE: u32 = WM_APP + 41;
 const RENEW: u32 = WM_APP + 42;
 const POINTER: u32 = WM_APP + 43;
+const GAME_HOTKEY: u32 = WM_APP + 44;
+const GAME_POWER: u32 = WM_APP + 45;
+
+unsafe extern "system" fn power_changed(
+    mode: EFFECTIVE_POWER_MODE,
+    context: *const core::ffi::c_void,
+) {
+    // Only an integer thread ID crosses the callback lifetime boundary.
+    let _ = unsafe {
+        PostThreadMessageW(
+            context as usize as u32,
+            GAME_POWER,
+            WPARAM(usize::from(mode == EffectivePowerModeGameMode)),
+            LPARAM(0),
+        )
+    };
+}
+
+fn register_emergency() -> Result<()> {
+    unsafe {
+        RegisterHotKey(
+            None,
+            EMERGENCY,
+            MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_NOREPEAT,
+            VK_F12.0 as u32,
+        )
+    }
+}
+
 // Documented WM_WTSSESSION_CHANGE value, absent from windows 0.62.2 metadata.
 const SESSION_DESKTOP_READY: u32 = 0x0f;
 #[derive(Default)]
@@ -599,6 +653,15 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
                     .iter()
                     .find(|binding| binding.key == key && binding.modifiers == modifiers)
                 {
+                    let forwards = match state.game.try_read() {
+                        Ok(game) => game.is_some_and(|policy| {
+                            policy.forwards(crate::platform::foreground(), key, modifiers)
+                        }),
+                        Err(_) => true,
+                    };
+                    if forwards {
+                        return if was_swallowed { Match::Swallow } else { Match::Forward };
+                    }
                     Match::Command {
                         key,
                         alt: modifiers & 1 != 0,
@@ -824,6 +887,7 @@ impl Drop for NotificationWindow {
 
 pub struct Hooks {
     id: u32,
+    game: SharedGameInput,
     pending: Arc<Mutex<Option<Vec<Binding>>>>,
     pointer: Arc<PointerState>,
     thread: Option<JoinHandle<()>>,
@@ -834,11 +898,22 @@ impl Hooks {
         sender: Sender<PlatformEvent>,
         keyboard_enabled: bool,
     ) -> Result<Self> {
+        Self::with_input(bindings, sender, keyboard_enabled, None)
+    }
+
+    pub fn with_input(
+        bindings: Vec<HookBinding>,
+        sender: Sender<PlatformEvent>,
+        keyboard_enabled: bool,
+        initial: Option<GameInput>,
+    ) -> Result<Self> {
         let bindings = compile(bindings)?;
         let pending: Arc<Mutex<Option<Vec<Binding>>>> = Arc::new(Mutex::new(None));
         let changes = pending.clone();
         let pointer = Arc::new(PointerState::default());
         let pointer_thread = pointer.clone();
+        let game = Arc::new(RwLock::new(initial));
+        let hook_game = game.clone();
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let thread = thread::Builder::new()
             .name("moon-intake".into())
@@ -850,6 +925,7 @@ impl Hooks {
                 STATE.with(|state| {
                     *state.borrow_mut() = Some(State {
                         bindings,
+                        game: hook_game.clone(),
                         sender: sender.clone(),
                         pressed: keyboard_snapshot(|key| GetAsyncKeyState(key.0 as i32) < 0),
                         swallowed: HashSet::with_capacity(16),
@@ -902,12 +978,7 @@ impl Hooks {
                 } else {
                     None
                 };
-                if let Err(error) = RegisterHotKey(
-                    None,
-                    EMERGENCY,
-                    MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_NOREPEAT,
-                    VK_F12.0 as u32,
-                ) {
+                if let Err(error) = register_emergency() {
                     for hook in event_hooks {
                         let _ = UnhookWinEvent(hook);
                     }
@@ -920,6 +991,15 @@ impl Hooks {
                 // Windows exposes no hook-is-installed API. Renew it periodically so a
                 // timeout or secure-desktop transition cannot disable bindings forever.
                 let timer = SetTimer(None, 0, 30_000, None);
+                let mut emergency_registered = true;
+                let mut power_handle = std::ptr::null_mut();
+                let power_registered = PowerRegisterForEffectivePowerModeNotifications(
+                    EFFECTIVE_POWER_MODE_V2,
+                    Some(power_changed),
+                    Some(id as usize as *const _),
+                    &mut power_handle,
+                )
+                .is_ok();
                 let mut mouse_enabled = false;
                 let mut mouse_hook = None;
                 let _ = ready_tx.send(Ok(id));
@@ -934,7 +1014,35 @@ impl Hooks {
                                 }
                             });
                         }
-                    } else if message.message == POINTER {
+                    } else if message.message == GAME_POWER {
+                        let _ = sender.send(PlatformEvent::System(SystemEvent::GamePower(
+                            message.wParam.0 != 0,
+                        )));
+                    }
+                    if matches!(message.message, GAME_HOTKEY | WM_TIMER) {
+                        let release = hook_game
+                            .read()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .is_some_and(|p| p.release_emergency);
+                        if release && emergency_registered {
+                            if UnregisterHotKey(None, EMERGENCY).is_ok() {
+                                emergency_registered = false;
+                            }
+                        } else if !release && !emergency_registered {
+                            match register_emergency() {
+                                Ok(()) => emergency_registered = true,
+                                Err(error) => {
+                                    let _ = sender.send(PlatformEvent::HookError(format!(
+                                        "Emergency restore hotkey is unavailable: {error}"
+                                    )));
+                                }
+                            }
+                        }
+                        if message.message == GAME_HOTKEY {
+                            continue;
+                        }
+                    }
+                    if message.message == POINTER {
                         mouse_enabled = message.wParam.0 != 0;
                         if let Some(old) = mouse_hook.take() {
                             let _ = UnhookWindowsHookEx(old);
@@ -950,7 +1058,13 @@ impl Hooks {
                         }
                     } else if message.message == WM_HOTKEY && message.wParam.0 == EMERGENCY as usize
                     {
-                        let _ = sender.send(PlatformEvent::EmergencyRestore);
+                        if !hook_game
+                            .read()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .is_some_and(|p| p.release_emergency)
+                        {
+                            let _ = sender.send(PlatformEvent::EmergencyRestore);
+                        }
                     } else if matches!(message.message, WM_TIMER | RENEW) {
                         notifications.retry_session_registration();
                         if mouse_enabled {
@@ -993,7 +1107,12 @@ impl Hooks {
                 if let Some(hook) = mouse_hook {
                     let _ = UnhookWindowsHookEx(hook);
                 }
-                let _ = UnregisterHotKey(None, EMERGENCY);
+                if power_registered {
+                    let _ = PowerUnregisterFromEffectivePowerModeNotifications(power_handle);
+                }
+                if emergency_registered {
+                    let _ = UnregisterHotKey(None, EMERGENCY);
+                }
                 if timer != 0 {
                     let _ = KillTimer(None, timer);
                 }
@@ -1010,7 +1129,16 @@ impl Hooks {
         let id = ready_rx
             .recv()
             .map_err(|_| Error::new(E_FAIL, "Input thread stopped before initialization"))??;
-        Ok(Self { id, pending, pointer, thread: Some(thread) })
+        Ok(Self { id, pending, pointer, game, thread: Some(thread) })
+    }
+    pub fn set_game_input(&self, policy: GameInput) -> Result<()> {
+        let previous = self.game.write().unwrap_or_else(|e| e.into_inner()).replace(policy);
+        if previous.is_some_and(|p| p.release_emergency) != policy.release_emergency {
+            unsafe {
+                PostThreadMessageW(self.id, GAME_HOTKEY, WPARAM(0), LPARAM(0))?;
+            }
+        }
+        Ok(())
     }
     pub fn set_pointer_tracking(&self, enabled: bool) -> Result<()> {
         unsafe { PostThreadMessageW(self.id, POINTER, WPARAM(usize::from(enabled)), LPARAM(0)) }
@@ -1074,6 +1202,7 @@ mod tests {
         let (sender, receiver) = mpsc::channel();
         STATE.with(|state| {
             *state.borrow_mut() = Some(State {
+                game: Arc::default(),
                 bindings: Vec::new(),
                 sender,
                 pressed: [false; 256],
@@ -1149,6 +1278,27 @@ mod tests {
         Defaults,
         KeyPairs,
     }
+    #[test]
+    fn gaming_forwards_the_entire_switcher_round_trip_and_keeps_desktop_keys() {
+        let game = Some(WindowId(100));
+        let desktop = Some(WindowId(200));
+        let playing =
+            GameInput { foreground: game, playing: true, session: true, release_emergency: false };
+        let away = GameInput { foreground: desktop, playing: false, ..playing };
+        for modifiers in [1, 3] {
+            assert!(playing.forwards(game, VK_TAB.0.into(), modifiers));
+            assert!(away.forwards(desktop, VK_TAB.0.into(), modifiers));
+            assert!(!GameInput { session: false, ..away }.forwards(
+                desktop,
+                VK_TAB.0.into(),
+                modifiers
+            ));
+        }
+        assert!(playing.forwards(game, VK_LEFT.0.into(), 1));
+        assert!(!away.forwards(desktop, VK_LEFT.0.into(), 1));
+        assert!(away.forwards(game, VK_LEFT.0.into(), 1));
+    }
+
     #[test]
     #[ignore = "requires an isolated interactive desktop and MOON_TESTWIN_PATH"]
     fn held_alt_shift_renewal_preserves_hkl_and_plain_trigger()
