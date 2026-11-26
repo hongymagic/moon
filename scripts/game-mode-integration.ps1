@@ -200,7 +200,7 @@ try {
     }
     $owned=[int](Query-GameFixture stats).process_id
     Wait-GameFocus $game $false
-    if ((Query-GameFixture games).sessions.([string]$game)) {throw 'Restart lost the per-instance override.'}
+    if ((Query-GameFixture games).sessions.PSObject.Properties[[string]$game]) {throw 'Restart lost the per-instance override.'}
     $null=Invoke-MoonRpc -Method command -Commands @('game-mode start') -DevelopmentPath $moon
     Wait-GameFocus $game $true
     if ((Query-GameFixture games).sessions.([string]$game).source -ne 'manual') {throw 'The manual session did not target the focused game.'}
