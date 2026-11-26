@@ -33,6 +33,8 @@ pub(crate) type Overrides = BTreeMap<WindowId, (Identity, bool)>;
 pub struct Tracker {
     pub power: bool,
     last_app: Option<(WindowId, Identity)>,
+    pub desktop: Option<(WindowId, u32)>,
+    pub observed_foreground: Option<WindowId>,
     last_game: Option<WindowId>,
     pub(crate) manual: Overrides,
     leaving_fullscreen: BTreeMap<WindowId, Instant>,
@@ -50,6 +52,9 @@ impl Tracker {
     }
     pub fn forget(&mut self, id: WindowId) {
         self.manual.remove(&id);
+        if self.desktop.is_some_and(|(h, _)| h == id) {
+            self.desktop = None;
+        }
         self.leaving_fullscreen.remove(&id);
         if self.last_app.is_some_and(|(app, _)| app == id) {
             self.last_app = None;
@@ -98,6 +103,7 @@ impl Tracker {
         native: Option<(WindowId, MonitorId)>,
         only: Option<&str>,
     ) -> Games {
+        self.observed_foreground = foreground;
         self.manual.retain(|id, (who, _)| who.live(*id));
         // Ordinary foreground location and title events do not need process
         // metadata again when no recognition input can start a session.
@@ -246,7 +252,12 @@ impl Tracker {
                         source,
                     },
                 );
+            } else {
+                self.desktop = Some((info.id, who.pid));
             }
+        }
+        if self.desktop.is_some_and(|(id, _)| games.sessions.contains_key(&id)) {
+            self.desktop = None;
         }
         if let Some(id) = games.foreground {
             self.last_game = Some(id);

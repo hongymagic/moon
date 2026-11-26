@@ -98,7 +98,7 @@ function Query-GameFixture([string]$Name) {Invoke-MoonRpc -Method query -Query $
 function Wait-GameFocus([long]$Expected,[bool]$Playing) {
     Wait-MoonCondition -Description "foreground $Expected with game input $Playing" -Condition {
         $g=Query-GameFixture games
-        [MoonTestForeground]::GetForegroundWindow().ToInt64() -eq $Expected -and
+        [MoonTestForeground]::GetForegroundWindow().ToInt64() -eq $Expected -and $g.observed_foreground -eq $Expected -and
             $(if($Playing) {$g.foreground -eq $game} else {$null -eq $g.foreground})
     }
 }
@@ -122,6 +122,8 @@ $helper=$null
 $owned=0
 $checks=[Collections.Generic.List[string]]::new()
 $skip=$null
+$observed=$null
+$errorMessage=$null
 function Passed([string]$Name) {$checks.Add($Name);Write-Host "PASS $Name"}
 try {
     $start=[Diagnostics.ProcessStartInfo]::new()
@@ -176,7 +178,11 @@ try {
     Passed 'Pass every key releases the emergency hotkey during play and restores it on the desktop'
     Passed 'Two separate native Alt+Tab presses take focus from game to desktop and back'
     [MoonGameFixture]::Chord($game,$helper.Id,9,$false)
-    Wait-GameFocus $desktop $false
+    # The first desktop chord can arrive before the daemon receives the
+    # switcher's foreground event. Wait only for Windows to grant focus.
+    Wait-MoonCondition -Description 'desktop receives native foreground' -Condition {
+        [MoonTestForeground]::GetForegroundWindow().ToInt64() -eq $desktop
+    }
     [MoonGameFixture]::Chord($desktop,$helper.Id,0xbd,$false)
     Wait-MoonCondition -Description 'ordinary Moon shortcut works on the desktop' -Condition {(Query-GameFixture world).paused}
     $null=Invoke-MoonRpc -Method command -Commands @('pause') -DevelopmentPath $moon
@@ -215,6 +221,23 @@ try {
             @(Query-GameFixture windows | Where-Object id -eq $desktop).Count -eq 1
     }
     Passed 'Closing the game restores the desktop workspace, bar and shortcuts'
+} catch {
+    $errorMessage=$_.Exception.Message
+    if ($owned) {
+        try {
+            $stats=Query-GameFixture stats
+            $observed=[ordered]@{
+                game=$game;desktop=$desktop;foreground=[MoonTestForeground]::GetForegroundWindow().ToInt64()
+                tracked=(Query-GameFixture games);paused=$stats.paused;last_error=$stats.last_error
+                bindings=@((Query-GameFixture shortcuts).bindings | Where-Object chord -eq 'alt+minus')
+                key_counts=[MoonGameFixture]::KeyCounts($desktop)
+                recent_transactions=@($stats.recent_transactions | Select-Object -Last 12)
+                commands_dispatched=@($stats.key_to_dispatch_us).Count
+            }
+            Write-Host ($observed | ConvertTo-Json -Depth 6 -Compress)
+        } catch { Write-Host ('Could not sample the failed fixture: '+$_.Exception.Message) }
+    }
+    throw
 } finally {
     try {
         if ($owned) {
@@ -229,6 +252,6 @@ try {
         if ([IO.File]::Exists($config)) {[IO.File]::Delete($config)}
         [IO.Directory]::Delete($folder)
         [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($ReportPath))) | Out-Null
-        [IO.File]::WriteAllText($ReportPath,([ordered]@{passed=@($checks.ToArray());skipped=$skip} | ConvertTo-Json))
+        [IO.File]::WriteAllText($ReportPath,([ordered]@{passed=@($checks.ToArray());skipped=$skip;error=$errorMessage;observed=$observed} | ConvertTo-Json -Depth 7))
     }
 }

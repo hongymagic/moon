@@ -43,7 +43,7 @@ pub struct HookBinding {
 #[derive(Clone, Debug)]
 pub enum PlatformEvent {
     Window { kind: u32, id: WindowId },
-    Commands { commands: Arc<[String]>, received: std::time::Instant },
+    Commands { commands: Arc<[String]>, received: std::time::Instant, foreground: Option<WindowId> },
     EmergencyRestore,
     HookError(String),
     System(SystemEvent),
@@ -75,6 +75,7 @@ struct Binding {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct GameInput {
     pub foreground: Option<WindowId>,
+    pub desktop: Option<(WindowId, u32)>,
     pub playing: bool,
     pub session: bool,
     pub release_emergency: bool,
@@ -82,21 +83,33 @@ pub struct GameInput {
 impl GameInput {
     pub fn new(
         foreground: Option<WindowId>,
+        desktop: Option<(WindowId, u32)>,
         games: &moon_core::gaming::Games,
         pass_every_key: bool,
     ) -> Self {
         let playing = games.foreground.is_some();
         Self {
             foreground,
+            desktop: desktop.filter(|(id, _)| !games.sessions.contains_key(id)),
             playing,
             session: !games.sessions.is_empty(),
             release_emergency: playing && pass_every_key,
         }
     }
     fn forwards(self, foreground: Option<WindowId>, key: u32, modifiers: u8) -> bool {
-        self.playing
-            || foreground != self.foreground
-            || (self.session && moon_core::config::KeyChord { key, modifiers }.is_task_switch())
+        if self.session && (moon_core::config::KeyChord { key, modifiers }).is_task_switch() {
+            return true;
+        }
+        if foreground == self.foreground {
+            return self.playing;
+        }
+        // The switcher can hand input back before its WinEvent is delivered.
+        // Only the previously classified desktop HWND and owner may use Moon
+        // bindings in that interval. All unknown foregrounds own their keys.
+        !self.session
+            || !self.desktop.is_some_and(|(id, pid)| {
+                foreground == Some(id) && crate::platform::process_id(id) == pid
+            })
     }
 }
 type SharedGameInput = Arc<RwLock<Option<GameInput>>>;
@@ -634,6 +647,7 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
                     commands: Arc<[String]>,
                     sender: Sender<PlatformEvent>,
                     received: std::time::Instant,
+                    foreground: Option<WindowId>,
                 },
             }
             let matching_started = std::time::Instant::now();
@@ -666,10 +680,11 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
                     .iter()
                     .find(|binding| binding.key == key && binding.modifiers == modifiers)
                 {
+                    let foreground = crate::platform::foreground();
                     let forwards = match state.game.try_read() {
-                        Ok(game) => game.is_some_and(|policy| {
-                            policy.forwards(crate::platform::foreground(), key, modifiers)
-                        }),
+                        Ok(game) => {
+                            game.is_some_and(|policy| policy.forwards(foreground, key, modifiers))
+                        }
                         Err(_) => true,
                     };
                     if forwards {
@@ -682,6 +697,7 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
                         commands: binding.commands.clone(),
                         sender: state.sender.clone(),
                         received: std::time::Instant::now(),
+                        foreground,
                     }
                 } else if was_swallowed {
                     Match::Swallow
@@ -692,7 +708,15 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
             MATCHING_LATENCY.record(matching_started.elapsed());
             match matched {
                 Match::Swallow => return LRESULT(1),
-                Match::Command { key, alt, was_swallowed, commands, sender, received } => {
+                Match::Command {
+                    key,
+                    alt,
+                    was_swallowed,
+                    commands,
+                    sender,
+                    received,
+                    foreground,
+                } => {
                     // SendInput can reenter the callback. No State borrow is
                     // held, and masking precedes both modifier release and any
                     // focus change caused by the queued command.
@@ -708,7 +732,10 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
                             "Windows refused the internal Alt mask; shortcut was not executed"
                                 .into(),
                         ));
-                    } else if sender.send(PlatformEvent::Commands { commands, received }).is_ok() {
+                    } else if sender
+                        .send(PlatformEvent::Commands { commands, received, foreground })
+                        .is_ok()
+                    {
                         STATE.with(|cell| {
                             if let Some(state) = cell.borrow_mut().as_mut() {
                                 state.swallowed.insert(key);
@@ -1147,6 +1174,9 @@ impl Hooks {
         Ok(Self { id, pending, pointer, game, thread: Some(thread) })
     }
     pub fn set_game_input(&self, policy: GameInput) -> Result<()> {
+        if *self.game.read().unwrap_or_else(|e| e.into_inner()) == Some(policy) {
+            return Ok(());
+        }
         let previous = self.game.write().unwrap_or_else(|e| e.into_inner()).replace(policy);
         if previous.is_some_and(|p| p.release_emergency) != policy.release_emergency {
             unsafe {
@@ -1298,7 +1328,7 @@ mod tests {
         let game = Some(WindowId(100));
         let desktop = Some(WindowId(200));
         let playing =
-            GameInput { foreground: game, playing: true, session: true, release_emergency: false };
+            GameInput { foreground: game, playing: true, session: true, ..Default::default() };
         let away = GameInput { foreground: desktop, playing: false, ..playing };
         for modifiers in [1, 3] {
             assert!(playing.forwards(game, VK_TAB.0.into(), modifiers));
@@ -1312,6 +1342,16 @@ mod tests {
         assert!(playing.forwards(game, VK_LEFT.0.into(), 1));
         assert!(!away.forwards(desktop, VK_LEFT.0.into(), 1));
         assert!(away.forwards(game, VK_LEFT.0.into(), 1));
+        let known = window_id(unsafe { GetDesktopWindow() });
+        let pid = crate::platform::process_id(known);
+        let cached = GameInput { desktop: Some((known, pid)), ..playing };
+        assert!(!cached.forwards(Some(known), VK_LEFT.0.into(), 1));
+        assert!(cached.forwards(Some(known), VK_TAB.0.into(), 1));
+        assert!(GameInput { desktop: Some((known, pid.wrapping_add(1))), ..playing }.forwards(
+            Some(known),
+            VK_LEFT.0.into(),
+            1
+        ));
     }
 
     #[test]

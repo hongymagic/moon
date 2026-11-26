@@ -402,8 +402,12 @@ pub fn run(options: Options) -> Result<()> {
                     Intake::Platform(PlatformEvent::Window { kind, id }) => {
                         changed.push((id, kind));
                     }
-                    Intake::Platform(PlatformEvent::Commands { commands, received }) => {
-                        let shortcut = Shortcut { commands, received };
+                    Intake::Platform(PlatformEvent::Commands {
+                        commands,
+                        received,
+                        foreground,
+                    }) => {
+                        let shortcut = Shortcut { commands, received, foreground };
                         if workspace_shortcuts::is_absolute_workspace(
                             &daemon.world.config,
                             &shortcut.commands,
@@ -551,11 +555,23 @@ pub fn run(options: Options) -> Result<()> {
 
 impl Daemon {
     fn dispatch_shortcut(&mut self, shortcut: Shortcut) {
-        if self.session_suspended
-            || self.world.games.foreground.is_some()
-            || shortcut.received < self.input_changed
-        {
+        if self.session_suspended {
             return;
+        }
+        if !self.world.games.sessions.is_empty() || shortcut.received < self.input_changed {
+            let foreground = platform::foreground();
+            if foreground != shortcut.foreground {
+                return;
+            }
+            if self.gaming.observed_foreground != foreground
+                && let Err(error) = self.sync_native_fullscreen()
+            {
+                self.report(error);
+                return;
+            }
+            if self.world.games.foreground.is_some() {
+                return;
+            }
         }
         if self.pending_input.len() == 256 {
             self.pending_input.pop_front();
@@ -714,7 +730,11 @@ impl Daemon {
         let reduce_us = started.elapsed().as_micros();
         if transition.world.games != self.world.games {
             self.input_changed = Instant::now();
-            self.workspace_shortcuts.clear();
+            if transition.world.games.foreground.is_some()
+                && transition.world.games.foreground != self.world.games.foreground
+            {
+                self.workspace_shortcuts.clear();
+            }
         }
         let carousel = self.carousel_transitions(&transition.world, &transition.plan, kind);
         let journal_started = Instant::now();
@@ -1161,6 +1181,7 @@ impl Daemon {
         let foreground = platform::foreground();
         let native = platform::fullscreen_at(foreground)?;
         transition.world.native_fullscreen = native;
+        self.gaming.desktop = None;
         transition.world.games = self.gaming.observe(
             &transition.world,
             foreground,
@@ -1173,6 +1194,7 @@ impl Daemon {
             transition.plan.focus.filter(|id| effective_plan.focus == Some(*id));
         self.hooks.set_game_input(hooks::GameInput::new(
             foreground,
+            self.gaming.desktop,
             &transition.world.games,
             transition.world.config.gaming.pass_every_key,
         ))?;
@@ -1217,6 +1239,7 @@ impl Daemon {
                 }
                 self.hooks.set_game_input(hooks::GameInput::new(
                     None,
+                    self.gaming.desktop,
                     &games,
                     self.world.config.gaming.pass_every_key,
                 ))?;
@@ -1440,6 +1463,7 @@ impl Daemon {
             self.gaming.observe(&self.world, foreground, native, self.options.only.as_deref());
         self.hooks.set_game_input(hooks::GameInput::new(
             foreground,
+            self.gaming.desktop,
             &games,
             self.world.config.gaming.pass_every_key,
         ))?;
@@ -1583,7 +1607,9 @@ impl Daemon {
     fn query(&self, query: &str) -> Result<Value> {
         Ok(match query {
             "world" => serde_json::to_value(&self.world)?,
-            "games" => serde_json::to_value(&self.world.games)?,
+            "games" => {
+                json!({"foreground": self.world.games.foreground, "sessions":self.world.games.sessions, "observed_foreground": self.gaming.observed_foreground})
+            }
             "windows" => serde_json::to_value(self.world.plan().placements)?,
             "monitors" => serde_json::to_value(&self.world.monitors)?,
             "config" => serde_json::to_value(&self.world.config)?,

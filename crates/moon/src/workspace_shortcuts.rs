@@ -11,6 +11,7 @@ const FRAME: Duration = Duration::from_millis(16);
 pub struct Shortcut {
     pub commands: Arc<[String]>,
     pub received: Instant,
+    pub foreground: Option<moon_core::ids::WindowId>,
 }
 
 #[derive(Default)]
@@ -70,7 +71,7 @@ mod tests {
     };
 
     fn shortcut(name: &str, received: Instant) -> Shortcut {
-        Shortcut { commands: vec![format!("workspace {name}")].into(), received }
+        Shortcut { commands: vec![format!("workspace {name}")].into(), received, foreground: None }
     }
     fn apply(world: &mut World, shortcut: Shortcut) {
         for text in shortcut.commands.iter() {
@@ -133,12 +134,15 @@ mod tests {
         assert_eq!(world.focused, Some(WindowId(2)));
         for n in 1..=128 {
             let received = start + Duration::from_micros(n * 100);
-            queue.submit(shortcut(if n % 2 == 0 { "1" } else { "2" }, received));
+            let mut key = shortcut(if n % 2 == 0 { "1" } else { "2" }, received);
+            key.foreground = Some(WindowId(n));
+            queue.submit(key);
             assert!(queue.take_due(received).is_none());
         }
         assert_eq!(queue.wait_ms(start + Duration::from_millis(15)), Some(1));
         let latest = queue.take_due(start + FRAME).unwrap();
         assert_eq!(latest.received, start + Duration::from_micros(12800));
+        assert_eq!(latest.foreground, Some(WindowId(128)));
         apply(&mut world, latest);
         assert_eq!(world.revision, leading_revision + 1);
         assert_eq!(world.current_workspace(), WorkspaceId(0));
