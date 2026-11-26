@@ -473,6 +473,28 @@ try {
     Assert-Placements
     Record-Pass 'minimize restores the same tree slot'
 
+    $beforeTray=@(Invoke-Moon query windows | Sort-Object id)
+    $beforeTrayLayout=$beforeTray | ConvertTo-Json -Depth 8 -Compress
+    $trayId=[long](Invoke-Moon query world).focused
+    if ([MoonIntegrationNative]::Owner($trayId) -ne $helper.Id) { throw 'Expected an owned helper for the tray-close check.' }
+    # Chromium hides its top-level HWND with SWP_HIDEWINDOW, retaining the process and window.
+    $keepFrame=0x0001 -bor 0x0002 -bor 0x0004 -bor 0x0010 # NOSIZE, NOMOVE, NOZORDER, NOACTIVATE
+    if (![MoonIntegrationNative]::SetWindowPos([IntPtr]$trayId,[IntPtr]::Zero,0,0,0,0,($keepFrame -bor 0x0080))) { throw 'Could not hide the tray-close helper.' }
+    Wait-Until -Description 'tray-hidden window releases its tile while its handle is alive' -Condition {
+        $placements=@(Invoke-Moon query windows)
+        [MoonIntegrationNative]::Owner($trayId) -eq $helper.Id -and ![MoonIntegrationNative]::IsWindowVisible([IntPtr]$trayId) -and
+            (Invoke-Moon query world).windows."$trayId".suspended -and $placements.Count -eq ($beforeTray.Count-1) -and $trayId -notin $placements.id
+    }
+    Assert-Placements
+    if ([MoonIntegrationNative]::Owner($trayId) -ne $helper.Id) { throw 'The tray-close helper lost its original window.' }
+    if (![MoonIntegrationNative]::SetWindowPos([IntPtr]$trayId,[IntPtr]::Zero,0,0,0,0,($keepFrame -bor 0x0040))) { throw 'Could not show the tray-close helper.' }
+    Wait-Until -Description 'reopening the same window restores the original tiles' -Condition {
+        [MoonIntegrationNative]::IsWindowVisible([IntPtr]$trayId) -and
+            ((@(Invoke-Moon query windows | Sort-Object id) | ConvertTo-Json -Depth 8 -Compress) -eq $beforeTrayLayout)
+    }
+    Assert-Placements
+    Record-Pass 'close to tray releases the tile and reopening restores the same window and layout'
+
     $orderedTiles=@(Invoke-Moon query windows | Where-Object visible | Sort-Object {$_.rect.x})
     $focusSource=$orderedTiles[-1].id
     $foregroundAvailable=Try-Set-MoonTestForeground $focusSource $helper.Id
