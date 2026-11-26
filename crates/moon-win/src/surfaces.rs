@@ -1862,6 +1862,14 @@ impl Surfaces {
     pub fn drain_commands(&self) -> Vec<String> {
         self.commands.lock().map(|mut commands| std::mem::take(&mut *commands)).unwrap_or_default()
     }
+    pub fn hide_bars(&mut self) {
+        // Dropping the canvases destroys the windows and releases their AppBar reservations.
+        self.bars.clear();
+        if let Some(previous) = &mut self.previous {
+            // Recreated bars need a fresh draw even when their content is unchanged.
+            previous.bars.clear();
+        }
+    }
     pub fn update(
         &mut self,
         world: &World,
@@ -2696,6 +2704,34 @@ mod tests {
             opacity: 0.6,
             backdrop: "mica".into(),
         }
+    }
+
+    #[test]
+    fn hiding_bars_destroys_every_window_and_clears_the_cached_bars() {
+        let _apartment = crate::platform::Apartment::new().unwrap();
+        let mut surfaces = Surfaces::new().unwrap();
+        let mut scene = Scene::default();
+        let windows = [MonitorId(1), MonitorId(2)].map(|monitor| {
+            let mut bar = bar_fixture(Vec::new());
+            bar.monitor = monitor;
+            // Create hidden bar windows so the test leaves the work area alone.
+            let canvas =
+                Canvas::new(&surfaces.graphics, bar.rect, false, surfaces.commands.clone())
+                    .unwrap();
+            let hwnd = canvas.hwnd;
+            surfaces.bars.insert(monitor, canvas);
+            scene.bars.push(bar);
+            hwnd
+        });
+        surfaces.previous = Some(scene);
+
+        surfaces.hide_bars();
+
+        for hwnd in windows {
+            assert!(!unsafe { IsWindow(Some(hwnd)) }.as_bool());
+        }
+        assert!(surfaces.bars.is_empty());
+        assert!(surfaces.previous.as_ref().unwrap().bars.is_empty());
     }
 
     #[test]
