@@ -186,13 +186,8 @@ try {
     [MoonGameFixture]::Chord($desktop,$helper.Id,0xbd,$false)
     Wait-MoonCondition -Description 'ordinary Moon shortcut works on the desktop' -Condition {(Query-GameFixture world).paused}
     $null=Invoke-MoonRpc -Method command -Commands @('pause') -DevelopmentPath $moon
-    [MoonGameFixture]::Chord($desktop,$helper.Id,9,$true)
-    Wait-MoonCondition -Description 'Windows reverse switcher moved focus' -Condition {
-        $current=[MoonTestForeground]::GetForegroundWindow().ToInt64()
-        $current -ne 0 -and $current -ne $desktop
-    }
-    Passed 'Desktop shortcuts resume while Alt+Shift+Tab still reaches Windows'
-    if (!(Try-Set-MoonTestForeground $game $helper.Id)) {throw 'Windows did not reactivate the game before close.'}
+    Passed 'The first desktop binding works after the native switch'
+    [MoonGameFixture]::Chord($desktop,$helper.Id,9,$false)
     Wait-GameFocus $game $true
     $null=Invoke-MoonRpc -Method command -Commands @('game-mode end') -DevelopmentPath $moon
     Wait-GameFocus $game $false
@@ -211,6 +206,16 @@ try {
     Wait-GameFocus $game $true
     if ((Query-GameFixture games).sessions.([string]$game).source -ne 'manual') {throw 'The manual session did not target the focused game.'}
     Passed 'Ending and restarting game mode overrides an Always rule for this instance'
+    if (!(Try-Set-MoonTestForeground $desktop $helper.Id)) {throw 'The foreground game fixture could not activate its own desktop window.'}
+    Wait-GameFocus $desktop $false
+    [MoonGameFixture]::Chord($desktop,$helper.Id,9,$true)
+    Wait-MoonCondition -Description 'Windows reverse switcher moved focus' -Condition {
+        $current=[MoonTestForeground]::GetForegroundWindow().ToInt64()
+        $current -ne 0 -and $current -ne $desktop
+    }
+    Passed 'Alt+Shift+Tab still reaches the Windows reverse switcher from the desktop'
+    # Windows may select a third app when switching in reverse. Close only our
+    # verified game HWND without trying to take foreground back from that app.
     if (![MoonTestForeground]::Request($game,$helper.Id,0x10,0)) {
         # WM_CLOSE normally returns zero even on success.
         Wait-MoonCondition -Description 'game window closed' -Condition {![MoonGameFixture]::Window('moon test window 1',$helper.Id)}
